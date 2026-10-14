@@ -403,9 +403,7 @@ defmodule NxCL.Backend do
                      :real,
                      :imag,
                      :is_nan,
-                     :is_infinity,
-                     :logical_not,
-                     :phase
+                     :is_infinity
                    ]
 
   @fallback_unary_ops @all_unary_ops -- Map.keys(@gpu_unary_ops)
@@ -559,8 +557,9 @@ defmodule NxCL.Backend do
     fallback(:triangular_solve, [out, a, b, opts])
   end
 
+  # Nx 1.0 callback: run the block's default implementation.
   @impl true
-  def lu(out, tensor, opts), do: fallback(:lu, [out, tensor, opts])
+  def block(struct, _out, args, fun), do: apply(fun, [struct | args])
 
   @impl true
   def from_pointer(_out, _pointer, _backend_opts, _offset, _byte_size) do

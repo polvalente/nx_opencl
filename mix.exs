@@ -61,8 +61,8 @@ defmodule NxOpencl.MixProject do
 
   defp deps do
     [
-      {:nx, "~> 0.9"},
-      {:axon, "~> 0.7", only: [:test]},
+      {:nx, "~> 1.0"},
+      {:axon, "~> 0.9", only: [:test]},
       {:rustler, "~> 0.36"},
       {:nstandard, "~> 0.1"},
       {:igniter, "~> 0.6", only: [:dev, :test]},
