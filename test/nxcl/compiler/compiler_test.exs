@@ -1,6 +1,6 @@
 defmodule NxCL.CompilerTest do
   @moduledoc """
-  Full compiler round-trip tests: trace → flatten → execute → verify.
+  Full compiler round-trip tests: trace → lower → execute → verify.
   Compares compiled results against `Nx.Defn.Evaluator` on the binary backend
   through `NxCL.Parity`, which also records the passing cells.
   """
@@ -151,6 +151,66 @@ defmodule NxCL.CompilerTest do
         fn x, y -> Nx.add(x, y) end,
         [Nx.tensor([1, 2, 3], type: :s32), Nx.tensor([10, 20, 30], type: :s32)]
       )
+    end
+  end
+
+  describe "containers" do
+    test "a tuple with a nested map keeps its shape" do
+      assert_parity(
+        :exp,
+        fn x -> {Nx.exp(x), %{b: Nx.negate(x)}} end,
+        [Nx.tensor([0.0, 1.0])],
+        record: false
+      )
+    end
+
+    test "an output that is an argument passes through" do
+      assert_parity(:exp, fn x -> {x, Nx.exp(x)} end, [Nx.tensor([0.0, 1.0])], record: false)
+    end
+
+    test "container arguments" do
+      assert_parity(
+        :add,
+        fn %{a: a, b: b} -> Nx.add(a, b) end,
+        [%{a: Nx.tensor([1.0, 2.0]), b: Nx.tensor([3.0, 4.0])}],
+        record: false
+      )
+    end
+
+    test "an ignored first argument keeps the input positions" do
+      assert_parity(
+        :exp,
+        fn _a, b -> Nx.exp(b) end,
+        [Nx.tensor([1.0, 2.0]), Nx.tensor([0.0, 1.0])],
+        record: false
+      )
+    end
+
+    test "names survive" do
+      assert_parity(
+        :exp,
+        fn x -> Nx.exp(x) end,
+        [Nx.iota({2, 2}, type: :f32, names: [:r, :c])],
+        record: false
+      )
+    end
+  end
+
+  describe "errors" do
+    test "a non-f32 input raises NxCL.CompilerError" do
+      jitted = Nx.Defn.jit(fn x -> Nx.negate(x) end, compiler: NxCL.Compiler)
+
+      assert_raise NxCL.CompilerError, ~r/not supported until stage 04/, fn ->
+        jitted.(Nx.tensor([1, 2], type: :s32))
+      end
+    end
+
+    test "an unsupported op raises ArgumentError when compiled" do
+      jitted = Nx.Defn.jit(fn x -> Nx.sin(x) end, compiler: NxCL.Compiler)
+
+      assert_raise ArgumentError, ~r/^does not yet lower op/, fn ->
+        jitted.(Nx.tensor([1.0]))
+      end
     end
   end
 
