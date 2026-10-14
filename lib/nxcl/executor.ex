@@ -6,18 +6,21 @@ defmodule NxCL.Executor do
   #
   # Wire term sent to `NxCL.Native.compile_program/2`:
   #
-  #     {n_inputs, n_captures, n_consts, [instr], [out_ref]}
-  #     instr = {op, [ref], out_bytes, [attr]}
+  #     {[input], [capture], [const], [instr], [out_ref]}
+  #     input = {type, shape} | nil        (nil: the function never reads it)
+  #     capture = {type, shape}
+  #     const = {type, value}              (value: a number, :nan, :infinity, :neg_infinity)
+  #     instr = {op, [ref], out_type, out_shape, [attr]}
   #     ref = {:input | :capture | :const | :result, index}
   #
   # A `dot` carries `[m, n, k]` as attrs. Buffers go to `eval_program/2` in the
-  # order inputs, captures, constants.
+  # order inputs, captures, constants; constants go as `nil`, because Rust holds
+  # their values. The native side generates the kernel for each instruction from
+  # the op, the types and the shapes.
 
   alias Nx.Defn.Composite
   alias NxCL.Program
   alias NxCL.Program.Instruction
-
-  @f32 {:f, 32}
 
   @doc """
   Runs `program` on `args`, the flat list of lazy argument functions that
@@ -26,7 +29,6 @@ defmodule NxCL.Executor do
   @spec run(Program.t(), [(-> Nx.Tensor.t())]) :: Nx.Container.t()
   def run(%Program{} = program, args) do
     ctx = ctx()
-    check_types!(program)
     native = compiled(ctx, program)
 
     inputs =
@@ -39,10 +41,7 @@ defmodule NxCL.Executor do
 
     captures = Enum.map(program.captures, &upload(ctx, &1))
 
-    consts =
-      Enum.map(program.constants, fn {value, type} ->
-        upload(ctx, Nx.tensor(value, type: type))
-      end)
+    consts = Enum.map(program.constants, fn _ -> nil end)
 
     outputs =
       case NxCL.Native.eval_program(native, inputs ++ captures ++ consts) do
@@ -90,7 +89,8 @@ defmodule NxCL.Executor do
   """
   @spec encode(Program.t()) :: tuple()
   def encode(%Program{} = program) do
-    {length(program.inputs), length(program.captures), length(program.constants),
+    {Enum.map(program.inputs, &encode_slot/1), Enum.map(program.captures, &{&1.type, &1.shape}),
+     Enum.map(program.constants, &encode_const/1),
      Enum.map(program.instructions, &encode_instruction/1), program.outputs}
   end
 
@@ -116,40 +116,26 @@ defmodule NxCL.Executor do
     end
   end
 
+  defp encode_slot(nil), do: nil
+  defp encode_slot({type, shape}), do: {type, shape}
+
+  defp encode_const({value, type})
+       when is_number(value) or value in [:nan, :infinity, :neg_infinity],
+       do: {type, value}
+
+  defp encode_const({value, type}) do
+    raise NxCL.CompilerError,
+      message: "constant #{inspect(value)} of type #{inspect(type)} is not supported yet"
+  end
+
   defp encode_instruction(%Instruction{op: :dot} = instr) do
     {m, n} = instr.out_shape
     [k] = instr.attrs
-    {:dot, instr.operands, out_bytes(instr), [m, n, k]}
+    {:dot, instr.operands, instr.out_type, instr.out_shape, [m, n, k]}
   end
 
   defp encode_instruction(%Instruction{} = instr),
-    do: {instr.op, instr.operands, out_bytes(instr), instr.attrs}
-
-  defp out_bytes(%Instruction{out_type: {_, bits}, out_shape: shape}),
-    do: Nx.size(shape) * div(bits, 8)
+    do: {instr.op, instr.operands, instr.out_type, instr.out_shape, instr.attrs}
 
   defp upload(ctx, tensor), do: NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
-
-  # Every dtype but f32 waits for stage 04.
-  defp check_types!(%Program{} = program) do
-    for {type, _shape} <- Enum.reject(program.inputs, &is_nil/1),
-        do: check_type!(type, "input")
-
-    for {_value, type} <- program.constants, do: check_type!(type, "constant")
-    for t <- program.captures, do: check_type!(t.type, "captured tensor")
-
-    for instr <- program.instructions,
-        do: check_type!(instr.out_type, "result of #{inspect(instr.op)}")
-
-    for t <- Composite.flatten_list([program.output_template]), do: check_type!(t.type, "output")
-    :ok
-  end
-
-  defp check_type!(@f32, _what), do: :ok
-
-  defp check_type!(type, what) do
-    raise NxCL.CompilerError,
-      message:
-        "dtype #{inspect(type)} is not supported until stage 04 (NxCL.Compiler runs f32 only; got it in #{what})"
-  end
 end

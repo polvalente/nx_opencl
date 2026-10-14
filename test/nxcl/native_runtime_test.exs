@@ -24,7 +24,11 @@ defmodule NxCL.NativeRuntimeTest do
 
   defp read(buf, n), do: buf |> Native.buffer_read(n * 4) |> NxCL.TestHelpers.binary_to_floats()
 
-  defp wire(instrs, outputs, n_inputs \\ 1), do: {n_inputs, 0, 0, instrs, outputs}
+  # `shape` is the shape of every input; the tests use f32 vectors.
+  defp wire(instrs, outputs, n_inputs \\ 1, shape \\ {3}),
+    do: {List.duplicate({@f32, shape}, n_inputs), [], [], instrs, outputs}
+
+  defp instr(op, operands, shape, attrs \\ []), do: {op, operands, @f32, shape, attrs}
 
   defp run!(ctx, wire, buffers) do
     {:ok, program} = Native.compile_program(ctx, wire)
@@ -47,7 +51,7 @@ defmodule NxCL.NativeRuntimeTest do
       ctx = Native.device_ctx_create(0)
       x = upload(ctx, [1.0, 2.0, 3.0])
 
-      instrs = [{:negate, [{:input, 0}], 12, []}, {:add, [{:input, 0}, {:result, 0}], 12, []}]
+      instrs = [instr(:negate, [{:input, 0}], {3}), instr(:add, [{:input, 0}, {:result, 0}], {3})]
       [a, b] = run!(ctx, wire(instrs, [{:result, 0}, {:result, 1}]), [x])
 
       assert read(a, 3) == [-1.0, -2.0, -3.0]
@@ -58,7 +62,7 @@ defmodule NxCL.NativeRuntimeTest do
       ctx = Native.device_ctx_create(0)
       x = upload(ctx, [4.0, 5.0])
 
-      [out] = run!(ctx, wire([], [{:input, 0}]), [x])
+      [out] = run!(ctx, wire([], [{:input, 0}], 1, {2}), [x])
       assert read(out, 2) == [4.0, 5.0]
       assert read(x, 2) == [4.0, 5.0]
     end
@@ -67,8 +71,12 @@ defmodule NxCL.NativeRuntimeTest do
       ctx = Native.device_ctx_create(0)
       x = upload(ctx, [1.0, 2.0])
 
-      instrs = [{:negate, [{:input, 0}], 8, []}, {:reshape, [{:result, 0}], 8, [:alias]}]
-      outs = run!(ctx, wire(instrs, [{:result, 0}, {:result, 0}, {:result, 1}]), [x])
+      instrs = [
+        instr(:negate, [{:input, 0}], {2}),
+        instr(:reshape, [{:result, 0}], {2}, [:alias])
+      ]
+
+      outs = run!(ctx, wire(instrs, [{:result, 0}, {:result, 0}, {:result, 1}], 1, {2}), [x])
 
       assert Enum.map(outs, &read(&1, 2)) == List.duplicate([-1.0, -2.0], 3)
     end
@@ -77,8 +85,8 @@ defmodule NxCL.NativeRuntimeTest do
       ctx = Native.device_ctx_create(0)
       x = upload(ctx, [1.0])
 
-      instrs = [{:exp, [{:input, 1}], 4, []}]
-      [out] = run!(ctx, wire(instrs, [{:result, 0}], 2), [nil, x])
+      instrs = [instr(:exp, [{:input, 1}], {1})]
+      [out] = run!(ctx, wire(instrs, [{:result, 0}], 2, {1}), [nil, x])
       assert_in_delta hd(read(out, 1)), :math.exp(1.0), 1.0e-5
     end
 
@@ -86,14 +94,14 @@ defmodule NxCL.NativeRuntimeTest do
       ctx = Native.device_ctx_create(0)
       x = upload(ctx, [1.0, 2.0, 3.0])
 
-      instr =
+      launch =
         Builder.launch([{:input, 0}], @f32, {3}, @add_one, "add_one",
           global: [64],
           local: [64],
           scalars: [3]
         )
 
-      encoded = {instr.op, instr.operands, 12, instr.attrs}
+      encoded = {launch.op, launch.operands, @f32, {3}, launch.attrs}
 
       [out] = run!(ctx, wire([encoded], [{:result, 0}]), [x])
       assert read(out, 3) == [2.0, 3.0, 4.0]
@@ -107,18 +115,34 @@ defmodule NxCL.NativeRuntimeTest do
     end
 
     test "return an error term and leave the VM up", %{ctx: ctx} do
+      i1 = fn op, ops, attrs -> {op, ops, @f32, {1}, attrs} end
+      prog = fn instrs, outs -> {[{@f32, {1}}], [], [], instrs, outs} end
+      out0 = [{:result, 0}]
+
       bad = [
         :not_a_program,
-        {1, 0, 0, [{:frobnicate, [{:input, 0}], 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:negate, [{:input, 5}], 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:negate, [{:result, 0}], 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:negate, [{:carry, 0}], 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:negate, [{:weird, 0}], 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:negate, [{:input, 0}], 4, []}], [{:result, 3}]},
-        {1, 0, 0, [{:add, [{:input, 0}], 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:negate, :oops, 4, []}], [{:result, 0}]},
-        {1, 0, 0, [{:launch, [{:input, 0}], 4, [<<"not C">>, "k", "", 1, 1, 0]}], [{:result, 0}]},
-        {1, 0, 0, [{:launch, [{:input, 0}], 4, [1, 2]}], [{:result, 0}]}
+        prog.([i1.(:frobnicate, [{:input, 0}], [])], out0),
+        prog.([i1.(:negate, [{:input, 5}], [])], out0),
+        prog.([i1.(:negate, [{:result, 0}], [])], out0),
+        prog.([i1.(:negate, [{:carry, 0}], [])], out0),
+        prog.([i1.(:negate, [{:weird, 0}], [])], out0),
+        prog.([i1.(:negate, [{:input, 0}], [])], [{:result, 3}]),
+        prog.([i1.(:add, [{:input, 0}], [])], out0),
+        prog.([i1.(:negate, :oops, [])], out0),
+        prog.([i1.(:launch, [{:input, 0}], [<<"not C">>, "k", "", 1, 1, 0])], out0),
+        prog.([i1.(:launch, [{:input, 0}], [1, 2])], out0),
+        # a type the table does not have, an unknown kind, a bad shape, a bad constant
+        {[{{:s, 4}, {1}}], [], [], [i1.(:negate, [{:input, 0}], [])], [{:result, 0}]},
+        {[{{:q, 8}, {1}}], [], [], [], []},
+        {[{@f32, :not_a_shape}], [], [], [], []},
+        {[], [], [{@f32, :oops}], [], []},
+        {[{@f32, {1}}], [], [], [{:negate, [{:input, 0}], {:f, 32}, {1}}], [{:result, 0}]},
+        # operands of different shapes need broadcast
+        {[{@f32, {2}}, {@f32, {3}}], [], [], [{:add, [{:input, 0}, {:input, 1}], @f32, {3}, []}],
+         [{:result, 0}]},
+        # f64 may not exist on the device; an f32 op fed an op that has no f32 form
+        {[{@f32, {1}}], [], [], [{:divide, [{:input, 0}, {:input, 0}], {:s, 32}, {1}, []}],
+         [{:result, 0}]}
       ]
 
       for wire <- bad do
@@ -127,13 +151,16 @@ defmodule NxCL.NativeRuntimeTest do
       end
 
       x = upload(ctx, [1.0])
-      [out] = run!(ctx, wire([{:negate, [{:input, 0}], 4, []}], [{:result, 0}]), [x])
+      [out] = run!(ctx, wire([instr(:negate, [{:input, 0}], {1})], [{:result, 0}], 1, {1}), [x])
       assert read(out, 1) == [-1.0]
     end
 
     test "eval rejects the wrong buffer count and a missing input", %{ctx: ctx} do
       {:ok, program} =
-        Native.compile_program(ctx, wire([{:negate, [{:input, 0}], 4, []}], [{:result, 0}]))
+        Native.compile_program(
+          ctx,
+          wire([instr(:negate, [{:input, 0}], {1})], [{:result, 0}], 1, {1})
+        )
 
       assert {:error, _} = Native.eval_program(program, [])
       assert {:error, _} = Native.eval_program(program, [nil])
@@ -146,18 +173,19 @@ defmodule NxCL.NativeRuntimeTest do
       x = upload(ctx, [1.0, 2.0])
 
       instrs = [
-        {:add, [{:input, 0}, {:input, 0}], 8, []},
-        {:exp, [{:result, 0}], 8, []},
-        {:add, [{:result, 1}, {:input, 0}], 8, []}
+        instr(:add, [{:input, 0}, {:input, 0}], {2}),
+        instr(:exp, [{:result, 0}], {2}),
+        instr(:add, [{:result, 1}, {:input, 0}], {2})
       ]
 
-      {:ok, program} = Native.compile_program(ctx, wire(instrs, [{:result, 2}]))
+      w = wire(instrs, [{:result, 2}], 1, {2})
+      {:ok, program} = Native.compile_program(ctx, w)
       assert {2, 1, 0} = Native.kernel_cache_stats(ctx)
 
       for _ <- 1..100, do: {:ok, [_]} = Native.eval_program(program, [x])
       assert {2, 1, 300} = Native.kernel_cache_stats(ctx)
 
-      {:ok, _} = Native.compile_program(ctx, wire(instrs, [{:result, 2}]))
+      {:ok, _} = Native.compile_program(ctx, w)
       assert {2, 4, 300} = Native.kernel_cache_stats(ctx)
     end
 
@@ -186,14 +214,17 @@ defmodule NxCL.NativeRuntimeTest do
       x = upload(ctx, [1.0, 2.0, 3.0, 4.0])
 
       instrs = [
-        {:negate, [{:input, 0}], 16, []},
-        {:reshape, [{:result, 0}], 16, [:alias]},
-        {:add, [{:result, 1}, {:input, 0}], 16, []},
-        {:exp, [{:result, 2}], 16, []}
+        instr(:negate, [{:input, 0}], {4}),
+        instr(:reshape, [{:result, 0}], {4}, [:alias]),
+        instr(:add, [{:result, 1}, {:input, 0}], {4}),
+        instr(:exp, [{:result, 2}], {4})
       ]
 
       {:ok, program} =
-        Native.compile_program(ctx, wire(instrs, [{:result, 3}, {:result, 0}, {:input, 0}]))
+        Native.compile_program(
+          ctx,
+          wire(instrs, [{:result, 3}, {:result, 0}, {:input, 0}], 1, {4})
+        )
 
       for _ <- 1..10_000 do
         {:ok, [_, _, _]} = Native.eval_program(program, [x])
@@ -209,9 +240,10 @@ defmodule NxCL.NativeRuntimeTest do
       start = Native.live_buffer_count(ctx)
 
       instrs =
-        for i <- 0..9, do: {:negate, [if(i == 0, do: {:input, 0}, else: {:result, i - 1})], 8, []}
+        for i <- 0..9,
+            do: instr(:negate, [if(i == 0, do: {:input, 0}, else: {:result, i - 1})], {2})
 
-      {:ok, program} = Native.compile_program(ctx, wire(instrs, [{:result, 9}]))
+      {:ok, program} = Native.compile_program(ctx, wire(instrs, [{:result, 9}], 1, {2}))
       {:ok, [out]} = Native.eval_program(program, [x])
 
       assert Native.live_buffer_count(ctx) == start + 1

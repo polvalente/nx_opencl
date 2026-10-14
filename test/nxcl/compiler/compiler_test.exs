@@ -141,10 +141,7 @@ defmodule NxCL.CompilerTest do
     end
   end
 
-  describe "known gaps" do
-    # The compiler casts every input to f32, so an s32 add returns f32.
-    # Stage 04 (native dtypes) removes this tag.
-    @tag :known_gap
+  describe "native dtypes" do
     test "s32 add keeps the s32 type" do
       assert_parity(
         :add,
@@ -197,16 +194,16 @@ defmodule NxCL.CompilerTest do
   end
 
   describe "errors" do
-    test "a non-f32 input raises NxCL.CompilerError" do
+    test "a dtype with no OpenCL type raises NxCL.CompilerError" do
       jitted = Nx.Defn.jit(fn x -> Nx.negate(x) end, compiler: NxCL.Compiler)
 
-      assert_raise NxCL.CompilerError, ~r/not supported until stage 04/, fn ->
-        jitted.(Nx.tensor([1, 2], type: :s32))
+      assert_raise NxCL.CompilerError, ~r/no OpenCL type/, fn ->
+        jitted.(Nx.tensor([1, 2], type: {:s, 4}))
       end
     end
 
     test "an unsupported op raises ArgumentError when compiled" do
-      jitted = Nx.Defn.jit(fn x -> Nx.sin(x) end, compiler: NxCL.Compiler)
+      jitted = Nx.Defn.jit(fn x -> Nx.sum(x) end, compiler: NxCL.Compiler)
 
       assert_raise ArgumentError, ~r/^does not yet lower op/, fn ->
         jitted.(Nx.tensor([1.0]))

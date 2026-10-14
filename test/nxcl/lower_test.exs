@@ -147,8 +147,8 @@ defmodule NxCL.LowerTest do
 
   describe "unsupported input" do
     test "an op that is not lowered raises with the fixed prefix" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :sin/, fn ->
-        lower(fn x -> Nx.sin(x) end, [Nx.tensor([1.0])])
+      assert_raise ArgumentError, ~r/^does not yet lower op :reverse/, fn ->
+        lower(fn x -> Nx.reverse(x) end, [Nx.tensor([1.0])])
       end
 
       assert_raise ArgumentError, ~r/^does not yet lower op :sum/, fn ->
@@ -156,9 +156,21 @@ defmodule NxCL.LowerTest do
       end
     end
 
-    test "a scalar mixed with a tensor raises (broadcast is not lowered)" do
+    test "a scalar constant mixed with a tensor lowers; a scalar tensor raises (broadcast)" do
+      program = lower(fn x -> Nx.add(x, 1.0) end, [Nx.tensor([1.0, 2.0])])
+      assert [%Instruction{op: :add, out_shape: {2}}] = program.instructions
+
       assert_raise ArgumentError, ~r/^does not yet lower op :add/, fn ->
-        lower(fn x -> Nx.add(x, 1.0) end, [Nx.tensor([1.0, 2.0])])
+        lower(fn x, s -> Nx.add(x, s) end, [Nx.tensor([1.0, 2.0]), Nx.tensor(1.0)])
+      end
+    end
+
+    test "a dot on a dtype other than f32 raises" do
+      assert_raise ArgumentError, ~r/^does not yet lower op :dot.*f32 only/, fn ->
+        lower(fn x, y -> Nx.dot(x, y) end, [
+          Nx.iota({2, 2}, type: :s32),
+          Nx.iota({2, 2}, type: :s32)
+        ])
       end
     end
 

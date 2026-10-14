@@ -17,6 +17,9 @@ defmodule NxCL.Lower do
   alias NxCL.Program
   alias NxCL.Program.Builder
 
+  @unary_ops Builder.unary_ops()
+  @binary_ops Builder.binary_ops()
+
   @doc """
   Lowers `output`, the result of tracing a function with `num_inputs`
   flattened arguments.
@@ -93,15 +96,55 @@ defmodule NxCL.Lower do
   # -- Ops ----------------------------------------------------------------
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x]}} = node, state)
-       when op in [:negate, :exp, :log, :tanh, :sigmoid, :abs] do
-    check_shapes(node, [x])
+       when op in @unary_ops do
+    check_shapes(node, [x], state)
     emit(state, node, Builder.unary(op, ref(state, x), node.type, node.shape))
   end
 
+  # `Nx.logical_not/1` is a block; the elementwise kernel does the same job.
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :block, args: [%Nx.Block.LogicalNot{}, [x], _default, _fun]}} =
+           node,
+         state
+       ) do
+    check_shapes(node, [x], state)
+    emit(state, node, Builder.unary(:logical_not, ref(state, x), node.type, node.shape))
+  end
+
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [l, r]}} = node, state)
-       when op in [:add, :subtract, :multiply, :divide] do
-    check_shapes(node, [l, r])
+       when op in @binary_ops do
+    check_shapes(node, [l, r], state)
     emit(state, node, Builder.binary(op, ref(state, l), ref(state, r), node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :as_type, args: [x]}} = node, state) do
+    check_shapes(node, [x], state)
+    emit(state, node, Builder.as_type(ref(state, x), node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :bitcast, args: [x]}} = node, state) do
+    check_shapes(node, [x], state)
+    emit(state, node, Builder.bitcast(ref(state, x), node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :select, args: [p, t, f]}} = node, state) do
+    check_shapes(node, [p, t, f], state)
+
+    emit(
+      state,
+      node,
+      Builder.select(ref(state, p), ref(state, t), ref(state, f), node.type, node.shape)
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :clip, args: [x, lo, hi]}} = node, state) do
+    check_shapes(node, [x, lo, hi], state)
+
+    emit(
+      state,
+      node,
+      Builder.clip(ref(state, x), ref(state, lo), ref(state, hi), node.type, node.shape)
+    )
   end
 
   defp expand(
@@ -109,6 +152,10 @@ defmodule NxCL.Lower do
          state
        )
        when tuple_size(l.shape) == 2 and tuple_size(r.shape) == 2 do
+    for t <- [l, r, node], t.type != {:f, 32} do
+      unsupported(:dot, "(f32 only until stage 08, got #{inspect(t.type)})")
+    end
+
     k = elem(l.shape, 1)
     emit(state, node, Builder.dot(ref(state, l), ref(state, r), node.type, node.shape, k))
   end
@@ -138,12 +185,18 @@ defmodule NxCL.Lower do
 
   defp ref(state, %T{data: %Nx.Defn.Expr{id: id}}), do: Map.fetch!(state.refs, id)
 
-  # The runtime does not broadcast yet, so every operand needs the output shape.
-  defp check_shapes(%T{data: %Nx.Defn.Expr{op: op}, shape: shape}, operands) do
-    if Enum.any?(operands, &(&1.shape != shape)) do
+  # The runtime does not broadcast yet. Every operand has the output shape,
+  # except a scalar constant, which the kernel takes by value.
+  defp check_shapes(%T{data: %Nx.Defn.Expr{op: op}, shape: shape}, operands, state) do
+    if Enum.any?(operands, &(&1.shape != shape and not scalar_const?(state, &1))) do
       unsupported(op, "(operands of different shapes need broadcast)")
     end
   end
+
+  defp scalar_const?(state, %T{shape: {}} = operand),
+    do: match?({:const, _}, ref(state, operand))
+
+  defp scalar_const?(_state, _operand), do: false
 
   defp unsupported(op, detail) do
     suffix = if detail, do: " " <> detail, else: ""

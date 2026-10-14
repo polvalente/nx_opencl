@@ -1,3 +1,4 @@
+use crate::codegen::Caps;
 use crate::kernel::{CompiledKernel, KernelKey};
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use opencl3::context::Context;
@@ -11,6 +12,8 @@ pub struct DeviceCtx {
     pub queue: Mutex<CommandQueue>,
     pub device: Device,
     pub unified: bool,
+    /// Extensions codegen checks before it emits a kernel.
+    pub caps: Caps,
     pub kernels: Mutex<HashMap<KernelKey, Arc<CompiledKernel>>>,
     pub stats: KernelStats,
     pub live_buffers: Arc<AtomicUsize>,
@@ -52,6 +55,7 @@ impl DeviceCtx {
         let device = Device::new(device_ids[device_index]);
 
         let unified = device.host_unified_memory().unwrap_or(false);
+        let caps = Caps::from_extensions(&device.extensions().unwrap_or_default());
 
         let context = Context::from_device(&device)
             .map_err(|e| format!("Failed to create context: {:?}", e))?;
@@ -66,6 +70,7 @@ impl DeviceCtx {
             queue: Mutex::new(queue),
             device,
             unified,
+            caps,
             kernels: Mutex::new(HashMap::new()),
             stats: KernelStats::default(),
             live_buffers: Arc::new(AtomicUsize::new(0)),

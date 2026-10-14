@@ -31,8 +31,8 @@ defmodule NxCL.Compiler do
 
   The compiler never falls back to the CPU. An op that `NxCL.Lower` cannot
   lower raises `ArgumentError` ("does not yet lower op ...") when the function
-  is compiled. The executor runs `f32` only; any other dtype
-  raises `NxCL.CompilerError` when the function runs.
+  is compiled. A dtype the device cannot run (`f64` without `cl_khr_fp64`, or a type
+  with no OpenCL mapping yet) raises `NxCL.CompilerError` when the function runs.
   """
 
   @behaviour Nx.Defn.Compiler
