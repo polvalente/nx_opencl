@@ -9,6 +9,9 @@ defmodule NxCL.Lower do
   ref out of a tuple. A constant of a shape emits one `broadcast`. An operand
   that lacks the output shape of an elementwise op gets a `broadcast` too.
 
+  A `cond` or `while` node becomes one instruction with sub-programs
+  (`NxCL.Lower.Control`). `lower_scope/4` lowers each sub-program.
+
   An op the pass cannot lower raises `ArgumentError` with the prefix
   `"does not yet lower op"`. It never falls back to another path.
   """
@@ -18,8 +21,10 @@ defmodule NxCL.Lower do
   alias NxCL.Defn.Tree
   alias NxCL.Lower.Block
   alias NxCL.Lower.Contract
+  alias NxCL.Lower.Control
   alias NxCL.Program
   alias NxCL.Program.Builder
+  alias NxCL.Program.SubProgram
 
   @reduce_ops [:sum, :product, :reduce_max, :reduce_min, :all, :any]
   @arg_ops [:argmax, :argmin]
@@ -58,14 +63,20 @@ defmodule NxCL.Lower do
   """
   @spec lower(Nx.Container.t(), non_neg_integer() | nil) :: Program.t()
   def lower(output, num_inputs \\ nil) do
-    ordered = Tree.post_order(output)
+    state = %{
+      inputs: %{},
+      captures: [],
+      constants: [],
+      instrs: [],
+      refs: %{},
+      avail: Nx.Defn.Tree.scope_ids(output),
+      outer: %{},
+      depth: 0,
+      scope: :root
+    }
 
-    state =
-      Enum.reduce(
-        ordered,
-        %{inputs: %{}, captures: [], constants: [], instrs: [], refs: %{}},
-        &expand/2
-      )
+    ordered = Tree.post_order(output, &Control.scope_deps(&1, state))
+    state = Enum.reduce(ordered, state, &expand/2)
 
     max_pos = state.inputs |> Map.keys() |> Enum.max(fn -> -1 end)
     arity = max(num_inputs || 0, max_pos + 1)
@@ -89,6 +100,60 @@ defmodule NxCL.Lower do
     }
   end
 
+  # `while` and `cond` bodies nest; a deeper graph raises instead of exhausting the stack.
+  @max_depth 64
+
+  @doc false
+  # Lowers `roots` as a sub-program of `parent`. `seeds` maps node ids to the refs
+  # (`{:carry, i}`) the scope starts with. Captures and constants stay shared with
+  # the parent. A `:while` scope reads nothing else from the parent; a `:cond`
+  # scope reads the parent through its seeds only, so both get the same check.
+  @spec lower_scope(map(), [map()], map(), :while | :cond) :: {SubProgram.t(), map()}
+  def lower_scope(parent, roots, seeds, kind) do
+    if parent.depth >= @max_depth do
+      raise ArgumentError, "cond and while nest more than #{@max_depth} levels deep"
+    end
+
+    tuple = List.to_tuple(roots)
+    owner = Nx.Defn.Tree.scope_ids(tuple)
+
+    inner = %{
+      parent
+      | instrs: [],
+        refs: seeds,
+        avail: Map.merge(owner, seeds),
+        outer: if(kind == :while, do: parent.avail, else: %{}),
+        depth: parent.depth + 1,
+        scope: :sub
+    }
+
+    ordered = Tree.post_order(tuple, &Control.scope_deps(&1, inner))
+
+    inner =
+      Enum.reduce(ordered, inner, fn %T{data: %Nx.Defn.Expr{id: id}} = node, state ->
+        cond do
+          is_map_key(state.refs, id) -> state
+          reads_outer?(state, node) -> raise_outer(node)
+          true -> expand(node, state)
+        end
+      end)
+
+    outputs = Enum.map(roots, &Map.fetch!(inner.refs, &1.data.id))
+    sub = %SubProgram{instructions: Enum.reverse(inner.instrs), outputs: outputs}
+    {sub, %{parent | captures: inner.captures, constants: inner.constants}}
+  end
+
+  # A literal tensor or constant may sit in both scopes; any other node of the
+  # parent is a value the sub-program cannot reach.
+  defp reads_outer?(%{outer: outer}, %T{data: %Nx.Defn.Expr{id: id, op: op}}),
+    do: op not in [:constant, :tensor] and is_map_key(outer, id)
+
+  defp raise_outer(%T{data: %Nx.Defn.Expr{op: op}}) do
+    raise ArgumentError,
+          "an inner scope reads #{inspect(op)} from its parent scope; " <>
+            "pass the value in as an argument of the while or cond"
+  end
+
   defp ref_counts(instructions, outputs) do
     instructions
     |> Enum.flat_map(& &1.operands)
@@ -97,6 +162,12 @@ defmodule NxCL.Lower do
   end
 
   # -- Leaves -------------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :parameter}}, %{scope: :sub}) do
+    raise ArgumentError,
+          "an inner scope reads a parameter of its parent scope; " <>
+            "pass the value in as an argument of the while or cond"
+  end
 
   defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :parameter, args: [pos]}} = node, state) do
     state = %{state | inputs: Map.put(state.inputs, pos, {node.type, node.shape})}
@@ -439,6 +510,14 @@ defmodule NxCL.Lower do
        when mod in @inline_blocks do
     Block.inline(state, node, {args, default}, &expand/2)
   end
+
+  # -- Control flow -------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :cond}} = node, state),
+    do: Control.cond_node(state, node)
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :while}} = node, state),
+    do: Control.while_node(state, node)
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op}}, _state), do: unsupported(op, nil)
 

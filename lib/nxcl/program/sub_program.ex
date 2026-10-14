@@ -1,10 +1,12 @@
 defmodule NxCL.Program.SubProgram do
   @moduledoc """
   The condition or body of a `cond` or `while` instruction, as its own flat
-  instruction list. Unused until stage 10.
+  instruction list.
 
   `{:result, i}` refs are local to the sub-program. `{:carry, i}` refs read the
-  loop-carry slots. `{:capture, i}` and `{:const, i}` use the parent's tables.
+  loop-carry slots of a `while`, or the operands of a `cond`. `{:capture, i}` and
+  `{:const, i}` use the parent's tables. A sub-program reads nothing else from
+  its parent.
   """
 
   @enforce_keys [:instructions, :outputs]

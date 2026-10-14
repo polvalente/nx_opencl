@@ -193,10 +193,16 @@ defmodule NxCL.LowerTest do
                Enum.at(program.instructions, 3)
     end
 
-    test "a while loop raises" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :while/, fn ->
-        lower(&count_up/1, [Nx.tensor(0)])
-      end
+    test "a while loop lowers to one instruction with a cond and a body" do
+      program = lower(&count_up/1, [Nx.tensor(0)])
+
+      assert [%Instruction{op: :while, operands: [{:input, 0}], subprograms: [cond, body]}] =
+               program.instructions
+
+      assert program.outputs == [{:result, 0, 0}]
+      assert [%Instruction{op: :less, operands: [{:carry, 0}, {:const, _}]}] = cond.instructions
+      assert cond.outputs == [{:result, 0}]
+      assert [%Instruction{op: :add, operands: [{:const, _}, {:carry, 0}]}] = body.instructions
     end
   end
 end
