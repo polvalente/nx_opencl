@@ -7,6 +7,10 @@
 //! needs no device extension. `f16` is stored as `half` and computed as `float`;
 //! it needs `cl_khr_fp16`, and codegen returns a missing-extension error on a
 //! device without it. Bool is `u8`.
+//!
+//! `c64` is `float2` and `c128` is `double2` (needs `cl_khr_fp64`), in Nx's
+//! binary layout: real part, then imaginary part. A complex type carries a
+//! `Preamble`: the math helpers `codegen/complex.rs` writes. Real types carry none.
 
 use std::fmt;
 
@@ -70,6 +74,15 @@ pub enum Class {
     Signed,
     Unsigned,
     Float,
+    Complex,
+}
+
+/// Source a kernel needs before it can use the type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preamble {
+    None,
+    /// The complex math helpers over `component` (`float` or `double`).
+    Complex,
 }
 
 /// Half-width float formats held in a `ushort`.
@@ -113,6 +126,10 @@ pub struct TypeInfo {
     /// C expressions for the largest and smallest value (integers only).
     pub max: &'static str,
     pub min: &'static str,
+    /// Helper source the type needs; real types need none.
+    pub preamble: Preamble,
+    /// C type of one part of a complex value; empty for real types.
+    pub component: &'static str,
 }
 
 impl TypeInfo {
@@ -122,6 +139,10 @@ impl TypeInfo {
 
     pub fn is_signed(&self) -> bool {
         self.class == Class::Signed
+    }
+
+    pub fn is_complex(&self) -> bool {
+        self.class == Class::Complex
     }
 }
 
@@ -147,6 +168,8 @@ fn int(
         wide,
         max,
         min,
+        preamble: Preamble::None,
+        component: "",
     }
 }
 
@@ -171,7 +194,24 @@ fn float(
         wide: if math_bits == 64 { "ulong" } else { "uint" },
         max: "",
         min: "",
+        preamble: Preamble::None,
+        component: "",
     }
+}
+
+/// `c64` and `c128`: a vector of two floats or two doubles.
+fn complex(
+    dtype: DType,
+    vector: &'static str,
+    component: &'static str,
+    ext: Option<Ext>,
+) -> TypeInfo {
+    let mut info = float(dtype, vector, vector, None, ext);
+    info.class = Class::Complex;
+    info.math_bits = if component == "double" { 64 } else { 32 };
+    info.preamble = Preamble::Complex;
+    info.component = component;
+    info
 }
 
 /// The table entry for `dtype`, or an error naming why it has none.
@@ -215,11 +255,19 @@ pub fn type_info(dtype: DType) -> Result<TypeInfo, String> {
         (Kind::Bf, 16) => float(d, "ushort", "float", Some(Half::Bf16), None),
         (Kind::F, 32) => float(d, "float", "float", None, None),
         (Kind::F, 64) => float(d, "double", "double", None, Some(Ext::Fp64)),
+        (Kind::C, 64) => complex(d, "float2", "float", None),
+        (Kind::C, 128) => complex(d, "double2", "double", Some(Ext::Fp64)),
         _ => return Err(format!("dtype {} has no OpenCL type yet", dtype)),
     })
 }
 
-/// Every dtype the table covers, in a fixed order.
+/// The complex dtypes.
+#[cfg(test)]
+pub fn complex_types() -> [DType; 2] {
+    [DType::new(Kind::C, 64), DType::new(Kind::C, 128)]
+}
+
+/// Every real dtype the table covers, in a fixed order.
 #[cfg(test)]
 pub fn supported() -> Vec<DType> {
     let mut all = Vec::new();
@@ -242,6 +290,8 @@ pub fn supported() -> Vec<DType> {
 pub enum ConstVal {
     Int(i128),
     Float(f64),
+    /// Real and imaginary part, for the complex types.
+    Complex(f64, f64),
 }
 
 /// The constant as the bytes of one buffer element of `dtype` (native endian).
@@ -249,10 +299,29 @@ pub enum ConstVal {
 /// is an error.
 pub fn encode_const(dtype: DType, value: ConstVal) -> Result<Vec<u8>, String> {
     let info = type_info(dtype)?;
+    if info.is_complex() {
+        let (re, im) = match value {
+            ConstVal::Int(i) => (i as f64, 0.0),
+            ConstVal::Float(f) => (f, 0.0),
+            ConstVal::Complex(re, im) => (re, im),
+        };
+        let mut bytes = Vec::with_capacity(info.bytes);
+        for part in [re, im] {
+            if dtype.bits == 128 {
+                bytes.extend_from_slice(&part.to_ne_bytes());
+            } else {
+                bytes.extend_from_slice(&(part as f32).to_ne_bytes());
+            }
+        }
+        return Ok(bytes);
+    }
     if info.is_float() {
         let v = match value {
             ConstVal::Int(i) => i as f64,
             ConstVal::Float(f) => f,
+            ConstVal::Complex(..) => {
+                return Err(format!("complex constant for the real type {}", dtype))
+            }
         };
         return Ok(match (dtype.kind, dtype.bits) {
             (Kind::F, 64) => v.to_ne_bytes().to_vec(),
@@ -265,6 +334,9 @@ pub fn encode_const(dtype: DType, value: ConstVal) -> Result<Vec<u8>, String> {
         ConstVal::Int(i) => i,
         ConstVal::Float(f) => {
             return Err(format!("float constant {} for integer type {}", f, dtype))
+        }
+        ConstVal::Complex(..) => {
+            return Err(format!("complex constant for the real type {}", dtype))
         }
     };
     let bytes = v.to_ne_bytes();
@@ -419,8 +491,7 @@ mod tests {
     #[test]
     fn unsupported_dtypes_have_no_entry() {
         for (kind, bits) in [
-            (Kind::C, 64),
-            (Kind::C, 128),
+            (Kind::C, 32),
             (Kind::S, 4),
             (Kind::U, 2),
             (Kind::F, 8),
@@ -428,6 +499,52 @@ mod tests {
         ] {
             assert!(type_info(DType::new(kind, bits)).is_err());
         }
+    }
+
+    #[test]
+    fn complex_types_are_float2_and_double2() {
+        let c64 = type_info(DType::new(Kind::C, 64)).unwrap();
+        assert_eq!(
+            (c64.storage, c64.math, c64.component),
+            ("float2", "float2", "float")
+        );
+        assert_eq!(
+            (c64.bytes, c64.ext, c64.preamble),
+            (8, None, Preamble::Complex)
+        );
+        assert!(c64.is_complex() && !c64.is_float());
+        let c128 = type_info(DType::new(Kind::C, 128)).unwrap();
+        assert_eq!((c128.storage, c128.component), ("double2", "double"));
+        assert_eq!(c128.bytes, 16);
+        assert_eq!(c128.ext.map(|e| e.name()), Some("cl_khr_fp64"));
+    }
+
+    #[test]
+    fn real_types_carry_no_preamble() {
+        for dtype in supported() {
+            let info = type_info(dtype).unwrap();
+            assert_eq!(info.preamble, Preamble::None, "{}", dtype);
+            assert_eq!(info.component, "");
+        }
+    }
+
+    #[test]
+    fn complex_constants_are_two_parts() {
+        let c64 = DType::new(Kind::C, 64);
+        let mut want = 1.5f32.to_ne_bytes().to_vec();
+        want.extend_from_slice(&(-2.0f32).to_ne_bytes());
+        assert_eq!(
+            encode_const(c64, ConstVal::Complex(1.5, -2.0)).unwrap(),
+            want
+        );
+        let mut real = 3.0f32.to_ne_bytes().to_vec();
+        real.extend_from_slice(&0.0f32.to_ne_bytes());
+        assert_eq!(encode_const(c64, ConstVal::Int(3)).unwrap(), real);
+        let c128 = DType::new(Kind::C, 128);
+        let bytes = encode_const(c128, ConstVal::Complex(f64::NAN, f64::NEG_INFINITY)).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert!(f64::from_ne_bytes(bytes[..8].try_into().unwrap()).is_nan());
+        assert!(encode_const(DType::new(Kind::F, 32), ConstVal::Complex(1.0, 0.0)).is_err());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! sizes and the argument list come out. Each op family has one module here.
 //! Later stages add index math in this file, the one place they do so.
 
+pub mod complex;
 pub mod elementwise;
 pub mod types;
 

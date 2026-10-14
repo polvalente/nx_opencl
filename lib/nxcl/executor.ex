@@ -9,7 +9,8 @@ defmodule NxCL.Executor do
   #     {[input], [capture], [const], [instr], [out_ref]}
   #     input = {type, shape} | nil        (nil: the function never reads it)
   #     capture = {type, shape}
-  #     const = {type, value}              (value: a number, :nan, :infinity, :neg_infinity)
+  #     const = {type, value}              (value: a number, :nan, :infinity, :neg_infinity,
+  #                                         or a {re, im} pair for a complex type)
   #     instr = {op, [ref], out_type, out_shape, [attr]}
   #     ref = {:input | :capture | :const | :result, index}
   #
@@ -122,6 +123,12 @@ defmodule NxCL.Executor do
   defp encode_const({value, type})
        when is_number(value) or value in [:nan, :infinity, :neg_infinity],
        do: {type, value}
+
+  # A complex constant goes as a `{re, im}` pair.
+  defp encode_const({%Complex{re: re, im: im}, type})
+       when (is_number(re) or re in [:nan, :infinity, :neg_infinity]) and
+              (is_number(im) or im in [:nan, :infinity, :neg_infinity]),
+       do: {type, {re, im}}
 
   defp encode_const({value, type}) do
     raise NxCL.CompilerError,

@@ -11,7 +11,7 @@ defmodule NxCL.Program.Builder do
   @unary_ops ~w(abs acos acosh asin asinh atan atanh bitwise_not cbrt ceil cos cosh
                 count_leading_zeros erf erf_inv erfc exp expm1 floor is_infinity is_nan log
                 log1p logical_not negate population_count round rsqrt sigmoid sign sin sinh
-                sqrt tan tanh)a
+                sqrt tan tanh real imag conjugate phase)a
 
   @binary_ops ~w(add atan2 bitwise_and bitwise_or bitwise_xor divide equal greater
                  greater_equal left_shift less less_equal logical_and logical_or logical_xor max

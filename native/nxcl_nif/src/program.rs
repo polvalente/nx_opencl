@@ -139,6 +139,15 @@ fn decode_shape(term: Term) -> Result<Vec<usize>, String> {
 }
 
 fn decode_const_value(term: Term) -> Result<ConstVal, String> {
+    // A complex constant is a `{re, im}` pair.
+    if let Ok((re, im)) = term.decode::<(Term, Term)>() {
+        return match (decode_const_value(re)?, decode_const_value(im)?) {
+            (ConstVal::Complex(..), _) | (_, ConstVal::Complex(..)) => {
+                Err("a complex constant holds two real parts".to_string())
+            }
+            (re, im) => Ok(ConstVal::Complex(part_value(re), part_value(im))),
+        };
+    }
     if let Ok(i) = term.decode::<i64>() {
         return Ok(ConstVal::Int(i as i128));
     }
@@ -152,7 +161,17 @@ fn decode_const_value(term: Term) -> Result<ConstVal, String> {
         Ok("nan") => Ok(ConstVal::Float(f64::NAN)),
         Ok("infinity") => Ok(ConstVal::Float(f64::INFINITY)),
         Ok("neg_infinity") => Ok(ConstVal::Float(f64::NEG_INFINITY)),
-        _ => Err("constant must be a number, nan, infinity or neg_infinity".to_string()),
+        _ => Err(
+            "constant must be a number, nan, infinity, neg_infinity or a {re, im} pair".to_string(),
+        ),
+    }
+}
+
+fn part_value(v: ConstVal) -> f64 {
+    match v {
+        ConstVal::Int(i) => i as f64,
+        ConstVal::Float(f) => f,
+        ConstVal::Complex(re, _) => re,
     }
 }
 
@@ -461,6 +480,7 @@ unsafe fn set_scalar(exec: &mut ExecuteKernel, bytes: &[u8]) -> Result<(), Strin
         2 => exec.set_arg(&u16::from_ne_bytes([bytes[0], bytes[1]])),
         4 => exec.set_arg(&u32::from_ne_bytes(bytes.try_into().unwrap())),
         8 => exec.set_arg(&u64::from_ne_bytes(bytes.try_into().unwrap())),
+        16 => exec.set_arg(&u128::from_ne_bytes(bytes.try_into().unwrap())),
         n => return Err(format!("scalar of {} bytes is not supported", n)),
     };
     Ok(())

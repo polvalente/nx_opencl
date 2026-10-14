@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 
+use super::complex;
 use super::types::{type_info, DType, Half, Kind, TypeInfo};
 use super::{element_count, Caps, Instr, KernelArg, KernelSpec};
 
@@ -55,6 +56,36 @@ const COMPARE: [&str; 6] = [
     "less_equal",
 ];
 const LOGICAL: [&str; 3] = ["logical_and", "logical_or", "logical_xor"];
+/// Ops that have a complex form: `real`, `imag`, `conjugate` and `phase` exist
+/// for real operands too. The rest of the complex ops reuse the names above.
+const COMPLEX_PARTS: [&str; 4] = ["real", "imag", "conjugate", "phase"];
+/// Unary ops whose complex form returns a complex value, and the preamble
+/// helper each calls.
+const COMPLEX_UNARY: [(&str, &str); 23] = [
+    ("negate", "neg"),
+    ("conjugate", "conj"),
+    ("sign", "sign"),
+    ("exp", "exp"),
+    ("expm1", "expm1"),
+    ("log", "log"),
+    ("log1p", "log1p"),
+    ("sqrt", "sqrt"),
+    ("rsqrt", "rsqrt"),
+    ("cbrt", "cbrt"),
+    ("sin", "sin"),
+    ("cos", "cos"),
+    ("tan", "tan"),
+    ("sinh", "sinh"),
+    ("cosh", "cosh"),
+    ("tanh", "tanh"),
+    ("asin", "asin"),
+    ("acos", "acos"),
+    ("atan", "atan"),
+    ("asinh", "asinh"),
+    ("acosh", "acosh"),
+    ("atanh", "atanh"),
+    ("sigmoid", "sigmoid"),
+];
 
 pub fn handles(op: &str) -> bool {
     UNARY_FLOAT_FNS.contains(&op)
@@ -63,6 +94,7 @@ pub fn handles(op: &str) -> bool {
         || BINARY_BITWISE.contains(&op)
         || COMPARE.contains(&op)
         || LOGICAL.contains(&op)
+        || COMPLEX_PARTS.contains(&op)
         || matches!(op, "logical_not" | "as_type" | "select" | "clip")
 }
 
@@ -195,6 +227,8 @@ struct Gen<'a> {
     instr: &'a Instr,
     helpers: BTreeMap<String, String>,
     locals: Vec<String>,
+    /// Complex helpers the body calls, per width prefix.
+    cfns: BTreeMap<&'static str, (TypeInfo, Vec<String>)>,
 }
 
 impl<'a> Gen<'a> {
@@ -308,6 +342,215 @@ impl<'a> Gen<'a> {
         }
     }
 
+    // ── Complex ──
+
+    /// True when the output or an operand is complex, or the op is one of
+    /// `real`, `imag`, `conjugate`, `phase`.
+    fn is_complex(&self) -> Result<bool, String> {
+        if COMPLEX_PARTS.contains(&self.instr.op.as_str()) {
+            return Ok(true);
+        }
+        let mut any = type_info(self.instr.out)?.is_complex();
+        for o in &self.instr.operands {
+            any |= type_info(o.dtype)?.is_complex();
+        }
+        Ok(any)
+    }
+
+    /// The C name of helper `name` for the complex type `v`; the kernel gets
+    /// the helper and what it calls.
+    fn cfn(&mut self, v: &TypeInfo, name: &str) -> String {
+        let entry = self
+            .cfns
+            .entry(complex::prefix(v))
+            .or_insert_with(|| (*v, Vec::new()));
+        entry.1.push(name.to_string());
+        complex::fn_name(v, name)
+    }
+
+    /// The complex type a kernel computes in when the output is real: the
+    /// widest of the operands (`c128` if any operand is `c128` or `f64`).
+    fn complex_width(&self) -> Result<TypeInfo, String> {
+        let mut wide = false;
+        for o in &self.instr.operands {
+            let t = type_info(o.dtype)?;
+            wide |= t.dtype.bits == 128 || (t.math == "double" && !t.is_complex());
+        }
+        type_info(DType::new(Kind::C, if wide { 128 } else { 64 }))
+    }
+
+    /// The float type of one part of `v`.
+    fn part_of(v: &TypeInfo) -> Result<TypeInfo, String> {
+        type_info(DType::new(
+            Kind::F,
+            if v.component == "double" { 64 } else { 32 },
+        ))
+    }
+
+    /// Declare local `x{k}` holding operand `k` as the complex type `v`. A real
+    /// operand gets a zero imaginary part; a complex one of the other width
+    /// converts part by part.
+    fn complex_operand(&mut self, k: usize, v: &TypeInfo) -> Result<String, String> {
+        let info = self.operand_info(k)?;
+        let value = if info.is_complex() {
+            let raw = if self.instr.operands[k].constant.is_some() {
+                format!("in{}", k)
+            } else {
+                format!("in{}[i]", k)
+            };
+            if info.math == v.math {
+                raw
+            } else {
+                format!("convert_{}({})", v.math, raw)
+            }
+        } else {
+            let part = Self::part_of(v)?;
+            let re = self.load(k, &part)?;
+            format!("({})(({})({}), ({})0)", v.math, part.math, re, part.math)
+        };
+        self.locals
+            .push(format!("  {} x{} = {};", v.math, k, value));
+        Ok(format!("x{}", k))
+    }
+
+    /// The truth value of operand `k` as an `int` expression: a complex value
+    /// is true when either part is not zero.
+    fn truthy(&mut self, k: usize) -> Result<String, String> {
+        let info = self.operand_info(k)?;
+        if info.is_complex() {
+            let a = self.complex_operand(k, &info)?;
+            let f = self.cfn(&info, "nonzero");
+            return Ok(format!("{}({})", f, a));
+        }
+        let own = math_of(info.dtype)?;
+        let a = self.operand(k, &own)?;
+        Ok(format!("({} != 0)", a))
+    }
+
+    fn complex_body(&mut self) -> Result<(String, TypeInfo), String> {
+        let op = self.instr.op.as_str().to_string();
+        let op = op.as_str();
+        let out = type_info(self.instr.out)?;
+        let rejected = || format!("{} does not accept complex operands", op);
+
+        // The output is real: `abs`, `real`, `imag`, tests, casts to real.
+        if !out.is_complex() {
+            let m = math_of(self.instr.out)?;
+            let first = self
+                .operand_info(0)
+                .map_err(|_| format!("{} is missing operand 0", op))?;
+            return match op {
+                "abs" | "real" | "imag" | "phase" => {
+                    self.expect(1)?;
+                    let v = if first.is_complex() {
+                        first
+                    } else {
+                        self.complex_width()?
+                    };
+                    let a = self.complex_operand(0, &v)?;
+                    let e = match op {
+                        "abs" => format!("{}({})", self.cfn(&v, "abs"), a),
+                        "real" => format!("{}.x", a),
+                        "phase" => format!("atan2({a}.y, {a}.x)"),
+                        _ => format!("{}.y", a),
+                    };
+                    Ok((format!("(({})({}))", m.math, e), m))
+                }
+                "is_nan" | "is_infinity" => {
+                    self.expect(1)?;
+                    let a = self.complex_operand(0, &first)?;
+                    let f = self.cfn(&first, if op == "is_nan" { "isnan" } else { "isinf" });
+                    Ok((format!("(uchar)({}({}))", f, a), out))
+                }
+                "logical_not" => {
+                    self.expect(1)?;
+                    let t = self.truthy(0)?;
+                    Ok((format!("(uchar)(!{})", t), out))
+                }
+                "logical_and" | "logical_or" | "logical_xor" => {
+                    self.expect(2)?;
+                    let (a, b) = (self.truthy(0)?, self.truthy(1)?);
+                    let sym = match op {
+                        "logical_and" => "&&",
+                        "logical_or" => "||",
+                        _ => "!=",
+                    };
+                    Ok((format!("(uchar)({} {} {})", a, sym, b), out))
+                }
+                "equal" | "not_equal" => {
+                    self.expect(2)?;
+                    let v = self.complex_width()?;
+                    let (a, b) = (self.complex_operand(0, &v)?, self.complex_operand(1, &v)?);
+                    let f = self.cfn(&v, if op == "equal" { "eq" } else { "ne" });
+                    Ok((format!("(uchar)({}({}, {}))", f, a, b), out))
+                }
+                "select" => {
+                    self.expect(3)?;
+                    let p = self.truthy(0)?;
+                    let (a, b) = (self.operand(1, &m)?, self.operand(2, &m)?);
+                    Ok((format!("({} ? {} : {})", p, a, b), m))
+                }
+                "as_type" => {
+                    self.expect(1)?;
+                    if !first.is_complex() {
+                        return Err(rejected());
+                    }
+                    // The imaginary part is dropped; the real part casts as a float would.
+                    let part = Self::part_of(&first)?;
+                    let a = self.complex_operand(0, &first)?;
+                    let x = format!("{}.x", a);
+                    let e = if m.is_float() {
+                        format!("({})({})", m.math, x)
+                    } else {
+                        self.helpers.insert(
+                            format!("e_f2i_{}_{}", part.math, m.dtype.name()),
+                            f2i_helper(&part, &m),
+                        );
+                        format!("f2i_{}_{}({})", part.math, m.dtype.name(), x)
+                    };
+                    Ok((e, m))
+                }
+                _ => Err(rejected()),
+            };
+        }
+
+        // The output is complex: every operand converts to it.
+        let v = out;
+        match op {
+            "as_type" => {
+                self.expect(1)?;
+                let a = self.complex_operand(0, &v)?;
+                Ok((a, v))
+            }
+            "add" | "subtract" | "multiply" | "divide" | "pow" => {
+                self.expect(2)?;
+                let (a, b) = (self.complex_operand(0, &v)?, self.complex_operand(1, &v)?);
+                let name = match op {
+                    "add" => "add",
+                    "subtract" => "sub",
+                    "multiply" => "mul",
+                    "divide" => "div",
+                    _ => "pow",
+                };
+                Ok((format!("{}({}, {})", self.cfn(&v, name), a, b), v))
+            }
+            "select" => {
+                self.expect(3)?;
+                let p = self.truthy(0)?;
+                let (a, b) = (self.complex_operand(1, &v)?, self.complex_operand(2, &v)?);
+                Ok((format!("({} ? {} : {})", p, a, b), v))
+            }
+            _ => match COMPLEX_UNARY.iter().find(|(name, _)| *name == op) {
+                Some((_, helper)) => {
+                    self.expect(1)?;
+                    let a = self.complex_operand(0, &v)?;
+                    Ok((format!("{}({})", self.cfn(&v, helper), a), v))
+                }
+                None => Err(rejected()),
+            },
+        }
+    }
+
     fn expect(&self, n: usize) -> Result<(), String> {
         if self.instr.operands.len() == n {
             Ok(())
@@ -323,6 +566,9 @@ impl<'a> Gen<'a> {
 
     /// The result expression and the math type it has.
     fn body(&mut self) -> Result<(String, TypeInfo), String> {
+        if self.is_complex()? {
+            return self.complex_body();
+        }
         let op = self.instr.op.as_str();
         let out = type_info(self.instr.out)?;
         let m = math_of(self.instr.out)?;
@@ -669,6 +915,7 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
         instr,
         helpers: BTreeMap::new(),
         locals: Vec::new(),
+        cfns: BTreeMap::new(),
     };
     let (expr, compute) = gen.body()?;
     let result = gen.store(&expr, &compute)?;
@@ -716,10 +963,16 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     args.push(KernelArg::Output);
 
     let entry = format!("ew_{}_{}_{}", instr.op, names.join("_"), instr.out.name());
+    // The complex helpers each width calls, after the pragmas that enable it.
+    let mut preamble = String::new();
+    for (info, names) in gen.cfns.values() {
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        preamble.push_str(&complex::preamble(info, &names));
+    }
     let helpers: String = gen.helpers.values().cloned().collect();
     let locals = gen.locals.join("\n");
     let source = format!(
-        "{pragmas}{helpers}__kernel void {entry}({params}) {{\n  size_t i = get_global_id(0);\n{locals}\n  out[i] = {result};\n}}\n",
+        "{pragmas}{preamble}{helpers}__kernel void {entry}({params}) {{\n  size_t i = get_global_id(0);\n{locals}\n  out[i] = {result};\n}}\n",
         params = params.join(", ")
     );
 
@@ -1359,6 +1612,230 @@ mod tests {
         }
         assert!(!handles("dot"));
         assert!(!handles("bitcast"));
+    }
+
+    // ── Complex ──
+
+    const C64: DType = DType::new(Kind::C, 64);
+    const C128: DType = DType::new(Kind::C, 128);
+
+    #[test]
+    fn complex_add_carries_the_preamble_and_calls_the_helper() {
+        let s = src("add", &[C64, C64], C64);
+        assert!(s.contains("#pragma OPENCL FP_CONTRACT OFF"), "{}", s);
+        assert!(
+            s.contains("static float2 cf_add(float2 a, float2 b)"),
+            "{}",
+            s
+        );
+        assert!(s.contains("out[i] = cf_add(x0, x1);"), "{}", s);
+        assert!(s.contains("__global const float2* in0"), "{}", s);
+        // Only the helpers the kernel calls.
+        assert!(!s.contains("cf_sin") && !s.contains("double"), "{}", s);
+    }
+
+    #[test]
+    fn complex_division_is_smiths_method() {
+        let s = src("divide", &[C64, C64], C64);
+        assert!(s.contains("fabs(b.x) >= fabs(b.y)"), "{}", s);
+        assert!(!s.contains('$'), "{}", s);
+    }
+
+    #[test]
+    fn c128_needs_fp64_and_gets_its_own_helpers() {
+        let s = src("multiply", &[C128, C128], C128);
+        assert!(
+            s.starts_with("#pragma OPENCL EXTENSION cl_khr_fp64 : enable\n"),
+            "{}",
+            s
+        );
+        assert!(
+            s.contains("static double2 cd_mul(double2 a, double2 b)"),
+            "{}",
+            s
+        );
+        let no64 = Caps {
+            fp64: false,
+            fp16: true,
+        };
+        let operands = vec![buf(C128), buf(C128)];
+        let err = generate(&instr("add", operands, C128, vec![]), &no64).unwrap_err();
+        assert!(err.contains("missing extension cl_khr_fp64"), "{}", err);
+    }
+
+    #[test]
+    fn kernels_without_complex_types_have_no_preamble() {
+        for (op, ins, out) in [
+            ("add", vec![F32, F32], F32),
+            ("sqrt", vec![F64], F64),
+            ("equal", vec![S32, S32], U8),
+            ("as_type", vec![F32], S32),
+            ("real", vec![F32], F32),
+        ] {
+            let s = src(op, &ins, out);
+            assert!(
+                !s.contains("FP_CONTRACT") && !s.contains("cf_"),
+                "{} {}",
+                op,
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn complex_abs_returns_the_real_type_and_tests_return_u8() {
+        assert!(src("abs", &[C64], F32).contains("out[i] = ((float)(cf_abs(x0)));"));
+        let s = src("abs", &[C128], F64);
+        assert!(
+            s.contains("__global double* out") && s.contains("cd_abs(x0)"),
+            "{}",
+            s
+        );
+        assert!(src("is_nan", &[C64], U8).contains("(uchar)(cf_isnan(x0))"));
+        assert!(src("is_infinity", &[C64], U8).contains("(uchar)(cf_isinf(x0))"));
+        assert!(src("equal", &[C64, C64], U8).contains("(uchar)(cf_eq(x0, x1))"));
+        assert!(src("not_equal", &[C64, C64], U8).contains("(uchar)(cf_ne(x0, x1))"));
+        assert!(src("logical_not", &[C64], U8).contains("(uchar)(!cf_nonzero(x0))"));
+    }
+
+    #[test]
+    fn real_imag_and_conjugate_read_and_flip_the_parts() {
+        assert!(src("real", &[C64], F32).contains("x0.x"));
+        assert!(src("imag", &[C64], F32).contains("x0.y"));
+        assert!(src("conjugate", &[C64], C64).contains("cf_conj(x0)"));
+        // A real operand gets a zero imaginary part first; conjugate flips it to -0.
+        let s = src("conjugate", &[F32], C64);
+        assert!(s.contains("(float2)((float)(in0[i]), (float)0)"), "{}", s);
+        assert!(src("imag", &[F32], F32).contains("x0.y"));
+    }
+
+    #[test]
+    fn phase_is_atan2_of_the_parts_for_complex_and_real_operands() {
+        assert!(src("phase", &[C64], F32).contains("atan2(x0.y, x0.x)"));
+        let s = src("phase", &[F32], F32);
+        assert!(
+            s.contains("atan2(x0.y, x0.x)") && s.contains("(float)0"),
+            "{}",
+            s
+        );
+    }
+
+    #[test]
+    fn casts_to_and_from_complex() {
+        // Real to complex: zero imaginary part.
+        let s = src("as_type", &[F32], C64);
+        assert!(s.contains("(float2)((float)(in0[i]), (float)0)"), "{}", s);
+        let s = src("as_type", &[S32], C64);
+        assert!(s.contains("(float2)((float)("), "{}", s);
+        // Complex to real: the imaginary part is dropped.
+        assert!(src("as_type", &[C64], F32).contains("(float)(x0.x)"));
+        assert!(src("as_type", &[C64], S32).contains("f2i_float_s32(x0.x)"));
+        // c64 <-> c128 convert part by part.
+        assert!(src("as_type", &[C64], C128).contains("convert_double2(in0[i])"));
+        assert!(src("as_type", &[C128], C64).contains("convert_float2(in0[i])"));
+    }
+
+    #[test]
+    fn a_complex_constant_is_one_vector_argument() {
+        let operands = vec![buf(C64), constant(C64, ConstVal::Complex(1.5, -2.0))];
+        let spec = generate(&instr("multiply", operands, C64, vec![]), &Caps::all()).unwrap();
+        assert!(spec.source.contains("const float2 in1"), "{}", spec.source);
+        let mut want = 1.5f32.to_ne_bytes().to_vec();
+        want.extend_from_slice(&(-2.0f32).to_ne_bytes());
+        assert_eq!(spec.args[1], KernelArg::Scalar(want));
+        let operands = vec![buf(C128), constant(C128, ConstVal::Complex(1.5, -2.0))];
+        let spec = generate(&instr("add", operands, C128, vec![]), &Caps::all()).unwrap();
+        assert!(spec.source.contains("const double2 in1"));
+        assert_eq!(
+            spec.args[1],
+            KernelArg::Scalar([1.5f64.to_ne_bytes(), (-2.0f64).to_ne_bytes()].concat())
+        );
+    }
+
+    #[test]
+    fn mixed_real_and_complex_operands_convert_to_complex() {
+        let s = src("multiply", &[C64, F32], C64);
+        assert!(
+            s.contains("float2 x1 = (float2)((float)(in1[i]), (float)0);"),
+            "{}",
+            s
+        );
+        assert!(s.contains("cf_mul(x0, x1)"), "{}", s);
+    }
+
+    #[test]
+    fn no_complex_op_template_uses_the_vector_operators_for_products() {
+        // `float2 * float2` is a component product, not a complex product.
+        for op in ["multiply", "divide", "pow"] {
+            let s = src(op, &[C64, C64], C64);
+            assert!(
+                !s.contains("x0 * x1") && !s.contains("x0 / x1"),
+                "{} {}",
+                op,
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn complex_ops_nx_rejects_have_no_template() {
+        for op in [
+            "max",
+            "min",
+            "greater",
+            "less",
+            "atan2",
+            "remainder",
+            "ceil",
+            "erf",
+            "bitwise_and",
+        ] {
+            let ins = if matches!(op, "ceil" | "erf") {
+                vec![C64]
+            } else {
+                vec![C64, C64]
+            };
+            let operands = ins.iter().map(|&d| buf(d)).collect();
+            let out = if matches!(
+                op,
+                "max" | "min" | "atan2" | "remainder" | "ceil" | "erf" | "bitwise_and"
+            ) {
+                C64
+            } else {
+                U8
+            };
+            let err = generate(&instr(op, operands, out, vec![]), &Caps::all()).unwrap_err();
+            assert!(
+                err.contains("does not accept complex operands"),
+                "{} {}",
+                op,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn every_complex_unary_op_generates_for_both_widths() {
+        for (op, helper) in COMPLEX_UNARY {
+            for t in [C64, C128] {
+                let s = src(op, &[t], t);
+                let p = if t == C64 { "cf" } else { "cd" };
+                assert!(s.contains(&format!("{}_{}(", p, helper)), "{} {}", op, s);
+            }
+        }
+        for op in ["add", "subtract", "multiply", "divide", "pow"] {
+            for t in [C64, C128] {
+                src(op, &[t, t], t);
+            }
+        }
+    }
+
+    #[test]
+    fn the_kernel_build_enables_no_fast_math() {
+        let operands = vec![buf(C64), buf(C64)];
+        let spec = generate(&instr("divide", operands, C64, vec![]), &Caps::all()).unwrap();
+        assert_eq!(spec.build_options, "");
+        assert!(!spec.source.contains("fast"));
     }
 
     #[test]

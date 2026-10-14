@@ -20,6 +20,13 @@ defmodule NxCL.Lower do
   @unary_ops Builder.unary_ops()
   @binary_ops Builder.binary_ops()
 
+  # Ops Nx rejects on complex tensors (probed against Nx 1.0 on `c64`). Nx raises
+  # while tracing, so these raise here only for a graph built another way.
+  @complex_rejected ~w(atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
+                       count_leading_zeros erf erf_inv erfc floor greater greater_equal
+                       left_shift less less_equal max min population_count quotient remainder
+                       right_shift round)a
+
   @doc """
   Lowers `output`, the result of tracing a function with `num_inputs`
   flattened arguments.
@@ -97,6 +104,7 @@ defmodule NxCL.Lower do
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x]}} = node, state)
        when op in @unary_ops do
+    check_complex(op, node, [x])
     check_shapes(node, [x], state)
     emit(state, node, Builder.unary(op, ref(state, x), node.type, node.shape))
   end
@@ -111,8 +119,19 @@ defmodule NxCL.Lower do
     emit(state, node, Builder.unary(:logical_not, ref(state, x), node.type, node.shape))
   end
 
+  # `Nx.phase/1` is a block whose default is `atan2(imag, real)`; one kernel does it.
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :block, args: [%Nx.Block.Phase{}, [x], _default, _fun]}} =
+           node,
+         state
+       ) do
+    check_shapes(node, [x], state)
+    emit(state, node, Builder.unary(:phase, ref(state, x), node.type, node.shape))
+  end
+
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [l, r]}} = node, state)
        when op in @binary_ops do
+    check_complex(op, node, [l, r])
     check_shapes(node, [l, r], state)
     emit(state, node, Builder.binary(op, ref(state, l), ref(state, r), node.type, node.shape))
   end
@@ -123,6 +142,7 @@ defmodule NxCL.Lower do
   end
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :bitcast, args: [x]}} = node, state) do
+    check_complex(:bitcast, node, [x])
     check_shapes(node, [x], state)
     emit(state, node, Builder.bitcast(ref(state, x), node.type, node.shape))
   end
@@ -138,6 +158,7 @@ defmodule NxCL.Lower do
   end
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :clip, args: [x, lo, hi]}} = node, state) do
+    check_complex(:clip, node, [x, lo, hi])
     check_shapes(node, [x, lo, hi], state)
 
     emit(
@@ -184,6 +205,12 @@ defmodule NxCL.Lower do
   defp put_ref(state, id, ref), do: %{state | refs: Map.put(state.refs, id, ref)}
 
   defp ref(state, %T{data: %Nx.Defn.Expr{id: id}}), do: Map.fetch!(state.refs, id)
+
+  defp check_complex(op, node, operands) do
+    if op in @complex_rejected and Enum.any?([node | operands], &Nx.Type.complex?(&1.type)) do
+      raise ArgumentError, "#{inspect(op)} does not support complex tensors"
+    end
+  end
 
   # The runtime does not broadcast yet. Every operand has the output shape,
   # except a scalar constant, which the kernel takes by value.
