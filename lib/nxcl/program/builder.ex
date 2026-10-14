@@ -102,6 +102,120 @@ defmodule NxCL.Program.Builder do
   end
 
   @doc """
+  Broadcasts the operand to the output shape. `axes` gives, for each operand
+  axis, the output axis it fills. A scalar constant operand fills the output.
+  """
+  @spec broadcast(Instruction.ref(), Nx.Type.t(), tuple(), [non_neg_integer()]) ::
+          Instruction.t()
+  def broadcast(operand, type, shape, axes) do
+    %Instruction{
+      op: :broadcast,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: axes
+    }
+  end
+
+  @doc "Output axis `i` is operand axis `axes[i]`."
+  @spec transpose(Instruction.ref(), Nx.Type.t(), tuple(), [non_neg_integer()]) ::
+          Instruction.t()
+  def transpose(operand, type, shape, axes) do
+    %Instruction{
+      op: :transpose,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: axes
+    }
+  end
+
+  @doc "Reverses the operand along `axes`."
+  @spec reverse(Instruction.ref(), Nx.Type.t(), tuple(), [non_neg_integer()]) ::
+          Instruction.t()
+  def reverse(operand, type, shape, axes) do
+    %Instruction{
+      op: :reverse,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: axes
+    }
+  end
+
+  @doc """
+  A strided slice. `starts` are refs to scalar integers (constants or
+  tensors); the device clamps each to `[0, dim - length]`. `lengths` are the
+  input spans, `strides` the steps.
+  """
+  @spec slice(
+          Instruction.ref(),
+          [Instruction.ref()],
+          Nx.Type.t(),
+          tuple(),
+          [non_neg_integer()],
+          [pos_integer()]
+        ) :: Instruction.t()
+  def slice(operand, starts, type, shape, lengths, strides) do
+    %Instruction{
+      op: :slice,
+      operands: [operand | starts],
+      out_type: type,
+      out_shape: shape,
+      attrs: lengths ++ strides
+    }
+  end
+
+  @doc "Writes `update` into a copy of `operand` at the clamped `starts`."
+  @spec put_slice(Instruction.ref(), Instruction.ref(), [Instruction.ref()], Nx.Type.t(), tuple()) ::
+          Instruction.t()
+  def put_slice(operand, update, starts, type, shape) do
+    %Instruction{
+      op: :put_slice,
+      operands: [operand, update | starts],
+      out_type: type,
+      out_shape: shape
+    }
+  end
+
+  @doc "Pads with `value`. `config` is `{low, high, interior}` per axis; low and high may be negative."
+  @spec pad(
+          Instruction.ref(),
+          Instruction.ref(),
+          Nx.Type.t(),
+          tuple(),
+          [{integer(), integer(), non_neg_integer()}]
+        ) :: Instruction.t()
+  def pad(operand, value, type, shape, config) do
+    %Instruction{
+      op: :pad,
+      operands: [operand, value],
+      out_type: type,
+      out_shape: shape,
+      attrs: Enum.flat_map(config, &Tuple.to_list/1)
+    }
+  end
+
+  @doc "Joins the operands along `axis` (`:concatenate`) or on a new axis (`:stack`)."
+  @spec join(:concatenate | :stack, [Instruction.ref()], Nx.Type.t(), tuple(), non_neg_integer()) ::
+          Instruction.t()
+  def join(op, operands, type, shape, axis) when op in [:concatenate, :stack] do
+    %Instruction{op: op, operands: operands, out_type: type, out_shape: shape, attrs: [axis]}
+  end
+
+  @doc "Counts along `axis`, or over the flat index when `axis` is `nil`."
+  @spec iota(Nx.Type.t(), tuple(), non_neg_integer() | nil) :: Instruction.t()
+  def iota(type, shape, axis) do
+    %Instruction{op: :iota, operands: [], out_type: type, out_shape: shape, attrs: [axis]}
+  end
+
+  @doc "Identity matrices over the last two axes."
+  @spec eye(Nx.Type.t(), tuple()) :: Instruction.t()
+  def eye(type, shape) do
+    %Instruction{op: :eye, operands: [], out_type: type, out_shape: shape}
+  end
+
+  @doc """
   A generic kernel launch. `source` is OpenCL C, `entry` the kernel name.
 
   The kernel takes the operand buffers, then the output buffer, then each

@@ -100,7 +100,7 @@ pub fn handles(op: &str) -> bool {
 
 // ── C helpers ───────────────────────────────────────────
 
-const BF16_HELPERS: &str = "\
+pub(super) const BF16_HELPERS: &str = "\
 static float bf16_to_f32(ushort x) { return as_float(((uint)x) << 16); }
 static ushort f32_to_bf16(float f) {
   uint u = as_uint(f);

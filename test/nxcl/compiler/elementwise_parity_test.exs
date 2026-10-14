@@ -457,12 +457,8 @@ defmodule NxCL.ElementwiseParityTest do
       assert_parity(:clip, fn x -> Nx.clip(x, 2, 5) end, [Nx.iota({10}, type: :s32)])
     end
 
-    test "a scalar tensor mixed with a vector raises until stage 06 (broadcast)" do
-      jitted = Nx.Defn.jit(fn x, s -> Nx.add(x, s) end, compiler: NxCL.Compiler)
-
-      assert_raise ArgumentError, ~r/^does not yet lower op :add.*broadcast/, fn ->
-        jitted.(Nx.tensor([1.0, 2.0]), Nx.tensor(1.0))
-      end
+    test "a scalar tensor mixed with a vector gets an explicit broadcast" do
+      assert_parity(:add, fn x, s -> Nx.add(x, s) end, [Nx.tensor([1.0, 2.0]), Nx.tensor(1.0)])
     end
   end
 

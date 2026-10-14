@@ -23,8 +23,14 @@ unsafe impl Sync for DeviceBuffer {}
 
 impl DeviceBuffer {
     pub fn create(ctx: &DeviceCtx, size: usize) -> Result<Self, String> {
+        // OpenCL rejects a zero-size buffer; an empty tensor gets one spare byte.
         let buffer = unsafe {
-            Buffer::<u8>::create(&ctx.context, CL_MEM_READ_WRITE, size, std::ptr::null_mut())
+            Buffer::<u8>::create(
+                &ctx.context,
+                CL_MEM_READ_WRITE,
+                size.max(1),
+                std::ptr::null_mut(),
+            )
         }
         .map_err(|e| format!("Failed to create buffer: {:?}", e))?;
 
@@ -37,6 +43,9 @@ impl DeviceBuffer {
     }
 
     pub fn create_with_data(ctx: &DeviceCtx, data: &[u8]) -> Result<Self, String> {
+        if data.is_empty() {
+            return Self::create(ctx, 0);
+        }
         let buffer = unsafe {
             Buffer::<u8>::create(
                 &ctx.context,
@@ -57,6 +66,9 @@ impl DeviceBuffer {
 
     pub fn read(&self, ctx: &DeviceCtx, size: usize) -> Result<Vec<u8>, String> {
         let read_size = std::cmp::min(size, self.size);
+        if read_size == 0 {
+            return Ok(Vec::new());
+        }
         let mut output = vec![0u8; read_size];
 
         let queue = ctx

@@ -380,6 +380,14 @@ impl Program {
                         local,
                     } => {
                         let out_buf = Arc::new(DeviceBuffer::create(ctx, *out_bytes)?);
+                        // An empty output needs no launch.
+                        if *out_bytes == 0 {
+                            slots[*out] = Some(out_buf);
+                            for &s in &self.free_after[i] {
+                                slots[s] = None;
+                            }
+                            continue;
+                        }
                         let mut bufs = Vec::with_capacity(args.len());
                         for a in args {
                             if let Arg::Slot(o) = a {
@@ -544,6 +552,9 @@ fn decode_step(
     };
 
     match op.as_str() {
+        name if codegen::is_movement(name) => launch_generated(
+            ctx, layout, name, &operands, out_dtype, out_shape, attrs, out,
+        ),
         name if codegen::is_elementwise(name) => {
             // `as_type` to the same type moves no data.
             if name == "as_type" && expect(1).is_ok() {
@@ -552,7 +563,7 @@ fn decode_step(
                     return alias_of(operands[0], layout);
                 }
             }
-            launch_elementwise(
+            launch_generated(
                 ctx, layout, name, &operands, out_dtype, out_shape, attrs, out,
             )
         }
@@ -601,7 +612,7 @@ fn decode_step(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn launch_elementwise(
+fn launch_generated(
     ctx: &DeviceCtx,
     layout: &Layout,
     op: &str,

@@ -147,22 +147,14 @@ defmodule NxCL.LowerTest do
 
   describe "unsupported input" do
     test "an op that is not lowered raises with the fixed prefix" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :reverse/, fn ->
-        lower(fn x -> Nx.reverse(x) end, [Nx.tensor([1.0])])
-      end
-
       assert_raise ArgumentError, ~r/^does not yet lower op :sum/, fn ->
         lower(fn x -> Nx.sum(x) end, [Nx.tensor([1.0])])
       end
     end
 
-    test "a scalar constant mixed with a tensor lowers; a scalar tensor raises (broadcast)" do
+    test "a scalar constant mixed with a tensor lowers with no broadcast" do
       program = lower(fn x -> Nx.add(x, 1.0) end, [Nx.tensor([1.0, 2.0])])
       assert [%Instruction{op: :add, out_shape: {2}}] = program.instructions
-
-      assert_raise ArgumentError, ~r/^does not yet lower op :add/, fn ->
-        lower(fn x, s -> Nx.add(x, s) end, [Nx.tensor([1.0, 2.0]), Nx.tensor(1.0)])
-      end
     end
 
     test "a dot on a dtype other than f32 raises" do

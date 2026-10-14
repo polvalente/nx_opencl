@@ -1,10 +1,12 @@
 //! Kernel generation. A decoded instruction (op, operand and output types and
 //! shapes, attrs) goes in; OpenCL C source, an entry name, build options, work
 //! sizes and the argument list come out. Each op family has one module here.
-//! Later stages add index math in this file, the one place they do so.
+//! N-d index math sits in `index.rs`.
 
 pub mod complex;
 pub mod elementwise;
+pub mod index;
+pub mod movement;
 pub mod types;
 
 use types::DType;
@@ -32,8 +34,8 @@ pub struct Instr {
     pub operands: Vec<Operand>,
     pub out: DType,
     pub out_shape: Vec<usize>,
-    /// Op attrs. The elementwise family reads none; later families do.
-    #[allow(dead_code)]
+    /// Op attrs. The elementwise family reads none; movement ops read axes,
+    /// lengths, strides and pad configs.
     pub attrs: Vec<Attr>,
 }
 
@@ -96,9 +98,16 @@ pub fn is_elementwise(op: &str) -> bool {
     elementwise::handles(op)
 }
 
+/// True when `op` is built by the movement family.
+pub fn is_movement(op: &str) -> bool {
+    movement::handles(op)
+}
+
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     if elementwise::handles(&instr.op) {
         elementwise::generate(instr, caps)
+    } else if movement::handles(&instr.op) {
+        movement::generate(instr, caps)
     } else {
         Err(format!("no codegen for op {}", instr.op))
     }
