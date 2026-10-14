@@ -4,43 +4,45 @@ defmodule NxCL.Native do
   # Derive Rust target triple from Nerves environment variables.
   # Nerves sets TARGET_ARCH, TARGET_OS, TARGET_ABI during cross-compilation.
   # RUSTLER_TARGET overrides if set explicitly.
-  @rust_target (cond do
-                  target = System.get_env("RUSTLER_TARGET") ->
-                    target
+  rust_target =
+    cond do
+      target = System.get_env("RUSTLER_TARGET") ->
+        target
 
-                  (arch = System.get_env("TARGET_ARCH")) && System.get_env("TARGET_OS") ->
-                    abi = System.get_env("TARGET_ABI") || "gnu"
+      (arch = System.get_env("TARGET_ARCH")) && System.get_env("TARGET_OS") ->
+        abi = System.get_env("TARGET_ABI") || "gnu"
 
-                    case {arch, abi} do
-                      {"aarch64", abi} -> "aarch64-unknown-linux-#{abi}"
-                      {"arm", "gnueabihf"} -> "armv7-unknown-linux-gnueabihf"
-                      {"arm", abi} -> "armv7-unknown-linux-#{abi}"
-                      {"x86_64", abi} -> "x86_64-unknown-linux-#{abi}"
-                      {arch, abi} -> "#{arch}-unknown-linux-#{abi}"
-                    end
+        case {arch, abi} do
+          {"aarch64", abi} -> "aarch64-unknown-linux-#{abi}"
+          {"arm", "gnueabihf"} -> "armv7-unknown-linux-gnueabihf"
+          {"arm", abi} -> "armv7-unknown-linux-#{abi}"
+          {"x86_64", abi} -> "x86_64-unknown-linux-#{abi}"
+          {arch, abi} -> "#{arch}-unknown-linux-#{abi}"
+        end
 
-                  true ->
-                    nil
-                end)
+      true ->
+        nil
+    end
 
   # When cross-compiling, tell Cargo to use Nerves' CC as the linker.
-  @linker_env (case {@rust_target, System.get_env("CC")} do
-                 {nil, _} ->
-                   []
+  linker_env =
+    case {rust_target, System.get_env("CC")} do
+      {nil, _} ->
+        []
 
-                 {_, nil} ->
-                   []
+      {_, nil} ->
+        []
 
-                 {target, cc} ->
-                   triple_env = target |> String.upcase() |> String.replace("-", "_")
-                   [{"CARGO_TARGET_#{triple_env}_LINKER", cc}]
-               end)
+      {target, cc} ->
+        triple_env = target |> String.upcase() |> String.replace("-", "_")
+        [{"CARGO_TARGET_#{triple_env}_LINKER", cc}]
+    end
 
   use Rustler,
     otp_app: :nx_opencl,
     crate: "nxcl_nif",
-    target: @rust_target,
-    env: @linker_env
+    target: rust_target,
+    env: linker_env
 
   @spec device_ctx_create(non_neg_integer()) :: reference() | {:error, String.t()}
   def device_ctx_create(_device_id), do: :erlang.nif_error(:nif_not_loaded)

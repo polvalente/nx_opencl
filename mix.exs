@@ -54,7 +54,7 @@ defmodule NxOpencl.MixProject do
 
   def dialyzer do
     [
-      plt_add_apps: [:mix],
+      plt_add_apps: [:mix, :ex_unit],
       ignore_warnings: ".dialyzer_ignore.exs"
     ]
   end

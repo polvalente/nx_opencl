@@ -75,6 +75,11 @@
     "musleabihf",
     "topo",
     "gelu",
-    "linalg"
+    "linalg",
+    "iommu",
+    "valhall",
+    "panfrost",
+    "panthor",
+    "freedreno"
   ]
 }

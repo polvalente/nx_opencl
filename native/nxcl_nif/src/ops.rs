@@ -3,7 +3,9 @@ use opencl3::memory::ClMem;
 
 use crate::buffer::DeviceBuffer;
 use crate::device_ctx::DeviceCtx;
-use crate::kernel::{CompiledKernel, ELEMENTWISE_SOURCE, MATMUL_SOURCE, REDUCE_SOURCE, SOFTMAX_SOURCE};
+use crate::kernel::{
+    CompiledKernel, ELEMENTWISE_SOURCE, MATMUL_SOURCE, REDUCE_SOURCE, SOFTMAX_SOURCE,
+};
 
 /// Run a binary elementwise operation (add, subtract, multiply, divide)
 pub fn elementwise_binary(
@@ -18,7 +20,10 @@ pub fn elementwise_binary(
 
     let out = DeviceBuffer::create(ctx, n * 4)?; // f32 = 4 bytes
 
-    let queue = ctx.queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
+    let queue = ctx
+        .queue
+        .lock()
+        .map_err(|e| format!("Lock error: {:?}", e))?;
 
     let global_work_size = round_up(n, 64);
 
@@ -34,7 +39,9 @@ pub fn elementwise_binary(
     }
     .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
 
-    kernel_event.wait().map_err(|e| format!("Kernel wait error: {:?}", e))?;
+    kernel_event
+        .wait()
+        .map_err(|e| format!("Kernel wait error: {:?}", e))?;
 
     Ok(out)
 }
@@ -51,7 +58,10 @@ pub fn elementwise_unary(
 
     let out = DeviceBuffer::create(ctx, n * 4)?;
 
-    let queue = ctx.queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
+    let queue = ctx
+        .queue
+        .lock()
+        .map_err(|e| format!("Lock error: {:?}", e))?;
 
     let global_work_size = round_up(n, 64);
 
@@ -66,7 +76,9 @@ pub fn elementwise_unary(
     }
     .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
 
-    kernel_event.wait().map_err(|e| format!("Kernel wait error: {:?}", e))?;
+    kernel_event
+        .wait()
+        .map_err(|e| format!("Kernel wait error: {:?}", e))?;
 
     Ok(out)
 }
@@ -86,7 +98,10 @@ pub fn matmul(
 
     let out = DeviceBuffer::create(ctx, m * n * 4)?;
 
-    let queue = ctx.queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
+    let queue = ctx
+        .queue
+        .lock()
+        .map_err(|e| format!("Lock error: {:?}", e))?;
 
     let global_rows = round_up(m, ts);
     let global_cols = round_up(n, ts);
@@ -105,7 +120,9 @@ pub fn matmul(
     }
     .map_err(|e| format!("Failed to enqueue matmul kernel: {:?}", e))?;
 
-    kernel_event.wait().map_err(|e| format!("Kernel wait error: {:?}", e))?;
+    kernel_event
+        .wait()
+        .map_err(|e| format!("Kernel wait error: {:?}", e))?;
 
     Ok(out)
 }
@@ -128,7 +145,10 @@ pub fn reduce(
     // Output buffer for partial results (one per workgroup)
     let partials = DeviceBuffer::create(ctx, num_groups * 4)?;
 
-    let queue = ctx.queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
+    let queue = ctx
+        .queue
+        .lock()
+        .map_err(|e| format!("Lock error: {:?}", e))?;
 
     let kernel_event = unsafe {
         ExecuteKernel::new(&kernel.kernel)
@@ -142,7 +162,9 @@ pub fn reduce(
     }
     .map_err(|e| format!("Failed to enqueue reduce kernel: {:?}", e))?;
 
-    kernel_event.wait().map_err(|e| format!("Kernel wait error: {:?}", e))?;
+    kernel_event
+        .wait()
+        .map_err(|e| format!("Kernel wait error: {:?}", e))?;
 
     drop(queue);
 
@@ -166,7 +188,10 @@ pub fn softmax(
 
     let out = DeviceBuffer::create(ctx, rows * cols * 4)?;
 
-    let queue = ctx.queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
+    let queue = ctx
+        .queue
+        .lock()
+        .map_err(|e| format!("Lock error: {:?}", e))?;
 
     let kernel_event = unsafe {
         ExecuteKernel::new(&kernel.kernel)
@@ -178,11 +203,13 @@ pub fn softmax(
     }
     .map_err(|e| format!("Failed to enqueue softmax kernel: {:?}", e))?;
 
-    kernel_event.wait().map_err(|e| format!("Kernel wait error: {:?}", e))?;
+    kernel_event
+        .wait()
+        .map_err(|e| format!("Kernel wait error: {:?}", e))?;
 
     Ok(out)
 }
 
 fn round_up(value: usize, multiple: usize) -> usize {
-    ((value + multiple - 1) / multiple) * multiple
+    value.div_ceil(multiple) * multiple
 }

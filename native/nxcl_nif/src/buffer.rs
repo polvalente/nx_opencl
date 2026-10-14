@@ -1,4 +1,4 @@
-use opencl3::memory::{Buffer, CL_MEM_READ_WRITE, CL_MEM_COPY_HOST_PTR};
+use opencl3::memory::{Buffer, CL_MEM_COPY_HOST_PTR, CL_MEM_READ_WRITE};
 use opencl3::types::CL_TRUE;
 use std::ffi::c_void;
 
@@ -43,12 +43,13 @@ impl DeviceBuffer {
         let read_size = std::cmp::min(size, self.size);
         let mut output = vec![0u8; read_size];
 
-        let queue = ctx.queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
+        let queue = ctx
+            .queue
+            .lock()
+            .map_err(|e| format!("Lock error: {:?}", e))?;
 
-        unsafe {
-            queue.enqueue_read_buffer(&self.buffer, CL_TRUE, 0, &mut output, &[])
-        }
-        .map_err(|e| format!("Failed to read buffer: {:?}", e))?;
+        unsafe { queue.enqueue_read_buffer(&self.buffer, CL_TRUE, 0, &mut output, &[]) }
+            .map_err(|e| format!("Failed to read buffer: {:?}", e))?;
 
         Ok(output)
     }

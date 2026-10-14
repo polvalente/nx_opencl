@@ -5,7 +5,7 @@ mod ops;
 
 use buffer::DeviceBuffer;
 use device_ctx::DeviceCtx;
-use rustler::{Env, NifResult, OwnedBinary, ResourceArc, Term};
+use rustler::{NifResult, OwnedBinary, ResourceArc};
 use std::sync::Arc;
 
 struct DeviceCtxInner {
@@ -26,11 +26,11 @@ unsafe impl Sync for NifDeviceCtx {}
 unsafe impl Send for NifDeviceBuffer {}
 unsafe impl Sync for NifDeviceBuffer {}
 
-fn on_load(env: Env, _info: Term) -> bool {
-    rustler::resource!(NifDeviceCtx, env);
-    rustler::resource!(NifDeviceBuffer, env);
-    true
-}
+#[rustler::resource_impl]
+impl rustler::Resource for NifDeviceCtx {}
+
+#[rustler::resource_impl]
+impl rustler::Resource for NifDeviceBuffer {}
 
 // ── Device Context ──────────────────────────────────────
 
@@ -52,11 +52,26 @@ fn device_info(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<Vec<(String, String)
             ("name".to_string(), info.name),
             ("vendor".to_string(), info.vendor),
             ("version".to_string(), info.version),
-            ("max_workgroup_size".to_string(), info.max_workgroup_size.to_string()),
-            ("max_compute_units".to_string(), info.max_compute_units.to_string()),
-            ("local_mem_size".to_string(), info.local_mem_size.to_string()),
-            ("global_mem_size".to_string(), info.global_mem_size.to_string()),
-            ("unified_memory".to_string(), info.unified_memory.to_string()),
+            (
+                "max_workgroup_size".to_string(),
+                info.max_workgroup_size.to_string(),
+            ),
+            (
+                "max_compute_units".to_string(),
+                info.max_compute_units.to_string(),
+            ),
+            (
+                "local_mem_size".to_string(),
+                info.local_mem_size.to_string(),
+            ),
+            (
+                "global_mem_size".to_string(),
+                info.global_mem_size.to_string(),
+            ),
+            (
+                "unified_memory".to_string(),
+                info.unified_memory.to_string(),
+            ),
         ]),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }
@@ -65,7 +80,10 @@ fn device_info(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<Vec<(String, String)
 // ── Buffer Operations ───────────────────────────────────
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn buffer_create(ctx: ResourceArc<NifDeviceCtx>, size: usize) -> NifResult<ResourceArc<NifDeviceBuffer>> {
+fn buffer_create(
+    ctx: ResourceArc<NifDeviceCtx>,
+    size: usize,
+) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match DeviceBuffer::create(&ctx.inner.ctx, size) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
             buffer: buf,
@@ -76,7 +94,10 @@ fn buffer_create(ctx: ResourceArc<NifDeviceCtx>, size: usize) -> NifResult<Resou
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
-fn buffer_write(ctx: ResourceArc<NifDeviceCtx>, data: rustler::Binary) -> NifResult<ResourceArc<NifDeviceBuffer>> {
+fn buffer_write(
+    ctx: ResourceArc<NifDeviceCtx>,
+    data: rustler::Binary,
+) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match DeviceBuffer::create_with_data(&ctx.inner.ctx, data.as_slice()) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
             buffer: buf,
@@ -90,7 +111,9 @@ fn buffer_write(ctx: ResourceArc<NifDeviceCtx>, data: rustler::Binary) -> NifRes
 fn buffer_read(buf: ResourceArc<NifDeviceBuffer>, size: usize) -> NifResult<OwnedBinary> {
     match buf.buffer.read(&buf.ctx.ctx, size) {
         Ok(data) => {
-            let mut binary = OwnedBinary::new(data.len()).ok_or(rustler::Error::Term(Box::new("Failed to allocate binary".to_string())))?;
+            let mut binary = OwnedBinary::new(data.len()).ok_or(rustler::Error::Term(Box::new(
+                "Failed to allocate binary".to_string(),
+            )))?;
             binary.as_mut_slice().copy_from_slice(&data);
             Ok(binary)
         }
@@ -187,6 +210,28 @@ fn softmax_op(
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }
+}
+
+extern "C" {
+    fn signal(signum: i32, handler: usize) -> usize;
+}
+
+const SIGCHLD: i32 = 20; // same value on macOS and Linux (x86, arm)
+const SIG_DFL: usize = 0;
+const SIG_IGN: usize = 1;
+
+fn on_load(_env: rustler::Env, _info: rustler::Term) -> bool {
+    // The BEAM sets SIGCHLD to SIG_IGN, so the kernel reaps children at once and
+    // wait4 never sees their exit. PoCL runs clang/ld as a child process and waits
+    // on it forever. Restore the default only when the VM left it ignored. The BEAM
+    // starts its own ports through erl_child_setup and does not need the ignore.
+    unsafe {
+        let old = signal(SIGCHLD, SIG_DFL);
+        if old != SIG_IGN {
+            signal(SIGCHLD, old);
+        }
+    }
+    true
 }
 
 rustler::init!("Elixir.NxCL.Native", load = on_load);

@@ -74,7 +74,7 @@ defmodule NxCL.Compiler.Flatten do
   Walk an Nx.Defn.Expr tree, collect all nodes, topologically sort them,
   and return a list of FlatOp structs in dependency order.
   """
-  @spec flatten(Nx.Tensor.t()) :: [FlatOp.t()]
+  @spec flatten(Nx.Tensor.t(struct())) :: [FlatOp.t()]
   def flatten(%Nx.Tensor{data: %Nx.Defn.Expr{}} = expr) do
     nodes = %{}
     {nodes, _} = collect(expr, nodes)

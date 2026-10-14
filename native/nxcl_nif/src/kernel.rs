@@ -1,6 +1,6 @@
+use crate::device_ctx::DeviceCtx;
 use opencl3::kernel::Kernel;
 use opencl3::program::Program;
-use crate::device_ctx::DeviceCtx;
 
 pub struct CompiledKernel {
     pub kernel: Kernel,

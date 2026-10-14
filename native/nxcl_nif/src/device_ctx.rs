@@ -1,6 +1,6 @@
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use opencl3::context::Context;
-use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_GPU, CL_DEVICE_TYPE_ALL};
+use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
 use std::sync::Mutex;
 
 pub struct DeviceCtx {
@@ -17,7 +17,10 @@ impl DeviceCtx {
     pub fn new(device_index: usize) -> Result<Self, String> {
         // Try GPU devices first
         let device_ids = get_all_devices(CL_DEVICE_TYPE_GPU)
-            .or_else(|_| get_all_devices(CL_DEVICE_TYPE_ALL))
+            .ok()
+            .filter(|ids| !ids.is_empty())
+            .map(Ok)
+            .unwrap_or_else(|| get_all_devices(CL_DEVICE_TYPE_ALL))
             .map_err(|e| format!("Failed to get devices: {:?}", e))?;
 
         if device_ids.is_empty() {
@@ -39,12 +42,10 @@ impl DeviceCtx {
         let context = Context::from_device(&device)
             .map_err(|e| format!("Failed to create context: {:?}", e))?;
 
-        let queue = CommandQueue::create_default_with_properties(
-            &context,
-            CL_QUEUE_PROFILING_ENABLE,
-            0,
-        )
-        .map_err(|e| format!("Failed to create command queue: {:?}", e))?;
+        // OpenCL 1.2 entry point: Apple's driver has no clCreateCommandQueueWithProperties.
+        #[allow(deprecated)]
+        let queue = CommandQueue::create_default(&context, CL_QUEUE_PROFILING_ENABLE)
+            .map_err(|e| format!("Failed to create command queue: {:?}", e))?;
 
         Ok(Self {
             context,
@@ -71,10 +72,22 @@ impl DeviceCtx {
         let name = self.device.name().map_err(|e| format!("{:?}", e))?;
         let vendor = self.device.vendor().map_err(|e| format!("{:?}", e))?;
         let version = self.device.version().map_err(|e| format!("{:?}", e))?;
-        let max_workgroup_size = self.device.max_work_group_size().map_err(|e| format!("{:?}", e))?;
-        let max_compute_units = self.device.max_compute_units().map_err(|e| format!("{:?}", e))?;
-        let local_mem_size = self.device.local_mem_size().map_err(|e| format!("{:?}", e))?;
-        let global_mem_size = self.device.global_mem_size().map_err(|e| format!("{:?}", e))?;
+        let max_workgroup_size = self
+            .device
+            .max_work_group_size()
+            .map_err(|e| format!("{:?}", e))?;
+        let max_compute_units = self
+            .device
+            .max_compute_units()
+            .map_err(|e| format!("{:?}", e))?;
+        let local_mem_size = self
+            .device
+            .local_mem_size()
+            .map_err(|e| format!("{:?}", e))?;
+        let global_mem_size = self
+            .device
+            .global_mem_size()
+            .map_err(|e| format!("{:?}", e))?;
 
         Ok(DeviceInfo {
             name,

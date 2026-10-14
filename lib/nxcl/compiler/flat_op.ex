@@ -18,4 +18,6 @@ defmodule NxCL.Compiler.FlatOp do
     :contract_axes,
     :batch_axes
   ]
+
+  @type t :: %__MODULE__{}
 end
