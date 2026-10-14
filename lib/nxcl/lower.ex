@@ -16,6 +16,7 @@ defmodule NxCL.Lower do
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
   alias NxCL.Defn.Tree
+  alias NxCL.Lower.Block
   alias NxCL.Lower.Contract
   alias NxCL.Program
   alias NxCL.Program.Builder
@@ -34,6 +35,9 @@ defmodule NxCL.Lower do
   # Binary ops a `reduce` body may hold: the result has the operand type.
   @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
                bitwise_or bitwise_xor left_shift right_shift)a
+
+  # Blocks whose `default_expr` lowers inline until stage 12 adds the block hook.
+  @inline_blocks [Nx.Block.Take, Nx.Block.TakeAlongAxis]
 
   @unary_ops Builder.unary_ops()
   @binary_ops Builder.binary_ops()
@@ -406,6 +410,34 @@ defmodule NxCL.Lower do
       node,
       Builder.sort(op, ref(state, x), node.type, node.shape, opts[:axis] || 0, opts[:direction])
     )
+  end
+
+  # -- Indexing -----------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :gather, args: [x, indices, opts]}} = node, state) do
+    emit(
+      state,
+      node,
+      Builder.gather(ref(state, x), ref(state, indices), node.type, node.shape, opts[:axes])
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, indices, updates, opts]}} = node, state)
+       when op in [:indexed_add, :indexed_put] do
+    {state, rx} = cast(state, x, node.type)
+    {state, ru} = cast(state, updates, node.type)
+    refs = {rx, ref(state, indices), ru}
+    emit(state, node, Builder.indexed(op, refs, node.type, node.shape, opts[:axes]))
+  end
+
+  # `Nx.take/3` and `Nx.take_along_axis/3` are blocks whose default is a `gather`.
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :block, args: [%{__struct__: mod}, args, default, _fun]}} =
+           node,
+         state
+       )
+       when mod in @inline_blocks do
+    Block.inline(state, node, {args, default}, &expand/2)
   end
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op}}, _state), do: unsupported(op, nil)

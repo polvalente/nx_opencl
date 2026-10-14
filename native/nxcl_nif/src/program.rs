@@ -35,6 +35,8 @@ enum Arg {
     Scratch(usize),
     /// A scalar passed by value: the bytes of one element, 1, 2, 4 or 8 long.
     Scalar(Vec<u8>),
+    /// The one-`int` error flag of the run; a kernel sets it on a bad index.
+    ErrorFlag,
 }
 
 /// One kernel launch.
@@ -68,6 +70,8 @@ pub struct Program {
     free_first: Vec<usize>,
     /// Constant slots a step or output reads as a buffer; each run uploads them.
     const_buffers: Vec<(usize, Vec<u8>)>,
+    /// True when a kernel reads the error flag: the run allocates it and checks it.
+    uses_flag: bool,
 }
 
 fn decode_attr(term: Term) -> Result<Attr, String> {
@@ -328,6 +332,13 @@ impl Program {
             .filter_map(|s| layout.infos[s].constant.clone().map(|bytes| (s, bytes)))
             .collect();
 
+        let uses_flag = steps.iter().any(|step| match step {
+            Step::Launch { passes, .. } => passes
+                .iter()
+                .any(|p| p.args.iter().any(|a| matches!(a, Arg::ErrorFlag))),
+            Step::Alias { .. } => false,
+        });
+
         Ok(Self {
             n_external,
             steps,
@@ -335,6 +346,7 @@ impl Program {
             free_after,
             free_first,
             const_buffers,
+            uses_flag,
         })
     }
 
@@ -361,6 +373,11 @@ impl Program {
         for &s in &self.free_first {
             slots[s] = None;
         }
+        let flag = if self.uses_flag {
+            Some(DeviceBuffer::create_with_data(ctx, &[0u8; 4])?)
+        } else {
+            None
+        };
 
         let queue = ctx
             .queue
@@ -421,6 +438,10 @@ impl Program {
                                             exec.set_arg(&scratch_bufs[*n].buffer.get());
                                         }
                                         Arg::Scalar(bytes) => set_scalar(&mut exec, bytes)?,
+                                        Arg::ErrorFlag => {
+                                            let f = flag.as_ref().expect("flag allocated");
+                                            exec.set_arg(&f.buffer.get());
+                                        }
                                     }
                                 }
                                 exec.set_global_work_sizes(&pass.global);
@@ -445,8 +466,16 @@ impl Program {
 
         // Drain the queue even after an error, before any buffer goes away.
         let finished = queue.finish().map_err(|e| format!("Device error: {:?}", e));
+        drop(queue);
         run?;
         finished?;
+        if let Some(flag) = &flag {
+            let bytes = flag.read(ctx, 4)?;
+            let code = i32::from_ne_bytes(bytes.try_into().map_err(|_| "short flag read")?);
+            if code != 0 {
+                return Err(codegen::indexing::error_message(code));
+            }
+        }
 
         self.outputs
             .iter()
@@ -570,6 +599,7 @@ fn decode_step(
             || codegen::is_scan(name)
             || codegen::is_window(name)
             || codegen::is_sort(name)
+            || codegen::is_indexing(name)
             || codegen::is_gemm(name) =>
         {
             launch_generated(
@@ -641,6 +671,7 @@ fn launch_generated(
                 KernelArg::Scalar(bytes) => Arg::Scalar(bytes),
                 KernelArg::Output => Arg::Out,
                 KernelArg::Scratch(n) => Arg::Scratch(n),
+                KernelArg::ErrorFlag => Arg::ErrorFlag,
             })
             .collect();
         passes.push(Pass {

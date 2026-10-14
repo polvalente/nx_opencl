@@ -1,4 +1,4 @@
-# Tests tagged `requires: :fp64 | :fp16` are excluded when device 0 lacks the extension.
+# Tests tagged `requires: :fp64 | :fp16 | :int64_atomics` are excluded when device 0 lacks the extension.
 skipped = for {:requires, cap} = filter <- NxCL.Parity.unsupported_filters(), do: {filter, cap}
 
 for {_filter, cap} <- skipped, do: IO.puts(NxCL.Parity.skip_reason(cap))

@@ -20,7 +20,11 @@ defmodule NxCL.Parity do
     {:f, 8} => 1.0e-1
   }
 
-  @capabilities %{fp64: "cl_khr_fp64", fp16: "cl_khr_fp16"}
+  @capabilities %{
+    fp64: "cl_khr_fp64",
+    fp16: "cl_khr_fp16",
+    int64_atomics: "cl_khr_int64_base_atomics"
+  }
 
   @doc """
   Checks `fun` on `args` against the reference. Raises `ExUnit.AssertionError`
@@ -195,8 +199,8 @@ defmodule NxCL.Parity do
     end
   end
 
-  @doc "True when the device has the extension for `capability` (`:fp64` or `:fp16`)."
-  @spec capability?(:fp64 | :fp16) :: boolean()
+  @doc "True when the device has the extension for `capability` (`:fp64`, `:fp16` or `:int64_atomics`)."
+  @spec capability?(:fp64 | :fp16 | :int64_atomics) :: boolean()
   def capability?(capability) do
     device_extensions()
     |> String.split(" ", trim: true)
@@ -204,7 +208,7 @@ defmodule NxCL.Parity do
   end
 
   @doc "Message for a skipped capability, or `nil` when the device has it."
-  @spec skip_reason(:fp64 | :fp16) :: String.t() | nil
+  @spec skip_reason(:fp64 | :fp16 | :int64_atomics) :: String.t() | nil
   def skip_reason(capability) do
     unless capability?(capability) do
       "skipped: device #{device_name()} lacks #{@capabilities[capability]}"
@@ -212,7 +216,7 @@ defmodule NxCL.Parity do
   end
 
   @doc "ExUnit exclude filters for every capability the device lacks."
-  @spec unsupported_filters() :: [{:requires, :fp64 | :fp16}]
+  @spec unsupported_filters() :: [{:requires, :fp64 | :fp16 | :int64_atomics}]
   def unsupported_filters do
     for cap <- Map.keys(@capabilities), skip_reason(cap), do: {:requires, cap}
   end

@@ -203,10 +203,10 @@ defmodule NxCL.CompilerTest do
     end
 
     test "an unsupported op raises ArgumentError when compiled" do
-      jitted = Nx.Defn.jit(fn x -> Nx.gather(x, Nx.tensor([[0]])) end, compiler: NxCL.Compiler)
+      jitted = Nx.Defn.jit(fn x -> Nx.fft(x) end, compiler: NxCL.Compiler)
 
       assert_raise ArgumentError, ~r/^does not yet lower op/, fn ->
-        jitted.(Nx.tensor([1.0]))
+        jitted.(Nx.tensor([1.0, 2.0], type: :c64))
       end
     end
   end

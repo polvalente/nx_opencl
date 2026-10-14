@@ -139,10 +139,22 @@ defmodule NxCL.ParityTest do
     end
 
     test "a device with the extension is not skipped" do
-      Application.put_env(:nx_opencl, :parity_extensions, "cl_khr_fp64 cl_khr_fp16")
+      Application.put_env(
+        :nx_opencl,
+        :parity_extensions,
+        "cl_khr_fp64 cl_khr_fp16 cl_khr_int64_base_atomics"
+      )
 
       assert Parity.skip_reason(:fp64) == nil
       assert Parity.unsupported_filters() == []
+    end
+
+    test "a device without 64-bit atomics gives a skip message and an exclude filter" do
+      Application.put_env(:nx_opencl, :parity_extensions, "cl_khr_fp64 cl_khr_fp16")
+
+      refute Parity.capability?(:int64_atomics)
+      assert Parity.skip_reason(:int64_atomics) =~ "lacks cl_khr_int64_base_atomics"
+      assert Parity.unsupported_filters() == [requires: :int64_atomics]
     end
 
     defp restore({:ok, v}), do: Application.put_env(:nx_opencl, :parity_extensions, v)

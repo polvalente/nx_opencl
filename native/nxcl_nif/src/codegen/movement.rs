@@ -1178,6 +1178,7 @@ mod tests {
         let no64 = Caps {
             fp64: false,
             fp16: true,
+            int64_atomics: true,
         };
         for dtype in [F64, C128] {
             let i = instr("reverse", vec![buf(dtype, &[2])], dtype, &[2], ints(&[0]));

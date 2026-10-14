@@ -8,6 +8,7 @@ pub mod conv;
 pub mod elementwise;
 pub mod gemm;
 pub mod index;
+pub mod indexing;
 pub mod movement;
 pub mod reduce;
 pub mod scan;
@@ -53,6 +54,9 @@ pub enum KernelArg {
     Output,
     /// The i-th scratch buffer of the plan.
     Scratch(usize),
+    /// The program's error flag, one `int` the kernel sets to a nonzero code on a
+    /// bad index. The run fails after the queue drains if it is set.
+    ErrorFlag,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +129,8 @@ impl Limits {
 pub struct Caps {
     pub fp64: bool,
     pub fp16: bool,
+    /// `cl_khr_int64_base_atomics`: 64-bit `atom_add` and `atom_cmpxchg`.
+    pub int64_atomics: bool,
 }
 
 impl Caps {
@@ -132,6 +138,9 @@ impl Caps {
         Self {
             fp64: extensions.split_whitespace().any(|e| e == "cl_khr_fp64"),
             fp16: extensions.split_whitespace().any(|e| e == "cl_khr_fp16"),
+            int64_atomics: extensions
+                .split_whitespace()
+                .any(|e| e == "cl_khr_int64_base_atomics"),
         }
     }
 
@@ -141,6 +150,7 @@ impl Caps {
         Self {
             fp64: true,
             fp16: true,
+            int64_atomics: true,
         }
     }
 
@@ -186,6 +196,11 @@ pub fn is_sort(op: &str) -> bool {
     sort::handles(op)
 }
 
+/// True when `op` is `gather`, `indexed_add` or `indexed_put`.
+pub fn is_indexing(op: &str) -> bool {
+    indexing::handles(op)
+}
+
 /// True when `op` is `batched_gemm` or `conv`.
 pub fn is_gemm(op: &str) -> bool {
     gemm::handles(op) || conv::handles(op)
@@ -201,6 +216,8 @@ pub fn generate_plan(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan
         window::generate(instr, caps)
     } else if sort::handles(&instr.op) {
         sort::generate(instr, caps, limits)
+    } else if indexing::handles(&instr.op) {
+        indexing::generate(instr, caps)
     } else if gemm::handles(&instr.op) {
         gemm::generate(instr, caps, limits)
     } else if conv::handles(&instr.op) {

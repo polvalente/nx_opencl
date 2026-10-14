@@ -154,8 +154,8 @@ defmodule NxCL.LowerTest do
 
   describe "unsupported input" do
     test "an op that is not lowered raises with the fixed prefix" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :gather/, fn ->
-        lower(fn x -> Nx.gather(x, Nx.tensor([[0]])) end, [Nx.tensor([1.0])])
+      assert_raise ArgumentError, ~r/^does not yet lower op :fft/, fn ->
+        lower(fn x -> Nx.fft(x) end, [Nx.tensor([1.0, 2.0], type: :c64)])
       end
     end
 

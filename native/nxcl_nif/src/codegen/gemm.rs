@@ -795,6 +795,7 @@ mod tests {
         let none = Caps {
             fp64: false,
             fp16: false,
+            int64_atomics: true,
         };
         assert!(generate(&gemm(f64t, 1, 4, 4, 4), &none, &Limits::apple())
             .unwrap_err()

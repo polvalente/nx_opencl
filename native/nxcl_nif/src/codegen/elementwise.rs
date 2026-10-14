@@ -1489,6 +1489,7 @@ mod tests {
         let none = Caps {
             fp64: false,
             fp16: true,
+            int64_atomics: true,
         };
         let err = generate(&i, &none).unwrap_err();
         assert!(err.starts_with("missing extension cl_khr_fp64"), "{}", err);
@@ -1511,6 +1512,7 @@ mod tests {
         let none = Caps {
             fp64: true,
             fp16: false,
+            int64_atomics: true,
         };
         let i = instr("add", vec![buf(F16), buf(F16)], F16, vec![]);
         let err = generate(&i, &none).unwrap_err();
@@ -1753,6 +1755,7 @@ mod tests {
         let no64 = Caps {
             fp64: false,
             fp16: true,
+            int64_atomics: true,
         };
         let operands = vec![buf(C128), buf(C128)];
         let err = generate(&instr("add", operands, C128, vec![]), &no64).unwrap_err();

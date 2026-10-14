@@ -418,6 +418,47 @@ defmodule NxCL.Program.Builder do
     }
   end
 
+  @doc """
+  `gather`: the operands are the tensor and the indices `[batch..., length(axes)]`.
+  `axes` are the tensor axes the indices address, sorted. The output is
+  `[batch..., remaining tensor axes...]`.
+  """
+  @spec gather(Instruction.ref(), Instruction.ref(), Nx.Type.t(), tuple(), [non_neg_integer()]) ::
+          Instruction.t()
+  def gather(tensor, indices, type, shape, axes) do
+    %Instruction{
+      op: :gather,
+      operands: [tensor, indices],
+      out_type: type,
+      out_shape: shape,
+      attrs: axes
+    }
+  end
+
+  @doc """
+  `indexed_add` or `indexed_put` over `{target, indices, updates}`. Indices are
+  `{n, length(axes)}` and updates `{n, window...}`; target and updates have the
+  output type. A repeated index adds up (`indexed_add`) or keeps the last update
+  (`indexed_put`).
+  """
+  @spec indexed(
+          :indexed_add | :indexed_put,
+          {Instruction.ref(), Instruction.ref(), Instruction.ref()},
+          Nx.Type.t(),
+          tuple(),
+          [non_neg_integer()]
+        ) :: Instruction.t()
+  def indexed(op, {target, indices, updates}, type, shape, axes)
+      when op in [:indexed_add, :indexed_put] do
+    %Instruction{
+      op: op,
+      operands: [target, indices, updates],
+      out_type: type,
+      out_shape: shape,
+      attrs: axes
+    }
+  end
+
   defp steps_attrs(steps),
     do: [length(steps) | Enum.flat_map(steps, fn {op, a, b} -> [op, a, b] end)]
 
