@@ -19,6 +19,21 @@ defmodule NxCL.Lower do
   alias NxCL.Program
   alias NxCL.Program.Builder
 
+  @reduce_ops [:sum, :product, :reduce_max, :reduce_min, :all, :any]
+  @arg_ops [:argmax, :argmin]
+  @window_ops [:window_sum, :window_product, :window_max, :window_min]
+  @scatter_ops [:window_scatter_max, :window_scatter_min]
+  @scan_blocks %{
+    Nx.Block.CumulativeSum => :cumulative_sum,
+    Nx.Block.CumulativeProduct => :cumulative_product,
+    Nx.Block.CumulativeMin => :cumulative_min,
+    Nx.Block.CumulativeMax => :cumulative_max
+  }
+
+  # Binary ops a `reduce` body may hold: the result has the operand type.
+  @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
+               bitwise_or bitwise_xor left_shift right_shift)a
+
   @unary_ops Builder.unary_ops()
   @binary_ops Builder.binary_ops()
 
@@ -107,6 +122,9 @@ defmodule NxCL.Lower do
       put_ref(state, id, ref(state, inner))
     end
   end
+
+  # A `fun` node holds the body of a `reduce`; the node that owns it reads the body.
+  defp expand(%T{data: %Nx.Defn.Expr{op: :fun}}, state), do: state
 
   # `elem` picks one ref out of a tuple node; it emits no instruction.
   defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :elem, args: [tuple, pos]}}, state) do
@@ -251,6 +269,144 @@ defmodule NxCL.Lower do
     emit(state, node, Builder.eye(node.type, node.shape))
   end
 
+  # -- Reductions, scans, windows, sort ------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in @reduce_ops do
+    emit(
+      state,
+      node,
+      Builder.reduce(op, ref(state, x), node.type, node.shape, axes(x, opts[:axes]))
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in @arg_ops do
+    axes = axes(x, opts[:axis] && [opts[:axis]])
+
+    emit(
+      state,
+      node,
+      Builder.arg_reduce(op, ref(state, x), node.type, node.shape, opts[:tie_break], axes)
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :reduce, args: [x, init, opts, fun]}} = node, state) do
+    steps = reduce_steps(fun, node.type, :reduce)
+    axes = axes(x, opts[:axes])
+
+    cond do
+      not monoid?(steps) ->
+        # Any other body folds in order, starting from the initial accumulator.
+        instr =
+          Builder.reduce_steps(
+            [ref(state, x), ref(state, init)],
+            node.type,
+            node.shape,
+            steps,
+            axes
+          )
+
+        emit(state, node, instr)
+
+      identity_init?(steps, init) ->
+        emit(
+          state,
+          node,
+          Builder.reduce_steps([ref(state, x)], node.type, node.shape, steps, axes)
+        )
+
+      true ->
+        # Fold the initial accumulator in: the result is `fun(total, init)`.
+        {state, total} =
+          push(state, Builder.reduce_steps([ref(state, x)], node.type, node.shape, steps, axes))
+
+        {state, init_ref} = broadcast_to(state, init, node.shape)
+        fold_steps(state, node, steps, total, init_ref)
+    end
+  end
+
+  defp expand(
+         %T{
+           data: %Nx.Defn.Expr{
+             op: :block,
+             args: [%{__struct__: mod, axis: axis, reverse: reverse}, [x], _default, _fun]
+           }
+         } = node,
+         state
+       )
+       when is_map_key(@scan_blocks, mod) do
+    op = Map.fetch!(@scan_blocks, mod)
+    emit(state, node, Builder.scan(op, ref(state, x), node.type, node.shape, axis, reverse))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, dims, opts]}} = node, state)
+       when op in @window_ops do
+    emit(
+      state,
+      node,
+      Builder.window(
+        op,
+        ref(state, x),
+        node.type,
+        node.shape,
+        dims,
+        opts[:strides],
+        opts[:window_dilations],
+        opts[:padding]
+      )
+    )
+  end
+
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :window_reduce, args: [x, init, dims, opts, fun]}} = node,
+         state
+       ) do
+    steps = reduce_steps(fun, node.type, :window_reduce)
+
+    emit(
+      state,
+      node,
+      Builder.window_reduce(
+        ref(state, x),
+        ref(state, init),
+        node.type,
+        node.shape,
+        steps,
+        {dims, opts[:strides], opts[:window_dilations], opts[:padding]}
+      )
+    )
+  end
+
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: op, args: [x, source, init, dims, opts]}} = node,
+         state
+       )
+       when op in @scatter_ops do
+    emit(
+      state,
+      node,
+      Builder.window_scatter(
+        op,
+        ref(state, x),
+        ref(state, source),
+        ref(state, init),
+        node.type,
+        node.shape,
+        {dims, opts[:strides], opts[:padding]}
+      )
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in [:sort, :argsort] do
+    emit(
+      state,
+      node,
+      Builder.sort(op, ref(state, x), node.type, node.shape, opts[:axis] || 0, opts[:direction])
+    )
+  end
+
   defp expand(%T{data: %Nx.Defn.Expr{op: op}}, _state), do: unsupported(op, nil)
 
   # -- Helpers ------------------------------------------------------------
@@ -342,6 +498,85 @@ defmodule NxCL.Lower do
     do: match?({:const, _}, ref(state, operand))
 
   defp scalar_const?(_state, _operand), do: false
+
+  # The reduced axes, sorted; `nil` means every axis.
+  defp axes(%T{shape: shape}, nil), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
+  defp axes(_x, axes), do: Enum.sort(axes)
+
+  # Lowers the body of a `reduce` or `window_reduce` function to steps over
+  # two variables (the parameters) and the result of each earlier step. A body
+  # with any other node raises.
+  defp reduce_steps(%T{data: %Nx.Defn.Expr{op: :fun, args: [params, body, _mfa]}}, type, what) do
+    if length(params) != 2 do
+      unsupported(what, "(the function must take two arguments)")
+    end
+
+    {vars, steps} =
+      body
+      |> Tree.post_order()
+      |> Enum.reduce({%{}, []}, fn
+        %T{data: %Nx.Defn.Expr{id: id, op: :parameter, args: [pos]}}, {vars, steps} ->
+          {Map.put(vars, id, pos), steps}
+
+        %T{data: %Nx.Defn.Expr{id: id, op: op, args: [l, r]}} = node, {vars, steps}
+        when op in @step_ops ->
+          if Enum.any?([node, l, r], &(&1.type != type)) do
+            unsupported(op, "(mixed types in a #{what} body)")
+          end
+
+          a = Map.get(vars, l.data.id) || unsupported(op, "(an operand of a #{what} body)")
+          b = Map.get(vars, r.data.id) || unsupported(op, "(an operand of a #{what} body)")
+          {Map.put(vars, id, 2 + length(steps)), [{op, a, b} | steps]}
+
+        %T{data: %Nx.Defn.Expr{op: op}}, _acc ->
+          unsupported(op, "(in a #{what} body)")
+      end)
+
+    steps = Enum.reverse(steps)
+
+    if steps == [] or Map.fetch!(vars, body.data.id) != 1 + length(steps) do
+      unsupported(what, "(the body must end in a binary op)")
+    end
+
+    steps
+  end
+
+  # A body of one `add`, `multiply`, `max` or `min` over the two parameters is
+  # associative and commutative, so the device may fold it in a tree.
+  defp monoid?([{op, a, b}]) when op in [:add, :multiply, :max, :min],
+    do: {a, b} in [{0, 1}, {1, 0}]
+
+  defp monoid?(_steps), do: false
+
+  # A body that is one `add` or `multiply` with its identity as the initial
+  # accumulator is `sum` or `product`; nothing is left to fold in.
+  defp identity_init?([{op, a, b}], %T{data: %Nx.Defn.Expr{op: :constant, args: [v]}})
+       when {a, b} in [{0, 1}, {1, 0}] do
+    (op == :add and v == 0) or (op == :multiply and v == 1)
+  end
+
+  defp identity_init?(_steps, _init), do: false
+
+  # Emits `fun(total, init)` as elementwise instructions; the last one is the node's.
+  defp fold_steps(state, node, steps, total, init) do
+    last = length(steps) - 1
+
+    {state, _refs} =
+      steps
+      |> Enum.with_index()
+      |> Enum.reduce({state, [total, init]}, fn {{op, a, b}, k}, {state, refs} ->
+        instr = Builder.binary(op, Enum.at(refs, a), Enum.at(refs, b), node.type, node.shape)
+
+        if k == last do
+          {emit(state, node, instr), refs}
+        else
+          {state, ref} = push(state, instr)
+          {state, refs ++ [ref]}
+        end
+      end)
+
+    state
+  end
 
   defp unsupported(op, detail) do
     suffix = if detail, do: " " <> detail, else: ""

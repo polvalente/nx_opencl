@@ -35,14 +35,14 @@ pub fn handles(op: &str) -> bool {
 // ── Kernel assembly ─────────────────────────────────────
 
 /// Collects the parameter list and the matching argument list in one order.
-struct Kernel<'a> {
-    instr: &'a Instr,
-    params: Vec<String>,
-    args: Vec<KernelArg>,
+pub(super) struct Kernel<'a> {
+    pub(super) instr: &'a Instr,
+    pub(super) params: Vec<String>,
+    pub(super) args: Vec<KernelArg>,
 }
 
 impl<'a> Kernel<'a> {
-    fn new(instr: &'a Instr) -> Self {
+    pub(super) fn new(instr: &'a Instr) -> Self {
         Self {
             instr,
             params: Vec::new(),
@@ -51,7 +51,7 @@ impl<'a> Kernel<'a> {
     }
 
     /// Declare operand `k`: a buffer, or a scalar argument for a constant.
-    fn operand(&mut self, k: usize) -> Result<(), String> {
+    pub(super) fn operand(&mut self, k: usize) -> Result<(), String> {
         let o = self
             .instr
             .operands
@@ -72,7 +72,7 @@ impl<'a> Kernel<'a> {
         Ok(())
     }
 
-    fn output(&mut self) -> Result<(), String> {
+    pub(super) fn output(&mut self) -> Result<(), String> {
         let storage = type_info(self.instr.out)?.storage;
         self.params.push(format!("__global {}* out", storage));
         self.args.push(KernelArg::Output);
@@ -80,13 +80,13 @@ impl<'a> Kernel<'a> {
     }
 
     /// Declare the scalar argument `name` with value `v`.
-    fn long(&mut self, name: String, v: i64) {
+    pub(super) fn long(&mut self, name: String, v: i64) {
         self.params.push(format!("const long {}", name));
         self.args.push(KernelArg::Scalar(v.to_ne_bytes().to_vec()));
     }
 
     /// Declare `prefix0`, `prefix1`, ... one per value.
-    fn longs(&mut self, prefix: &str, values: &[i64]) {
+    pub(super) fn longs(&mut self, prefix: &str, values: &[i64]) {
         for (d, v) in values.iter().enumerate() {
             self.long(format!("{}{}", prefix, d), *v);
         }
@@ -94,7 +94,7 @@ impl<'a> Kernel<'a> {
 
     /// Operand `k` as a C expression: the scalar itself for a constant,
     /// else the element at `idx`.
-    fn read(&self, k: usize, idx: &str) -> String {
+    pub(super) fn read(&self, k: usize, idx: &str) -> String {
         if self.instr.operands[k].constant.is_some() {
             format!("in{}", k)
         } else {
@@ -102,7 +102,7 @@ impl<'a> Kernel<'a> {
         }
     }
 
-    fn finish(
+    pub(super) fn finish(
         self,
         caps: &Caps,
         entry: String,
@@ -127,7 +127,7 @@ impl<'a> Kernel<'a> {
 
 /// The extension pragmas for every type the kernel touches, or an error
 /// when the device lacks one.
-fn pragmas(instr: &Instr, caps: &Caps) -> Result<String, String> {
+pub(super) fn pragmas(instr: &Instr, caps: &Caps) -> Result<String, String> {
     let mut dtypes: Vec<DType> = instr.operands.iter().map(|o| o.dtype).collect();
     dtypes.push(instr.out);
     let mut out = String::new();
@@ -163,7 +163,7 @@ fn check_rank(instr: &Instr) -> Result<usize, String> {
     Ok(instr.out_shape.len())
 }
 
-fn ints(attrs: &[Attr], what: &str) -> Result<Vec<i64>, String> {
+pub(super) fn ints(attrs: &[Attr], what: &str) -> Result<Vec<i64>, String> {
     attrs
         .iter()
         .map(|a| match a {
@@ -203,7 +203,7 @@ fn expect_operands(instr: &Instr, n: usize) -> Result<(), String> {
 }
 
 /// Names of the operand types, for the entry name.
-fn type_names(instr: &Instr) -> String {
+pub(super) fn type_names(instr: &Instr) -> String {
     let mut names: Vec<String> = instr.operands.iter().map(|o| o.dtype.name()).collect();
     names.push(instr.out.name());
     names.join("_")

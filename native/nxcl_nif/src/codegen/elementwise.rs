@@ -206,7 +206,7 @@ fn f2i_helper(src: &TypeInfo, out: &TypeInfo) -> String {
 // ── Generator ───────────────────────────────────────────
 
 /// The type an expression computes in: `bf16` computes as `f32`.
-fn math_of(dtype: DType) -> Result<TypeInfo, String> {
+pub(super) fn math_of(dtype: DType) -> Result<TypeInfo, String> {
     let info = type_info(dtype)?;
     if info.half.is_some() {
         type_info(DType::new(Kind::F, 32))
@@ -880,6 +880,102 @@ impl<'a> Gen<'a> {
             other => Err(format!("no elementwise template for op {}", other)),
         }
     }
+}
+
+/// Binary ops a scalar combiner may use: the result has the operand type.
+pub(super) const COMBINER_OPS: [&str; 15] = [
+    "add",
+    "subtract",
+    "multiply",
+    "divide",
+    "quotient",
+    "remainder",
+    "pow",
+    "atan2",
+    "max",
+    "min",
+    "bitwise_and",
+    "bitwise_or",
+    "bitwise_xor",
+    "left_shift",
+    "right_shift",
+];
+
+/// Source for one scalar function built from an elementwise template: the
+/// helpers it calls, the complex helpers it needs per width, and the
+/// function text. Several can merge into one kernel without duplicate helpers.
+#[derive(Default)]
+pub struct ScalarCode {
+    pub helpers: BTreeMap<String, String>,
+    pub cfns: BTreeMap<&'static str, (TypeInfo, Vec<String>)>,
+    pub funcs: String,
+}
+
+impl ScalarCode {
+    pub fn merge(&mut self, other: ScalarCode) {
+        self.helpers.extend(other.helpers);
+        for (prefix, (info, names)) in other.cfns {
+            let entry = self
+                .cfns
+                .entry(prefix)
+                .or_insert_with(|| (info, Vec::new()));
+            entry.1.extend(names);
+        }
+        self.funcs.push_str(&other.funcs);
+    }
+
+    /// Complex preamble, helpers, then the functions.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        for (info, names) in self.cfns.values() {
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            out.push_str(&complex::preamble(info, &names));
+        }
+        for h in self.helpers.values() {
+            out.push_str(h);
+        }
+        out.push_str(&self.funcs);
+        out
+    }
+}
+
+/// The scalar function `static T name(T in0, T in1)` that applies binary op
+/// `op` to two values of `dtype`, with the same arithmetic as the elementwise
+/// kernel for `op`. `dtype` is a math type: `bf16` and `f16` callers pass `f32`.
+pub(super) fn scalar_binary(op: &str, dtype: DType, name: &str) -> Result<ScalarCode, String> {
+    if !COMBINER_OPS.contains(&op) {
+        return Err(format!("{} is not a binary op a combiner can use", op));
+    }
+    let info = type_info(dtype)?;
+    let operand = super::Operand {
+        dtype,
+        shape: Vec::new(),
+        constant: Some(Vec::new()),
+    };
+    let instr = Instr {
+        op: op.to_string(),
+        operands: vec![operand.clone(), operand],
+        out: dtype,
+        out_shape: Vec::new(),
+        attrs: Vec::new(),
+    };
+    let mut gen = Gen {
+        instr: &instr,
+        helpers: BTreeMap::new(),
+        locals: Vec::new(),
+        cfns: BTreeMap::new(),
+    };
+    let (expr, compute) = gen.body()?;
+    let result = gen.store(&expr, &compute)?;
+    let t = info.storage;
+    let locals = gen.locals.join("\n");
+    Ok(ScalarCode {
+        funcs: format!(
+            "static {t} {name}({t} in0, {t} in1) {{\n{locals}\n  return {result};\n}}\n"
+        ),
+        helpers: gen.helpers,
+        cfns: gen.cfns,
+    })
 }
 
 fn require_float(op: &str, m: &TypeInfo) -> Result<(), String> {

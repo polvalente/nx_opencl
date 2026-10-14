@@ -7,7 +7,11 @@ pub mod complex;
 pub mod elementwise;
 pub mod index;
 pub mod movement;
+pub mod reduce;
+pub mod scan;
+pub mod sort;
 pub mod types;
+pub mod window;
 
 use types::DType;
 
@@ -45,6 +49,8 @@ pub enum KernelArg {
     Operand(usize),
     Scalar(Vec<u8>),
     Output,
+    /// The i-th scratch buffer of the plan.
+    Scratch(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +61,61 @@ pub struct KernelSpec {
     pub global: Vec<usize>,
     pub local: Vec<usize>,
     pub args: Vec<KernelArg>,
+}
+
+/// The kernels of one instruction, in launch order, and the scratch buffers
+/// they share. Scratch sizes are in bytes. Ops that need cross-thread
+/// cooperation (reductions, scans, sorts) use more than one pass.
+#[derive(Clone, Debug)]
+pub struct Plan {
+    pub passes: Vec<KernelSpec>,
+    pub scratch: Vec<usize>,
+}
+
+impl Plan {
+    pub fn single(spec: KernelSpec) -> Self {
+        Self {
+            passes: vec![spec],
+            scratch: Vec::new(),
+        }
+    }
+}
+
+/// Workgroup limits of the device. Cooperative kernels size their groups and
+/// local arrays from these; none of them is a constant in the templates.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// `CL_DEVICE_MAX_WORK_GROUP_SIZE`.
+    pub max_wg: usize,
+    /// `CL_DEVICE_LOCAL_MEM_SIZE`, in bytes.
+    pub local_mem: usize,
+}
+
+/// The group size codegen aims for when the device allows it.
+const PREFERRED_WG: usize = 256;
+
+impl Limits {
+    /// Largest power of two that is at most `PREFERRED_WG` and the device
+    /// maximum, and whose local arrays (`item_bytes` per work item) fit in
+    /// local memory. At least 1.
+    pub fn group_size(&self, item_bytes: usize) -> usize {
+        let mut wg = 1;
+        while wg * 2 <= PREFERRED_WG.min(self.max_wg)
+            && wg * 2 * item_bytes.max(1) <= self.local_mem
+        {
+            wg *= 2;
+        }
+        wg
+    }
+
+    /// Apple's OpenCL GPU: 256 threads, 32 KiB of local memory. For source tests.
+    #[cfg(test)]
+    pub fn apple() -> Self {
+        Self {
+            max_wg: 256,
+            local_mem: 32 * 1024,
+        }
+    }
 }
 
 /// What the device can do, as far as codegen cares.
@@ -101,6 +162,41 @@ pub fn is_elementwise(op: &str) -> bool {
 /// True when `op` is built by the movement family.
 pub fn is_movement(op: &str) -> bool {
     movement::handles(op)
+}
+
+/// True when `op` is a reduction (`sum`, `argmax`, generic `reduce`, ...).
+pub fn is_reduction(op: &str) -> bool {
+    reduce::handles(op)
+}
+
+/// True when `op` is a cumulative op.
+pub fn is_scan(op: &str) -> bool {
+    scan::handles(op)
+}
+
+/// True when `op` is a window op.
+pub fn is_window(op: &str) -> bool {
+    window::handles(op)
+}
+
+/// True when `op` is `sort` or `argsort`.
+pub fn is_sort(op: &str) -> bool {
+    sort::handles(op)
+}
+
+/// Generate the kernels for any op this module knows, one or several passes.
+pub fn generate_plan(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
+    if reduce::handles(&instr.op) {
+        reduce::generate(instr, caps, limits)
+    } else if scan::handles(&instr.op) {
+        scan::generate(instr, caps, limits)
+    } else if window::handles(&instr.op) {
+        window::generate(instr, caps)
+    } else if sort::handles(&instr.op) {
+        sort::generate(instr, caps, limits)
+    } else {
+        generate(instr, caps).map(Plan::single)
+    }
 }
 
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {

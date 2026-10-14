@@ -32,20 +32,30 @@ enum Arg {
     Slot(usize),
     /// The output buffer of the step.
     Out,
+    /// A scratch buffer the passes of the step share.
+    Scratch(usize),
     /// A scalar passed by value: the bytes of one element, 1, 2, 4 or 8 long.
     Scalar(Vec<u8>),
+}
+
+/// One kernel launch.
+struct Pass {
+    kernel: Arc<CompiledKernel>,
+    args: Vec<Arg>,
+    global: Vec<usize>,
+    local: Vec<usize>,
 }
 
 enum Step {
     /// The result shares the operand's buffer.
     Alias { src: usize, out: usize },
+    /// One or more launches in order. `scratch` holds the byte size of each
+    /// scratch buffer the passes read and write; they live for the step.
     Launch {
-        kernel: Arc<CompiledKernel>,
-        args: Vec<Arg>,
+        passes: Vec<Pass>,
+        scratch: Vec<usize>,
         out: usize,
         out_bytes: usize,
-        global: Vec<usize>,
-        local: Vec<usize>,
     },
 }
 
@@ -302,8 +312,8 @@ impl Program {
                         read[*src] = true;
                     }
                 }
-                Step::Launch { args, .. } => {
-                    for a in args {
+                Step::Launch { passes, .. } => {
+                    for a in passes.iter().flat_map(|p| p.args.iter()) {
                         if let Arg::Slot(s) = a {
                             if *s < n_external {
                                 read[*s] = true;
@@ -372,12 +382,10 @@ impl Program {
                         slots[*out] = slots[*src].clone();
                     }
                     Step::Launch {
-                        kernel,
-                        args,
+                        passes,
+                        scratch,
                         out,
                         out_bytes,
-                        global,
-                        local,
                     } => {
                         let out_buf = Arc::new(DeviceBuffer::create(ctx, *out_bytes)?);
                         // An empty output needs no launch.
@@ -388,38 +396,48 @@ impl Program {
                             }
                             continue;
                         }
-                        let mut bufs = Vec::with_capacity(args.len());
-                        for a in args {
-                            if let Arg::Slot(o) = a {
-                                bufs.push(slots[*o].clone().ok_or_else(|| {
-                                    "an input buffer the program reads was not given".to_string()
-                                })?);
-                            }
-                        }
-                        let mut next = bufs.iter();
-                        let mut exec = ExecuteKernel::new(&kernel.kernel);
-                        unsafe {
-                            for a in args {
-                                match a {
-                                    Arg::Slot(_) => {
-                                        let b = next.next().expect("one buffer per slot arg");
-                                        exec.set_arg(&b.buffer.get());
-                                    }
-                                    Arg::Out => {
-                                        exec.set_arg(&out_buf.buffer.get());
-                                    }
-                                    Arg::Scalar(bytes) => set_scalar(&mut exec, bytes)?,
+                        let scratch_bufs = scratch
+                            .iter()
+                            .map(|&n| DeviceBuffer::create(ctx, n))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for pass in passes {
+                            let mut bufs = Vec::with_capacity(pass.args.len());
+                            for a in &pass.args {
+                                if let Arg::Slot(o) = a {
+                                    bufs.push(slots[*o].clone().ok_or_else(|| {
+                                        "an input buffer the program reads was not given"
+                                            .to_string()
+                                    })?);
                                 }
                             }
-                            exec.set_global_work_sizes(global);
-                            if !local.is_empty() {
-                                exec.set_local_work_sizes(local);
+                            let mut next = bufs.iter();
+                            let mut exec = ExecuteKernel::new(&pass.kernel.kernel);
+                            unsafe {
+                                for a in &pass.args {
+                                    match a {
+                                        Arg::Slot(_) => {
+                                            let b = next.next().expect("one buffer per slot arg");
+                                            exec.set_arg(&b.buffer.get());
+                                        }
+                                        Arg::Out => {
+                                            exec.set_arg(&out_buf.buffer.get());
+                                        }
+                                        Arg::Scratch(n) => {
+                                            exec.set_arg(&scratch_bufs[*n].buffer.get());
+                                        }
+                                        Arg::Scalar(bytes) => set_scalar(&mut exec, bytes)?,
+                                    }
+                                }
+                                exec.set_global_work_sizes(&pass.global);
+                                if !pass.local.is_empty() {
+                                    exec.set_local_work_sizes(&pass.local);
+                                }
+                                // The event is dropped; `finish` waits for it.
+                                exec.enqueue_nd_range(&queue)
+                                    .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
                             }
-                            // The event is dropped; `finish` waits for it.
-                            exec.enqueue_nd_range(&queue)
-                                .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
+                            ctx.stats.launches.fetch_add(1, Ordering::Relaxed);
                         }
-                        ctx.stats.launches.fetch_add(1, Ordering::Relaxed);
                         slots[*out] = Some(out_buf);
                     }
                 }
@@ -452,8 +470,8 @@ fn liveness(n_external: usize, steps: &[Step], outputs: &[usize]) -> (Vec<Vec<us
     for (i, step) in steps.iter().enumerate() {
         match step {
             Step::Alias { src, .. } => last_read[*src] = Some(i),
-            Step::Launch { args, .. } => {
-                for a in args {
+            Step::Launch { passes, .. } => {
+                for a in passes.iter().flat_map(|p| p.args.iter()) {
                     if let Arg::Slot(o) = a {
                         last_read[*o] = Some(i);
                     }
@@ -552,9 +570,16 @@ fn decode_step(
     };
 
     match op.as_str() {
-        name if codegen::is_movement(name) => launch_generated(
-            ctx, layout, name, &operands, out_dtype, out_shape, attrs, out,
-        ),
+        name if codegen::is_movement(name)
+            || codegen::is_reduction(name)
+            || codegen::is_scan(name)
+            || codegen::is_window(name)
+            || codegen::is_sort(name) =>
+        {
+            launch_generated(
+                ctx, layout, name, &operands, out_dtype, out_shape, attrs, out,
+            )
+        }
         name if codegen::is_elementwise(name) => {
             // `as_type` to the same type moves no data.
             if name == "as_type" && expect(1).is_ok() {
@@ -594,12 +619,15 @@ fn decode_step(
                 ));
             }
             Ok(Step::Launch {
-                kernel,
-                args,
+                passes: vec![Pass {
+                    kernel,
+                    args,
+                    global: vec![round_up(m, MATMUL_TILE), round_up(n, MATMUL_TILE)],
+                    local: vec![MATMUL_TILE, MATMUL_TILE],
+                }],
+                scratch: Vec::new(),
                 out,
                 out_bytes,
-                global: vec![round_up(m, MATMUL_TILE), round_up(n, MATMUL_TILE)],
-                local: vec![MATMUL_TILE, MATMUL_TILE],
             })
         }
         "reshape" | "squeeze" => {
@@ -639,24 +667,32 @@ fn launch_generated(
         out_shape,
         attrs,
     };
-    let spec = codegen::generate(&instr, &ctx.caps)?;
-    let kernel = kernel::cached(ctx, &spec.source, &spec.entry, &spec.build_options)?;
-    let args = spec
-        .args
-        .into_iter()
-        .map(|a| match a {
-            KernelArg::Operand(k) => Arg::Slot(operands[k]),
-            KernelArg::Scalar(bytes) => Arg::Scalar(bytes),
-            KernelArg::Output => Arg::Out,
-        })
-        .collect();
+    let plan = codegen::generate_plan(&instr, &ctx.caps, &ctx.limits)?;
+    let mut passes = Vec::with_capacity(plan.passes.len());
+    for spec in plan.passes {
+        let kernel = kernel::cached(ctx, &spec.source, &spec.entry, &spec.build_options)?;
+        let args = spec
+            .args
+            .into_iter()
+            .map(|a| match a {
+                KernelArg::Operand(k) => Arg::Slot(operands[k]),
+                KernelArg::Scalar(bytes) => Arg::Scalar(bytes),
+                KernelArg::Output => Arg::Out,
+                KernelArg::Scratch(n) => Arg::Scratch(n),
+            })
+            .collect();
+        passes.push(Pass {
+            kernel,
+            args,
+            global: spec.global,
+            local: spec.local,
+        });
+    }
     Ok(Step::Launch {
-        kernel,
-        args,
+        passes,
+        scratch: plan.scratch,
         out,
         out_bytes,
-        global: spec.global,
-        local: spec.local,
     })
 }
 
@@ -700,11 +736,14 @@ fn decode_launch(
     }
     let kernel = kernel::cached(ctx, &source, &entry, &opts)?;
     Ok(Step::Launch {
-        kernel,
-        args,
+        passes: vec![Pass {
+            kernel,
+            args,
+            global,
+            local,
+        }],
+        scratch: Vec::new(),
         out,
         out_bytes,
-        global,
-        local,
     })
 }

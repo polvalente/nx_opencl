@@ -1,4 +1,4 @@
-use crate::codegen::Caps;
+use crate::codegen::{Caps, Limits};
 use crate::kernel::{CompiledKernel, KernelKey};
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use opencl3::context::Context;
@@ -14,6 +14,8 @@ pub struct DeviceCtx {
     pub unified: bool,
     /// Extensions codegen checks before it emits a kernel.
     pub caps: Caps,
+    /// Workgroup and local-memory limits codegen sizes cooperative kernels from.
+    pub limits: Limits,
     pub kernels: Mutex<HashMap<KernelKey, Arc<CompiledKernel>>>,
     pub stats: KernelStats,
     pub live_buffers: Arc<AtomicUsize>,
@@ -57,6 +59,11 @@ impl DeviceCtx {
         let unified = device.host_unified_memory().unwrap_or(false);
         let caps = Caps::from_extensions(&device.extensions().unwrap_or_default());
 
+        let limits = Limits {
+            max_wg: device.max_work_group_size().unwrap_or(1),
+            local_mem: device.local_mem_size().unwrap_or(0) as usize,
+        };
+
         let context = Context::from_device(&device)
             .map_err(|e| format!("Failed to create context: {:?}", e))?;
 
@@ -71,6 +78,7 @@ impl DeviceCtx {
             device,
             unified,
             caps,
+            limits,
             kernels: Mutex::new(HashMap::new()),
             stats: KernelStats::default(),
             live_buffers: Arc::new(AtomicUsize::new(0)),

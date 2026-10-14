@@ -216,6 +216,175 @@ defmodule NxCL.Program.Builder do
   end
 
   @doc """
+  A reduction over `axes`: `sum`, `product`, `reduce_max`, `reduce_min`, `all` or
+  `any`. The output type is the accumulator type; `keep_axes` only shows in the
+  output shape.
+  """
+  @spec reduce(atom(), Instruction.ref(), Nx.Type.t(), tuple(), [non_neg_integer()]) ::
+          Instruction.t()
+  def reduce(op, operand, type, shape, axes)
+      when op in [:sum, :product, :reduce_max, :reduce_min, :all, :any] do
+    %Instruction{op: op, operands: [operand], out_type: type, out_shape: shape, attrs: axes}
+  end
+
+  @doc "`argmax` or `argmin` over `axes`; the output holds the index. `tie_break` is `:low` or `:high`."
+  @spec arg_reduce(
+          :argmax | :argmin,
+          Instruction.ref(),
+          Nx.Type.t(),
+          tuple(),
+          :low | :high,
+          [non_neg_integer()]
+        ) :: Instruction.t()
+  def arg_reduce(op, operand, type, shape, tie_break, axes)
+      when op in [:argmax, :argmin] and tie_break in [:low, :high] do
+    %Instruction{
+      op: op,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: [tie_break | axes]
+    }
+  end
+
+  @doc """
+  A generic `reduce` over `axes`. `steps` is the combiner as `{op, a, b}`
+  triples over variables: 0 and 1 are the two accumulator values and step `k`
+  defines variable `2 + k`. `operands` is the tensor alone for an `add`,
+  `multiply`, `max` or `min` body (the initial accumulator is folded in
+  afterwards), or the tensor and the initial accumulator for any other body.
+  """
+  @spec reduce_steps(
+          [Instruction.ref()],
+          Nx.Type.t(),
+          tuple(),
+          [{atom(), non_neg_integer(), non_neg_integer()}],
+          [non_neg_integer()]
+        ) :: Instruction.t()
+  def reduce_steps(operands, type, shape, steps, axes) do
+    %Instruction{
+      op: :reduce,
+      operands: operands,
+      out_type: type,
+      out_shape: shape,
+      attrs: steps_attrs(steps) ++ axes
+    }
+  end
+
+  @doc "A cumulative `:cumulative_sum`, `:cumulative_product`, `:cumulative_min` or `:cumulative_max` along `axis`."
+  @spec scan(atom(), Instruction.ref(), Nx.Type.t(), tuple(), non_neg_integer(), boolean()) ::
+          Instruction.t()
+  def scan(op, operand, type, shape, axis, reverse)
+      when op in [:cumulative_sum, :cumulative_product, :cumulative_min, :cumulative_max] do
+    %Instruction{
+      op: op,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: [axis, if(reverse, do: 1, else: 0)]
+    }
+  end
+
+  @doc """
+  A window op: `:window_sum`, `:window_product`, `:window_max` or `:window_min`.
+  `padding` is `{low, high}` per axis.
+  """
+  @spec window(
+          atom(),
+          Instruction.ref(),
+          Nx.Type.t(),
+          tuple(),
+          tuple(),
+          [pos_integer()],
+          [pos_integer()],
+          [{integer(), integer()}]
+        ) :: Instruction.t()
+  def window(op, operand, type, shape, dims, strides, dilations, padding)
+      when op in [:window_sum, :window_product, :window_max, :window_min] do
+    %Instruction{
+      op: op,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: window_attrs(dims, strides, dilations, padding)
+    }
+  end
+
+  @doc """
+  A generic `window_reduce`; `init` is a scalar ref that also pads the window.
+  `window` is `{dims, strides, dilations, padding}`.
+  """
+  @spec window_reduce(
+          Instruction.ref(),
+          Instruction.ref(),
+          Nx.Type.t(),
+          tuple(),
+          [{atom(), non_neg_integer(), non_neg_integer()}],
+          {tuple(), [pos_integer()], [pos_integer()], [{integer(), integer()}]}
+        ) :: Instruction.t()
+  def window_reduce(operand, init, type, shape, steps, {dims, strides, dilations, padding}) do
+    %Instruction{
+      op: :window_reduce,
+      operands: [operand, init],
+      out_type: type,
+      out_shape: shape,
+      attrs: steps_attrs(steps) ++ window_attrs(dims, strides, dilations, padding)
+    }
+  end
+
+  @doc """
+  `:window_scatter_max` or `:window_scatter_min`: adds each `source` value at the
+  position its window selects. `window` is `{dims, strides, padding}`.
+  """
+  @spec window_scatter(
+          atom(),
+          Instruction.ref(),
+          Instruction.ref(),
+          Instruction.ref(),
+          Nx.Type.t(),
+          tuple(),
+          {tuple(), [pos_integer()], [{integer(), integer()}]}
+        ) :: Instruction.t()
+  def window_scatter(op, operand, source, init, type, shape, {dims, strides, padding})
+      when op in [:window_scatter_max, :window_scatter_min] do
+    dilations = List.duplicate(1, tuple_size(dims))
+
+    %Instruction{
+      op: op,
+      operands: [operand, source, init],
+      out_type: type,
+      out_shape: shape,
+      attrs: window_attrs(dims, strides, dilations, padding)
+    }
+  end
+
+  @doc "`:sort` or `:argsort` along `axis`; `direction` is `:asc` or `:desc`."
+  @spec sort(
+          :sort | :argsort,
+          Instruction.ref(),
+          Nx.Type.t(),
+          tuple(),
+          non_neg_integer(),
+          :asc | :desc
+        ) :: Instruction.t()
+  def sort(op, operand, type, shape, axis, direction)
+      when op in [:sort, :argsort] and direction in [:asc, :desc] do
+    %Instruction{
+      op: op,
+      operands: [operand],
+      out_type: type,
+      out_shape: shape,
+      attrs: [axis, direction]
+    }
+  end
+
+  defp steps_attrs(steps),
+    do: [length(steps) | Enum.flat_map(steps, fn {op, a, b} -> [op, a, b] end)]
+
+  defp window_attrs(dims, strides, dilations, padding),
+    do: Tuple.to_list(dims) ++ strides ++ dilations ++ Enum.flat_map(padding, &Tuple.to_list/1)
+
+  @doc """
   A generic kernel launch. `source` is OpenCL C, `entry` the kernel name.
 
   The kernel takes the operand buffers, then the output buffer, then each
