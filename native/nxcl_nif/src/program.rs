@@ -19,12 +19,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::buffer::DeviceBuffer;
-use crate::codegen::types::{encode_const, type_info, ConstVal, DType, Kind};
+use crate::codegen::types::{encode_const, type_info, ConstVal, DType};
 use crate::codegen::{self, Attr, Instr, KernelArg, Operand};
 use crate::device_ctx::DeviceCtx;
-use crate::kernel::{self, CompiledKernel, MATMUL_SOURCE};
+use crate::kernel::{self, CompiledKernel};
 
-const MATMUL_TILE: usize = 8;
 const MAX_DIMS: usize = 3;
 
 /// One kernel argument.
@@ -69,10 +68,6 @@ pub struct Program {
     free_first: Vec<usize>,
     /// Constant slots a step or output reads as a buffer; each run uploads them.
     const_buffers: Vec<(usize, Vec<u8>)>,
-}
-
-fn round_up(value: usize, multiple: usize) -> usize {
-    value.div_ceil(multiple) * multiple
 }
 
 fn decode_attr(term: Term) -> Result<Attr, String> {
@@ -574,7 +569,8 @@ fn decode_step(
             || codegen::is_reduction(name)
             || codegen::is_scan(name)
             || codegen::is_window(name)
-            || codegen::is_sort(name) =>
+            || codegen::is_sort(name)
+            || codegen::is_gemm(name) =>
         {
             launch_generated(
                 ctx, layout, name, &operands, out_dtype, out_shape, attrs, out,
@@ -595,40 +591,6 @@ fn decode_step(
         "bitcast" => {
             expect(1)?;
             alias_of(operands[0], layout)
-        }
-        "dot" => {
-            expect(2)?;
-            let f32t = DType::new(Kind::F, 32);
-            let all_f32 = operands
-                .iter()
-                .all(|&o| layout.infos[o].dtype == Some(f32t))
-                && out_dtype == f32t;
-            if !all_f32 {
-                return Err("dot runs on f32 only until stage 08".to_string());
-            }
-            let m = attr_size(&attrs, 0, "m")?;
-            let n = attr_size(&attrs, 1, "n")?;
-            let k = attr_size(&attrs, 2, "k")?;
-            let opts = format!("-DTS={}", MATMUL_TILE);
-            let kernel = kernel::cached(ctx, MATMUL_SOURCE, "matmul", &opts)?;
-            let mut args: Vec<Arg> = operands.iter().map(|&o| Arg::Slot(o)).collect();
-            args.push(Arg::Out);
-            for v in [m, n, k] {
-                args.push(Arg::Scalar(
-                    to_i32(v as i64, "dot size")?.to_ne_bytes().to_vec(),
-                ));
-            }
-            Ok(Step::Launch {
-                passes: vec![Pass {
-                    kernel,
-                    args,
-                    global: vec![round_up(m, MATMUL_TILE), round_up(n, MATMUL_TILE)],
-                    local: vec![MATMUL_TILE, MATMUL_TILE],
-                }],
-                scratch: Vec::new(),
-                out,
-                out_bytes,
-            })
         }
         "reshape" | "squeeze" => {
             expect(1)?;

@@ -14,7 +14,7 @@ defmodule NxCL.Executor do
   #     instr = {op, [ref], out_type, out_shape, [attr]}
   #     ref = {:input | :capture | :const | :result, index}
   #
-  # A `dot` carries `[m, n, k]` as attrs. Buffers go to `eval_program/2` in the
+  # A `batched_gemm` carries `[b, m, n, k]` as attrs. Buffers go to `eval_program/2` in the
   # order inputs, captures, constants; constants go as `nil`, because Rust holds
   # their values. The native side generates the kernel for each instruction from
   # the op, the types and the shapes.
@@ -133,12 +133,6 @@ defmodule NxCL.Executor do
   defp encode_const({value, type}) do
     raise NxCL.CompilerError,
       message: "constant #{inspect(value)} of type #{inspect(type)} is not supported yet"
-  end
-
-  defp encode_instruction(%Instruction{op: :dot} = instr) do
-    {m, n} = instr.out_shape
-    [k] = instr.attrs
-    {:dot, instr.operands, instr.out_type, instr.out_shape, [m, n, k]}
   end
 
   defp encode_instruction(%Instruction{} = instr),

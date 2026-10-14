@@ -284,7 +284,9 @@ defmodule NxCL.ShapeOpsTest do
         x |> Nx.dot(w) |> Nx.add(Nx.broadcast(b, {4, 3})) |> Nx.sigmoid()
       end
 
-      assert ops(lower(layer, [x, w, b])) == [:dot, :broadcast, :add, :sigmoid]
+      assert ops(lower(layer, [x, w, b])) ==
+               [:reshape, :reshape, :batched_gemm, :reshape, :broadcast, :add, :sigmoid]
+
       assert_parity(:sigmoid, layer, [x, w, b], rtol: 1.0e-4, atol: 1.0e-4)
     end
   end

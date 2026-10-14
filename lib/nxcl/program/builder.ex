@@ -81,11 +81,51 @@ defmodule NxCL.Program.Builder do
     %Instruction{op: :clip, operands: [operand, min, max], out_type: type, out_shape: shape}
   end
 
-  @doc "A 2D matrix product. `k` is the contracted size."
-  @spec dot(Instruction.ref(), Instruction.ref(), Nx.Type.t(), tuple(), pos_integer()) ::
+  @doc """
+  A batched matrix product: operands `[b, m, k]` and `[b, k, n]` give `[b, m, n]`.
+  Every `dot` lowers to this form (`NxCL.Lower.Contract`). Both operands have the
+  output type.
+  """
+  @spec batched_gemm(
+          Instruction.ref(),
+          Instruction.ref(),
+          Nx.Type.t(),
+          {pos_integer(), non_neg_integer(), non_neg_integer()},
+          non_neg_integer()
+        ) :: Instruction.t()
+  def batched_gemm(left, right, type, {b, m, n} = shape, k) do
+    %Instruction{
+      op: :batched_gemm,
+      operands: [left, right],
+      out_type: type,
+      out_shape: shape,
+      attrs: [b, m, n, k]
+    }
+  end
+
+  @doc """
+  A convolution over a normalized layout: input `[n, c, spatial...]`, kernel
+  `[o, i, kernel spatial...]`, output `[o, n / batch_groups, output spatial...]`.
+  `opts` holds `:strides`, `:padding` (`{low, high}` per axis), `:kernel_dilation`,
+  `:input_dilation`, `:feature_groups` and `:batch_groups`. Both operands have
+  the output type.
+  """
+  @spec conv(Instruction.ref(), Instruction.ref(), Nx.Type.t(), tuple(), map()) ::
           Instruction.t()
-  def dot(left, right, type, shape, k) do
-    %Instruction{op: :dot, operands: [left, right], out_type: type, out_shape: shape, attrs: [k]}
+  def conv(input, kernel, type, shape, opts) do
+    attrs =
+      [length(opts.strides) | opts.strides] ++
+        Enum.flat_map(opts.padding, &Tuple.to_list/1) ++
+        opts.kernel_dilation ++
+        opts.input_dilation ++ [opts.feature_groups, opts.batch_groups]
+
+    %Instruction{
+      op: :conv,
+      operands: [input, kernel],
+      out_type: type,
+      out_shape: shape,
+      attrs: attrs
+    }
   end
 
   @doc "A `reshape` or `squeeze`. The result shares the operand's buffer."

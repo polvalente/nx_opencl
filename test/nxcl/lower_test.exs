@@ -32,35 +32,42 @@ defmodule NxCL.LowerTest do
              inputs: [{@f32, {1, 2}}, {@f32, {2, 3}}, {@f32, {1, 3}}],
              captures: [],
              constants: [],
-             outputs: [{:result, 2}],
+             outputs: [{:result, 5}],
              ref_counts: %{
                {:input, 0} => 1,
                {:input, 1} => 1,
                {:input, 2} => 1,
                {:result, 0} => 1,
                {:result, 1} => 1,
-               {:result, 2} => 1
+               {:result, 2} => 1,
+               {:result, 3} => 1,
+               {:result, 4} => 1,
+               {:result, 5} => 1
              }
            } = program
 
+    # The dot is two reshapes to [b, m, k] and [b, k, n], one batched_gemm, and a reshape back.
     assert [
+             %Instruction{op: :reshape, operands: [{:input, 0}], out_shape: {1, 1, 2}},
+             %Instruction{op: :reshape, operands: [{:input, 1}], out_shape: {1, 2, 3}},
              %Instruction{
-               op: :dot,
-               operands: [{:input, 0}, {:input, 1}],
+               op: :batched_gemm,
+               operands: [{:result, 0}, {:result, 1}],
                out_type: @f32,
-               out_shape: {1, 3},
-               attrs: [2]
+               out_shape: {1, 1, 3},
+               attrs: [1, 1, 3, 2]
              },
+             %Instruction{op: :reshape, operands: [{:result, 2}], out_shape: {1, 3}},
              %Instruction{
                op: :add,
-               operands: [{:result, 0}, {:input, 2}],
+               operands: [{:result, 3}, {:input, 2}],
                out_type: @f32,
                out_shape: {1, 3},
                attrs: []
              },
              %Instruction{
                op: :sigmoid,
-               operands: [{:result, 1}],
+               operands: [{:result, 4}],
                out_type: @f32,
                out_shape: {1, 3},
                attrs: []
@@ -157,19 +164,33 @@ defmodule NxCL.LowerTest do
       assert [%Instruction{op: :add, out_shape: {2}}] = program.instructions
     end
 
-    test "a dot on a dtype other than f32 raises" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :dot.*f32 only/, fn ->
+    test "a dot on another dtype and a vector dot lower to batched_gemm" do
+      ints =
         lower(fn x, y -> Nx.dot(x, y) end, [
           Nx.iota({2, 2}, type: :s32),
           Nx.iota({2, 2}, type: :s32)
         ])
-      end
+
+      assert %Instruction{op: :batched_gemm, out_type: {:s, 32}} = Enum.at(ints.instructions, 2)
+
+      vec = lower(fn x, y -> Nx.dot(x, y) end, [Nx.tensor([1.0, 2.0]), Nx.tensor([1.0, 2.0])])
+
+      assert %Instruction{op: :batched_gemm, out_shape: {1, 1, 1}, attrs: [1, 1, 1, 2]} =
+               Enum.at(vec.instructions, 2)
     end
 
-    test "a dot that is not a 2D matmul raises" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :dot/, fn ->
-        lower(fn x, y -> Nx.dot(x, y) end, [Nx.tensor([1.0, 2.0]), Nx.tensor([1.0, 2.0])])
-      end
+    test "a dot with batch and several contracted axes transposes one side" do
+      program =
+        lower(
+          fn x, y -> Nx.dot(x, [2, 1], [0], y, [1, 2], [0]) end,
+          [Nx.iota({2, 3, 4}), Nx.iota({2, 4, 3, 5})]
+        )
+
+      assert [:transpose, :reshape, :reshape, :batched_gemm, :reshape] ==
+               Enum.map(program.instructions, & &1.op)
+
+      assert %Instruction{attrs: [2, 1, 5, 12], out_shape: {2, 1, 5}} =
+               Enum.at(program.instructions, 3)
     end
 
     test "a while loop raises" do

@@ -4,7 +4,7 @@ defmodule NxCL.Program.Instruction do
 
   Fields:
 
-    * `:op` - the op name, an atom such as `:add` or `:dot`.
+    * `:op` - the op name, an atom such as `:add` or `:batched_gemm`.
     * `:operands` - the `t:ref/0` values the op reads.
     * `:out_type` - the Nx type of the result, for example `{:f, 32}`.
     * `:out_shape` - the shape of the result, a tuple.

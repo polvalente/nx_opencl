@@ -16,6 +16,7 @@ defmodule NxCL.Lower do
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
   alias NxCL.Defn.Tree
+  alias NxCL.Lower.Contract
   alias NxCL.Program
   alias NxCL.Program.Builder
 
@@ -192,21 +193,21 @@ defmodule NxCL.Lower do
     emit(state, node, Builder.clip(rx, rlo, rhi, node.type, node.shape))
   end
 
-  defp expand(
-         %T{data: %Nx.Defn.Expr{op: :dot, args: [l, [1], [], r, [0], []]}} = node,
-         state
-       )
-       when tuple_size(l.shape) == 2 and tuple_size(r.shape) == 2 do
-    for t <- [l, r, node], t.type != {:f, 32} do
-      unsupported(:dot, "(f32 only until stage 08, got #{inspect(t.type)})")
-    end
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :dot, args: args}} = node, state) do
+    [l, contract_l, batch_l, r, contract_r, batch_r] = args
+    {state, rl} = cast(state, l, node.type)
+    {state, rr} = cast(state, r, node.type)
 
-    k = elem(l.shape, 1)
-    emit(state, node, Builder.dot(ref(state, l), ref(state, r), node.type, node.shape, k))
+    sides = {{l.shape, contract_l, batch_l}, {r.shape, contract_r, batch_r}}
+    {state, ref} = Contract.dot(state, &push/2, node, {rl, rr}, sides)
+    put_ref(state, id, ref)
   end
 
-  defp expand(%T{data: %Nx.Defn.Expr{op: :dot}}, _state) do
-    unsupported(:dot, "(only 2D matmul, contracting axis 1 with axis 0)")
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :conv, args: [x, w, opts]}} = node, state) do
+    {state, rx} = cast(state, x, node.type)
+    {state, rw} = cast(state, w, node.type)
+    {state, ref} = Contract.conv(state, &push/2, node, {{rx, x.shape}, {rw, w.shape}}, opts)
+    put_ref(state, id, ref)
   end
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :reshape, args: [x]}} = node, state) do

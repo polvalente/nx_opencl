@@ -4,7 +4,9 @@
 //! N-d index math sits in `index.rs`.
 
 pub mod complex;
+pub mod conv;
 pub mod elementwise;
+pub mod gemm;
 pub mod index;
 pub mod movement;
 pub mod reduce;
@@ -184,6 +186,11 @@ pub fn is_sort(op: &str) -> bool {
     sort::handles(op)
 }
 
+/// True when `op` is `batched_gemm` or `conv`.
+pub fn is_gemm(op: &str) -> bool {
+    gemm::handles(op) || conv::handles(op)
+}
+
 /// Generate the kernels for any op this module knows, one or several passes.
 pub fn generate_plan(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
     if reduce::handles(&instr.op) {
@@ -194,6 +201,10 @@ pub fn generate_plan(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan
         window::generate(instr, caps)
     } else if sort::handles(&instr.op) {
         sort::generate(instr, caps, limits)
+    } else if gemm::handles(&instr.op) {
+        gemm::generate(instr, caps, limits)
+    } else if conv::handles(&instr.op) {
+        conv::generate(instr, caps, limits)
     } else {
         generate(instr, caps).map(Plan::single)
     }
