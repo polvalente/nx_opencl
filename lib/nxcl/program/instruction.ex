@@ -8,8 +8,8 @@ defmodule NxCL.Program.Instruction do
     * `:operands` - the `t:ref/0` values the op reads.
     * `:out_type` - the Nx type of the result, for example `{:f, 32}`.
     * `:out_shape` - the shape of the result, a tuple.
-    * `:attrs` - op-specific extras (`t:attr/0`). Stage 03 adds kernel source
-      here as a binary.
+    * `:attrs` - op-specific extras (`t:attr/0`). A `:launch` instruction carries
+      kernel source here as a binary (see `NxCL.Program.Builder.launch/6`).
     * `:subprograms` - `NxCL.Program.SubProgram` values for `cond` and `while`.
       Empty until stage 10.
 

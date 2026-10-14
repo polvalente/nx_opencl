@@ -16,7 +16,8 @@ defmodule NxCL.Program do
     * `:output_template` - the output container with template tensors, used to
       rebuild tuples and maps from `:outputs`.
     * `:ref_counts` - how often each ref is read, by instructions or as an
-      output. Stage 03 uses it to free buffers.
+      output. The native executor derives the same counts from the encoded
+      program to free buffers at their last reader.
 
   See `NxCL.Program.Instruction` for the ref and attr types.
   """

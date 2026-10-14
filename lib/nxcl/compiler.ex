@@ -31,15 +31,15 @@ defmodule NxCL.Compiler do
 
   The compiler never falls back to the CPU. An op that `NxCL.Lower` cannot
   lower raises `ArgumentError` ("does not yet lower op ...") when the function
-  is compiled. The temporary interpreter runs `f32` only; any other dtype
+  is compiled. The executor runs `f32` only; any other dtype
   raises `NxCL.CompilerError` when the function runs.
   """
 
   @behaviour Nx.Defn.Compiler
 
   alias Nx.Defn.Composite
+  alias NxCL.Executor
   alias NxCL.Lower
-  alias NxCL.Program.Interpreter
 
   @impl true
   def __jit__(key, vars, fun, args_list, opts) do
@@ -53,7 +53,7 @@ defmodule NxCL.Compiler do
     program = Lower.lower(expr, num_inputs)
 
     fn [args] ->
-      [Interpreter.run(program, args)]
+      [Executor.run(program, args)]
     end
   end
 

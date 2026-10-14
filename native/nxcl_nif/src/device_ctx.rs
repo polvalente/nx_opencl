@@ -1,13 +1,27 @@
+use crate::kernel::{CompiledKernel, KernelKey};
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use opencl3::context::Context;
 use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::{Arc, Mutex};
 
 pub struct DeviceCtx {
     pub context: Context,
     pub queue: Mutex<CommandQueue>,
     pub device: Device,
     pub unified: bool,
+    pub kernels: Mutex<HashMap<KernelKey, Arc<CompiledKernel>>>,
+    pub stats: KernelStats,
+    pub live_buffers: Arc<AtomicUsize>,
+}
+
+/// Counters the tests read through `kernel_cache_stats/1`.
+#[derive(Default)]
+pub struct KernelStats {
+    pub builds: AtomicU64,
+    pub hits: AtomicU64,
+    pub launches: AtomicU64,
 }
 
 unsafe impl Send for DeviceCtx {}
@@ -52,6 +66,9 @@ impl DeviceCtx {
             queue: Mutex::new(queue),
             device,
             unified,
+            kernels: Mutex::new(HashMap::new()),
+            stats: KernelStats::default(),
+            live_buffers: Arc::new(AtomicUsize::new(0)),
         })
     }
 }

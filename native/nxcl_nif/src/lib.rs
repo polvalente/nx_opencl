@@ -2,10 +2,13 @@ mod buffer;
 mod device_ctx;
 mod kernel;
 mod ops;
+mod program;
 
 use buffer::DeviceBuffer;
 use device_ctx::DeviceCtx;
-use rustler::{NifResult, OwnedBinary, ResourceArc};
+use rustler::{NifResult, OwnedBinary, ResourceArc, Term};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 struct DeviceCtxInner {
@@ -17,7 +20,7 @@ pub struct NifDeviceCtx {
 }
 
 pub struct NifDeviceBuffer {
-    buffer: DeviceBuffer,
+    buffer: Arc<DeviceBuffer>,
     ctx: Arc<DeviceCtxInner>,
 }
 
@@ -29,8 +32,19 @@ unsafe impl Sync for NifDeviceBuffer {}
 #[rustler::resource_impl]
 impl rustler::Resource for NifDeviceCtx {}
 
+pub struct NifProgram {
+    program: program::Program,
+    ctx: Arc<DeviceCtxInner>,
+}
+
+unsafe impl Send for NifProgram {}
+unsafe impl Sync for NifProgram {}
+
 #[rustler::resource_impl]
 impl rustler::Resource for NifDeviceBuffer {}
+
+#[rustler::resource_impl]
+impl rustler::Resource for NifProgram {}
 
 // ── Device Context ──────────────────────────────────────
 
@@ -87,7 +101,7 @@ fn buffer_create(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match DeviceBuffer::create(&ctx.inner.ctx, size) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
@@ -101,7 +115,7 @@ fn buffer_write(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match DeviceBuffer::create_with_data(&ctx.inner.ctx, data.as_slice()) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
@@ -134,7 +148,7 @@ fn elementwise_binary_op(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match ops::elementwise_binary(&ctx.inner.ctx, &op, &a.buffer, &b.buffer, n) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
@@ -150,7 +164,7 @@ fn elementwise_unary_op(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match ops::elementwise_unary(&ctx.inner.ctx, &op, &a.buffer, n) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
@@ -170,7 +184,7 @@ fn matmul_op(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match ops::matmul(&ctx.inner.ctx, &a.buffer, &b.buffer, m, n, k) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
@@ -188,7 +202,7 @@ fn reduce_op(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match ops::reduce(&ctx.inner.ctx, &op, &input.buffer, n) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
@@ -206,11 +220,73 @@ fn softmax_op(
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match ops::softmax(&ctx.inner.ctx, &input.buffer, rows, cols) {
         Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: buf,
+            buffer: Arc::new(buf),
             ctx: ctx.inner.clone(),
         })),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }
+}
+
+// ── Program Execution ───────────────────────────────────
+
+/// Run `f`, turning a panic into an error term so the VM stays up.
+fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    catch_unwind(AssertUnwindSafe(f))
+        .unwrap_or_else(|_| Err("internal error: NIF panicked".to_string()))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn compile_program(
+    ctx: ResourceArc<NifDeviceCtx>,
+    wire: Term,
+) -> Result<ResourceArc<NifProgram>, String> {
+    guarded(|| {
+        let program = program::Program::decode(&ctx.inner.ctx, wire)?;
+        Ok(ResourceArc::new(NifProgram {
+            program,
+            ctx: ctx.inner.clone(),
+        }))
+    })
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn eval_program(
+    prog: ResourceArc<NifProgram>,
+    buffers: Vec<Option<ResourceArc<NifDeviceBuffer>>>,
+) -> Result<Vec<ResourceArc<NifDeviceBuffer>>, String> {
+    guarded(|| {
+        let externals = buffers
+            .iter()
+            .map(|b| b.as_ref().map(|b| b.buffer.clone()))
+            .collect();
+        let outputs = prog.program.eval(&prog.ctx.ctx, externals)?;
+        Ok(outputs
+            .into_iter()
+            .map(|buffer| {
+                ResourceArc::new(NifDeviceBuffer {
+                    buffer,
+                    ctx: prog.ctx.clone(),
+                })
+            })
+            .collect())
+    })
+}
+
+// ── Counters ────────────────────────────────────────────
+
+#[rustler::nif]
+fn kernel_cache_stats(ctx: ResourceArc<NifDeviceCtx>) -> (u64, u64, u64) {
+    let stats = &ctx.inner.ctx.stats;
+    (
+        stats.builds.load(Ordering::Relaxed),
+        stats.hits.load(Ordering::Relaxed),
+        stats.launches.load(Ordering::Relaxed),
+    )
+}
+
+#[rustler::nif]
+fn live_buffer_count(ctx: ResourceArc<NifDeviceCtx>) -> usize {
+    ctx.inner.ctx.live_buffers.load(Ordering::Relaxed)
 }
 
 extern "C" {

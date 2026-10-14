@@ -51,4 +51,31 @@ defmodule NxCL.Program.Builder do
       attrs: [:alias]
     }
   end
+
+  @doc """
+  A generic kernel launch. `source` is OpenCL C, `entry` the kernel name.
+
+  The kernel takes the operand buffers, then the output buffer, then each
+  scalar as an `int`. `global` and `local` are work sizes, one per dimension
+  (1 to 3); pass `[]` for `local` to let the driver pick.
+  """
+  @spec launch(
+          [Instruction.ref()],
+          Nx.Type.t(),
+          tuple(),
+          binary(),
+          binary(),
+          keyword()
+        ) :: Instruction.t()
+  def launch(operands, type, shape, source, entry, opts) do
+    global = Keyword.fetch!(opts, :global)
+    local = Keyword.get(opts, :local, [])
+    local = if local == [], do: Enum.map(global, fn _ -> 0 end), else: local
+
+    attrs =
+      [source, entry, Keyword.get(opts, :build_options, ""), length(global)] ++
+        global ++ local ++ Keyword.get(opts, :scalars, [])
+
+    %Instruction{op: :launch, operands: operands, out_type: type, out_shape: shape, attrs: attrs}
+  end
 end

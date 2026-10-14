@@ -88,4 +88,28 @@ defmodule NxCL.Native do
 
   @spec softmax_op(reference(), reference(), non_neg_integer(), non_neg_integer()) :: reference()
   def softmax_op(_ctx, _input, _rows, _cols), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Decodes and validates a program wire term and builds its kernels. See
+  `NxCL.Executor` for the term layout.
+  """
+  @spec compile_program(reference(), tuple()) :: {:ok, reference()} | {:error, String.t()}
+  def compile_program(_ctx, _wire), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Runs a compiled program on a list of buffers (inputs, captures, constants in
+  slot order; `nil` for an unread input). Waits once, at the end.
+  """
+  @spec eval_program(reference(), [reference() | nil]) ::
+          {:ok, [reference()]} | {:error, String.t()}
+  def eval_program(_program, _buffers), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Kernel cache counters of a device context: `{builds, hits, launches}`."
+  @spec kernel_cache_stats(reference()) ::
+          {non_neg_integer(), non_neg_integer(), non_neg_integer()}
+  def kernel_cache_stats(_ctx), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "Number of device buffers alive on a device context."
+  @spec live_buffer_count(reference()) :: non_neg_integer()
+  def live_buffer_count(_ctx), do: :erlang.nif_error(:nif_not_loaded)
 end
