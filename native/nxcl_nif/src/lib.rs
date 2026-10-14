@@ -72,6 +72,7 @@ fn device_info(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<Vec<(String, String)
                 "unified_memory".to_string(),
                 info.unified_memory.to_string(),
             ),
+            ("extensions".to_string(), info.extensions),
         ]),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }

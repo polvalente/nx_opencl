@@ -65,6 +65,7 @@ pub struct DeviceInfo {
     pub local_mem_size: u64,
     pub global_mem_size: u64,
     pub unified_memory: bool,
+    pub extensions: String,
 }
 
 impl DeviceCtx {
@@ -89,6 +90,8 @@ impl DeviceCtx {
             .global_mem_size()
             .map_err(|e| format!("{:?}", e))?;
 
+        let extensions = self.device.extensions().map_err(|e| format!("{:?}", e))?;
+
         Ok(DeviceInfo {
             name,
             vendor,
@@ -98,6 +101,7 @@ impl DeviceCtx {
             local_mem_size,
             global_mem_size,
             unified_memory: self.unified,
+            extensions,
         })
     }
 }
