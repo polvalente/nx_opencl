@@ -110,26 +110,36 @@ defmodule NxCL.Lower.Block do
   # One `:host_call`: the block's own function runs on `Nx.BinaryBackend` tensors.
   defp host(state, node, {struct, args, default, fun}) do
     tensors = Enum.filter(args, &match?(%T{}, &1))
+    entry = host_entry(struct, tensors, Composite.traverse(default, &Nx.to_template/1), fun)
+    HostCall.emit(state, node, List.to_tuple(tensors), entry)
+  end
 
-    entry = %{
+  @doc """
+  The `:host_calls` entry for a host block: `tensors` are the block's tensor
+  arguments, `out_template` the output container, `fun` the block's default.
+  """
+  @spec host_entry(struct(), [T.t()], Nx.Container.t(), function()) :: map()
+  def host_entry(struct, tensors, out_template, fun) do
+    %{
       kind: :runtime_call,
       fun: fn input, _opts -> run_on_host(fun, struct, input) end,
       opts: [],
       in_template: List.to_tuple(Enum.map(tensors, &Nx.to_template/1)),
-      out_template: Composite.traverse(default, &Nx.to_template/1)
+      out_template: out_template
     }
-
-    HostCall.emit(state, node, List.to_tuple(tensors), entry)
   end
 
-  # Runs the default expression under the evaluator, whatever the caller's
-  # default compiler is, so the host copy never re-enters this compiler.
+  # Runs the default expression under the evaluator on `Nx.BinaryBackend`, whatever
+  # the caller's default compiler or backend is, so the host copy never re-enters
+  # this compiler or the device backend.
   defp run_on_host(fun, struct, input) do
-    args = Tuple.to_list(input)
+    args = input |> Tuple.to_list() |> Enum.map(&Nx.backend_copy(&1, Nx.BinaryBackend))
 
-    Nx.Defn.jit(
-      fn args -> apply(fun, [struct | Tuple.to_list(args)]) end,
-      compiler: Nx.Defn.Evaluator
-    ).(List.to_tuple(args))
+    Nx.with_default_backend(Nx.BinaryBackend, fn ->
+      Nx.Defn.jit(
+        fn args -> apply(fun, [struct | Tuple.to_list(args)]) end,
+        compiler: Nx.Defn.Evaluator
+      ).(List.to_tuple(args))
+    end)
   end
 end

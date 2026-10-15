@@ -59,35 +59,13 @@ defmodule NxCL.Native do
   @spec buffer_read(reference(), non_neg_integer()) :: binary()
   def buffer_read(_buf, _size), do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec elementwise_binary_op(
-          reference(),
-          String.t(),
-          reference(),
-          reference(),
-          non_neg_integer()
-        ) ::
-          reference()
-  def elementwise_binary_op(_ctx, _op, _a, _b, _n), do: :erlang.nif_error(:nif_not_loaded)
-
-  @spec elementwise_unary_op(reference(), String.t(), reference(), non_neg_integer()) ::
-          reference()
-  def elementwise_unary_op(_ctx, _op, _a, _n), do: :erlang.nif_error(:nif_not_loaded)
-
-  @spec matmul_op(
-          reference(),
-          reference(),
-          reference(),
-          non_neg_integer(),
-          non_neg_integer(),
-          non_neg_integer()
-        ) :: reference()
-  def matmul_op(_ctx, _a, _b, _m, _n, _k), do: :erlang.nif_error(:nif_not_loaded)
-
-  @spec reduce_op(reference(), String.t(), reference(), non_neg_integer()) :: reference()
-  def reduce_op(_ctx, _op, _input, _n), do: :erlang.nif_error(:nif_not_loaded)
-
-  @spec softmax_op(reference(), reference(), non_neg_integer(), non_neg_integer()) :: reference()
-  def softmax_op(_ctx, _input, _rows, _cols), do: :erlang.nif_error(:nif_not_loaded)
+  @doc """
+  Drops the handle's hold on the device memory. The memory goes when no other
+  handle shares it. Reading a freed handle raises. Returns `false` when the
+  handle was already free.
+  """
+  @spec buffer_free(reference()) :: boolean()
+  def buffer_free(_buf), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Decodes and validates a program wire term and builds its kernels. See

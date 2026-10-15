@@ -61,19 +61,7 @@ defmodule NxCL.Lower.HostCall do
     operands =
       [input] |> Composite.flatten_list() |> Enum.map(&Map.fetch!(state.refs, &1.data.id))
 
-    leaves = Composite.flatten_list([entry.out_template])
-    index = length(state.host_calls)
-
-    instr = %Instruction{
-      op: :host_call,
-      operands: operands,
-      out_type: Enum.map(leaves, & &1.type),
-      out_shape: Enum.map(leaves, & &1.shape),
-      attrs: [index]
-    }
-
-    at = length(state.instrs)
-    refs = for k <- 0..(length(leaves) - 1)//1, do: {:result, at, k}
+    {instr, refs} = instruction(entry, operands, length(state.host_calls), length(state.instrs))
 
     ref =
       case n.type do
@@ -87,6 +75,27 @@ defmodule NxCL.Lower.HostCall do
         host_calls: [entry | state.host_calls],
         refs: Map.put(state.refs, id, ref)
     }
+  end
+
+  @doc """
+  The `:host_call` instruction for `entry` over `operands`, and its result refs.
+  `index` is the entry's place in the program's `:host_calls`; `at` is the
+  instruction's place in the instruction list. The eager backend uses this too.
+  """
+  @spec instruction(map(), [Instruction.ref()], non_neg_integer(), non_neg_integer()) ::
+          {Instruction.t(), [Instruction.ref()]}
+  def instruction(entry, operands, index, at) do
+    leaves = Composite.flatten_list([entry.out_template])
+
+    instr = %Instruction{
+      op: :host_call,
+      operands: operands,
+      out_type: Enum.map(leaves, & &1.type),
+      out_shape: Enum.map(leaves, & &1.shape),
+      attrs: [index]
+    }
+
+    {instr, for(k <- 0..(length(leaves) - 1)//1, do: {:result, at, k})}
   end
 
   # A named `io_call` runs its callback; the `:hooks` option that overrides it is rejected.

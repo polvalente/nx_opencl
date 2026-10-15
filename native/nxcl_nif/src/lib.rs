@@ -2,7 +2,6 @@ mod buffer;
 mod codegen;
 mod device_ctx;
 mod kernel;
-mod ops;
 mod program;
 
 use buffer::DeviceBuffer;
@@ -10,7 +9,7 @@ use device_ctx::DeviceCtx;
 use rustler::{NifResult, OwnedBinary, ResourceArc, Term};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 struct DeviceCtxInner {
     ctx: DeviceCtx,
@@ -20,9 +19,28 @@ pub struct NifDeviceCtx {
     inner: Arc<DeviceCtxInner>,
 }
 
+/// A device buffer handle. `buffer_free` empties the handle; the device memory
+/// goes when the last handle (an aliasing result shares it) lets go.
 pub struct NifDeviceBuffer {
-    buffer: Arc<DeviceBuffer>,
+    buffer: Mutex<Option<Arc<DeviceBuffer>>>,
     ctx: Arc<DeviceCtxInner>,
+}
+
+impl NifDeviceBuffer {
+    fn new(buffer: Arc<DeviceBuffer>, ctx: Arc<DeviceCtxInner>) -> Self {
+        Self {
+            buffer: Mutex::new(Some(buffer)),
+            ctx,
+        }
+    }
+
+    fn get(&self) -> Result<Arc<DeviceBuffer>, String> {
+        self.buffer
+            .lock()
+            .map_err(|e| format!("Lock error: {:?}", e))?
+            .clone()
+            .ok_or_else(|| "buffer was deallocated".to_string())
+    }
 }
 
 unsafe impl Send for NifDeviceCtx {}
@@ -101,10 +119,10 @@ fn buffer_create(
     size: usize,
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match DeviceBuffer::create(&ctx.inner.ctx, size) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
+        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer::new(
+            Arc::new(buf),
+            ctx.inner.clone(),
+        ))),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }
 }
@@ -115,117 +133,41 @@ fn buffer_write(
     data: rustler::Binary,
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     match DeviceBuffer::create_with_data(&ctx.inner.ctx, data.as_slice()) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
+        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer::new(
+            Arc::new(buf),
+            ctx.inner.clone(),
+        ))),
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn buffer_read(buf: ResourceArc<NifDeviceBuffer>, size: usize) -> NifResult<OwnedBinary> {
-    match buf.buffer.read(&buf.ctx.ctx, size) {
+    let device = buf
+        .get()
+        .map_err(|e| rustler::Error::RaiseTerm(Box::new(e)))?;
+    match device.read(&buf.ctx.ctx, size) {
         Ok(data) => {
-            let mut binary = OwnedBinary::new(data.len()).ok_or(rustler::Error::Term(Box::new(
-                "Failed to allocate binary".to_string(),
-            )))?;
+            let mut binary = OwnedBinary::new(data.len()).ok_or(rustler::Error::RaiseTerm(
+                Box::new("Failed to allocate binary".to_string()),
+            ))?;
             binary.as_mut_slice().copy_from_slice(&data);
             Ok(binary)
         }
-        Err(e) => Err(rustler::Error::Term(Box::new(e))),
+        Err(e) => Err(rustler::Error::RaiseTerm(Box::new(e))),
     }
 }
 
-// ── Elementwise Operations ──────────────────────────────
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn elementwise_binary_op(
-    ctx: ResourceArc<NifDeviceCtx>,
-    op: String,
-    a: ResourceArc<NifDeviceBuffer>,
-    b: ResourceArc<NifDeviceBuffer>,
-    n: usize,
-) -> NifResult<ResourceArc<NifDeviceBuffer>> {
-    match ops::elementwise_binary(&ctx.inner.ctx, &op, &a.buffer, &b.buffer, n) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
-        Err(e) => Err(rustler::Error::Term(Box::new(e))),
-    }
-}
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn elementwise_unary_op(
-    ctx: ResourceArc<NifDeviceCtx>,
-    op: String,
-    a: ResourceArc<NifDeviceBuffer>,
-    n: usize,
-) -> NifResult<ResourceArc<NifDeviceBuffer>> {
-    match ops::elementwise_unary(&ctx.inner.ctx, &op, &a.buffer, n) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
-        Err(e) => Err(rustler::Error::Term(Box::new(e))),
-    }
-}
-
-// ── Matrix Multiply ─────────────────────────────────────
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn matmul_op(
-    ctx: ResourceArc<NifDeviceCtx>,
-    a: ResourceArc<NifDeviceBuffer>,
-    b: ResourceArc<NifDeviceBuffer>,
-    m: usize,
-    n: usize,
-    k: usize,
-) -> NifResult<ResourceArc<NifDeviceBuffer>> {
-    match ops::matmul(&ctx.inner.ctx, &a.buffer, &b.buffer, m, n, k) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
-        Err(e) => Err(rustler::Error::Term(Box::new(e))),
-    }
-}
-
-// ── Reduce Operations ───────────────────────────────────
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn reduce_op(
-    ctx: ResourceArc<NifDeviceCtx>,
-    op: String,
-    input: ResourceArc<NifDeviceBuffer>,
-    n: usize,
-) -> NifResult<ResourceArc<NifDeviceBuffer>> {
-    match ops::reduce(&ctx.inner.ctx, &op, &input.buffer, n) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
-        Err(e) => Err(rustler::Error::Term(Box::new(e))),
-    }
-}
-
-// ── Softmax ─────────────────────────────────────────────
-
-#[rustler::nif(schedule = "DirtyIo")]
-fn softmax_op(
-    ctx: ResourceArc<NifDeviceCtx>,
-    input: ResourceArc<NifDeviceBuffer>,
-    rows: usize,
-    cols: usize,
-) -> NifResult<ResourceArc<NifDeviceBuffer>> {
-    match ops::softmax(&ctx.inner.ctx, &input.buffer, rows, cols) {
-        Ok(buf) => Ok(ResourceArc::new(NifDeviceBuffer {
-            buffer: Arc::new(buf),
-            ctx: ctx.inner.clone(),
-        })),
-        Err(e) => Err(rustler::Error::Term(Box::new(e))),
-    }
+/// Drops the handle's hold on the device memory. Reading the handle afterwards is
+/// an error. Returns false when the handle was already empty.
+#[rustler::nif]
+fn buffer_free(buf: ResourceArc<NifDeviceBuffer>) -> NifResult<bool> {
+    let freed = buf
+        .buffer
+        .lock()
+        .map_err(|e| rustler::Error::Term(Box::new(format!("Lock error: {:?}", e))))?
+        .take();
+    Ok(freed.is_some())
 }
 
 // ── Program Execution ───────────────────────────────────
@@ -258,17 +200,12 @@ fn eval_program(
     guarded(|| {
         let externals = buffers
             .iter()
-            .map(|b| b.as_ref().map(|b| b.buffer.clone()))
-            .collect();
+            .map(|b| b.as_ref().map(|b| b.get()).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
         let outputs = prog.program.eval(&prog.ctx.ctx, externals)?;
         Ok(outputs
             .into_iter()
-            .map(|buffer| {
-                ResourceArc::new(NifDeviceBuffer {
-                    buffer,
-                    ctx: prog.ctx.clone(),
-                })
-            })
+            .map(|buffer| ResourceArc::new(NifDeviceBuffer::new(buffer, prog.ctx.clone())))
             .collect())
     })
 }

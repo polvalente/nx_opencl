@@ -37,15 +37,22 @@ defmodule NxCL.Executor do
   """
   @spec run(Program.t(), [(-> Nx.Tensor.t())]) :: Nx.Container.t()
   def run(%Program{} = program, args) do
+    program |> run_buffers(args) |> then(&read_outputs(program, &1))
+  end
+
+  @doc """
+  Runs `program` and returns one device buffer per output leaf, nothing read
+  back. An argument is a lazy function, or `{:buffer, ref}` for a tensor that is
+  already on the device (the eager backend passes these).
+  """
+  @spec run_buffers(Program.t(), [(-> Nx.Tensor.t()) | {:buffer, reference()}]) :: [reference()]
+  def run_buffers(%Program{} = program, args) do
     ctx = ctx()
 
-    outputs =
-      case plan_for(ctx, program) do
-        {:simple, native} -> run_simple(ctx, program, native, args)
-        %Plan{} = plan -> run_plan(ctx, plan, program, args)
-      end
-
-    read_outputs(program, outputs)
+    case plan_for(ctx, program) do
+      {:simple, native} -> run_simple(ctx, program, native, args)
+      %Plan{} = plan -> run_plan(ctx, plan, program, args)
+    end
   end
 
   defp run_simple(ctx, program, native, args) do
@@ -54,7 +61,7 @@ defmodule NxCL.Executor do
       |> Enum.with_index()
       |> Enum.map(fn
         {nil, _i} -> nil
-        {{_type, _shape}, i} -> upload(ctx, Enum.at(args, i).())
+        {{_type, _shape}, i} -> to_buffer(ctx, Enum.at(args, i))
       end)
 
     captures = Enum.map(program.captures, &upload(ctx, &1))
@@ -190,7 +197,7 @@ defmodule NxCL.Executor do
           table
 
         {{_type, _shape}, i}, table ->
-          Map.put(table, {:input, i}, upload(ctx, Enum.at(args, i).()))
+          Map.put(table, {:input, i}, to_buffer(ctx, Enum.at(args, i)))
       end)
 
     run_scope(plan.scope, table, env)
@@ -328,6 +335,9 @@ defmodule NxCL.Executor do
   @spec encode_instruction(Instruction.t()) :: tuple()
   def encode_instruction(%Instruction{} = instr),
     do: {instr.op, instr.operands, instr.out_type, instr.out_shape, instr.attrs}
+
+  defp to_buffer(_ctx, {:buffer, ref}), do: ref
+  defp to_buffer(ctx, arg), do: upload(ctx, arg.())
 
   defp upload(ctx, tensor), do: NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
 end

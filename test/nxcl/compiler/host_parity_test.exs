@@ -46,12 +46,14 @@ defmodule NxCL.HostParityTest do
 
   defp seen(t), do: {t.type, t.shape, Nx.to_binary(t)}
 
-  # The reference runs first, then the compiler; each should send the same message.
+  # The reference runs first, then the compiler, then the eager backend; each should
+  # send the same message.
   defp assert_same_messages(op, fun, args) do
     flush()
     assert_parity(op, fun, args)
-    assert [reference, actual] = flush()
+    assert [reference, actual, eager] = flush()
     assert reference == actual
+    assert reference == eager
   end
 
   for type <- @types do

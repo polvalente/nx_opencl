@@ -39,9 +39,10 @@ whole-graph execution of `defn` functions.
 
 ### Eager backend
 
-Set `NxCL.Backend` as the default and use Nx as normal. Operations
-with GPU kernels run on the device; everything else falls back to CPU
-transparently.
+Set `NxCL.Backend` as the default and use Nx as normal. Each op runs on
+the device as a one-op program, with the same kernels the compiler uses.
+An op with no lowering raises `ArgumentError`; nothing runs on the CPU
+backend behind your back.
 
 ```elixir
 Nx.default_backend(NxCL.Backend)
@@ -114,21 +115,21 @@ NxCL.Native.device_info(ctx)
 # [{"name", "NVIDIA GeForce RTX 3090 Ti"}, {"vendor", "NVIDIA"}, ...]
 ```
 
-## GPU-Accelerated Operations
+## Operations
 
-The following ops run directly on the GPU for f32 tensors:
+`NxCL.Backend` and `NxCL.Compiler` run every Nx op on the GPU through one
+set of generated kernels, for every Nx dtype except `s2`, `s4`, `u2`, `u4`,
+`f8` and `f8_e4m3fn`. `f64` and `c128` need `cl_khr_fp64`; `f16` needs
+`cl_khr_fp16`.
 
-| Category | Operations |
-|---|---|
-| Elementwise binary | `add`, `subtract`, `multiply`, `divide` |
-| Elementwise unary | `negate`, `exp`, `log`, `tanh`, `sigmoid`, `abs` |
-| Linear algebra | `dot` (2D matrix multiply, tiled GEMM) |
-| Reductions | `sum`, `reduce_max`, `reduce_min` (full reduction) |
-| Shape | `reshape`, `squeeze`, `bitcast` (zero-copy) |
+Four linear algebra blocks have no device kernel: `qr`, `eigh`, `svd` and
+`lu`. Both paths run them as an explicit host call: the operands are read
+back, `Nx.BinaryBackend` runs the block, and the result goes back up.
 
-All other Nx operations fall back to the CPU backend automatically
-when using `NxCL.Backend`. The compiler (`NxCL.Compiler`) raises on
-unsupported ops.
+Neither path copies an op to the CPU silently. An op with no lowering raises
+`ArgumentError` ("does not yet lower op ..."). `Nx.from_pointer/3` and
+`Nx.to_pointer/2` raise on the backend: OpenCL has no portable handle to
+export. `Nx.backend_deallocate/1` frees the device buffer at once.
 
 ## Cross-Compilation (Nerves)
 

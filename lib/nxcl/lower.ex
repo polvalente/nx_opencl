@@ -41,9 +41,17 @@ defmodule NxCL.Lower do
     Nx.Block.CumulativeMax => :cumulative_max
   }
 
+  @doc false
+  @spec scan_blocks() :: %{module() => atom()}
+  def scan_blocks(), do: @scan_blocks
+
   # Binary ops a `reduce` body may hold: the result has the operand type.
   @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
                bitwise_or bitwise_xor left_shift right_shift)a
+
+  @doc false
+  @spec step_ops() :: [atom()]
+  def step_ops(), do: @step_ops
 
   @unary_ops Builder.unary_ops()
   @binary_ops Builder.binary_ops()
@@ -164,7 +172,10 @@ defmodule NxCL.Lower do
             "pass the value in as an argument of the while or cond"
   end
 
-  defp ref_counts(instructions, outputs) do
+  @doc false
+  @spec ref_counts([NxCL.Program.Instruction.t()], [NxCL.Program.Instruction.ref()]) ::
+          %{NxCL.Program.Instruction.ref() => non_neg_integer()}
+  def ref_counts(instructions, outputs) do
     instructions
     |> Enum.flat_map(& &1.operands)
     |> Enum.concat(outputs)
@@ -573,12 +584,16 @@ defmodule NxCL.Lower do
   end
 
   # Adds an instruction that no node owns, such as a broadcast or a cast.
-  defp push(state, instruction) do
+  @doc false
+  @spec push(map(), NxCL.Program.Instruction.t()) :: {map(), NxCL.Program.Instruction.ref()}
+  def push(state, instruction) do
     ref = {:result, length(state.instrs)}
     {%{state | instrs: [instruction | state.instrs]}, ref}
   end
 
-  defp put_const(state, value, type) do
+  @doc false
+  @spec put_const(map(), term(), Nx.Type.t()) :: {map(), NxCL.Program.Instruction.ref()}
+  def put_const(state, value, type) do
     ref = {:const, length(state.constants)}
     {%{state | constants: [{value, type} | state.constants]}, ref}
   end
@@ -587,7 +602,9 @@ defmodule NxCL.Lower do
 
   defp ref(state, %T{data: %Nx.Defn.Expr{id: id}}), do: Map.fetch!(state.refs, id)
 
-  defp check_complex(op, node, operands) do
+  @doc false
+  @spec check_complex(atom(), map(), [map()]) :: nil
+  def check_complex(op, node, operands) do
     if op in @complex_rejected and Enum.any?([node | operands], &Nx.Type.complex?(&1.type)) do
       raise ArgumentError, "#{inspect(op)} does not support complex tensors"
     end
@@ -652,7 +669,17 @@ defmodule NxCL.Lower do
 
   # Crops or zero-pads `axis` of the operand `ref` (shape `shape`, type `type`)
   # to the length of `out` on that axis.
-  defp fit_axis(state, ref, shape, type, out, axis) do
+  @doc false
+  @spec fit_axis(
+          map(),
+          NxCL.Program.Instruction.ref(),
+          tuple(),
+          Nx.Type.t(),
+          tuple(),
+          non_neg_integer()
+        ) ::
+          {map(), NxCL.Program.Instruction.ref()}
+  def fit_axis(state, ref, shape, type, out, axis) do
     have = elem(shape, axis)
     want = elem(out, axis)
     fitted = put_elem(shape, axis, want)
@@ -684,8 +711,10 @@ defmodule NxCL.Lower do
   defp scalar_const?(_state, _operand), do: false
 
   # The reduced axes, sorted; `nil` means every axis.
-  defp axes(%T{shape: shape}, nil), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
-  defp axes(_x, axes), do: Enum.sort(axes)
+  @doc false
+  @spec axes(map(), [non_neg_integer()] | nil) :: [non_neg_integer()]
+  def axes(%T{shape: shape}, nil), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
+  def axes(_x, axes), do: Enum.sort(axes)
 
   # Lowers the body of a `reduce` or `window_reduce` function to steps over
   # two variables (the parameters) and the result of each earlier step. A body
@@ -727,10 +756,12 @@ defmodule NxCL.Lower do
 
   # A body of one `add`, `multiply`, `max` or `min` over the two parameters is
   # associative and commutative, so the device may fold it in a tree.
-  defp monoid?([{op, a, b}]) when op in [:add, :multiply, :max, :min],
+  @doc false
+  @spec monoid?(list()) :: boolean()
+  def monoid?([{op, a, b}]) when op in [:add, :multiply, :max, :min],
     do: {a, b} in [{0, 1}, {1, 0}]
 
-  defp monoid?(_steps), do: false
+  def monoid?(_steps), do: false
 
   # A body that is one `add` or `multiply` with its identity as the initial
   # accumulator is `sum` or `product`; nothing is left to fold in.

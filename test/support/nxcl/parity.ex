@@ -6,6 +6,10 @@ defmodule NxCL.Parity do
   Type, shape, and names must match exactly. Integer values must match
   exactly. Float values match within a tolerance per type. A passing call
   records one `{op, dtype, path}` cell for each distinct input and output type.
+
+  `NxCL.Compiler` rows run twice: once through the compiler (`:compiler` cells)
+  and once eagerly, with the arguments on `NxCL.Backend` and the evaluator
+  walking the graph (`:backend` cells). Both runs meet the same expected value.
   """
 
   import ExUnit.Assertions
@@ -32,7 +36,9 @@ defmodule NxCL.Parity do
 
   Options: `:compiler` (default `NxCL.Compiler`), `:compiler_opts`, `:rtol`,
   `:atol` (override the per-type tolerance), `:signed_zero` (compare the sign
-  of zero), `:record` (default `true`; record the passing cells).
+  of zero), `:record` (default `true`; record the passing cells), `:backend`
+  (default `true`; set `false` to skip the eager run, for a row whose eager run
+  adds no coverage and costs too much time; no `:backend` cell is recorded).
   """
   @spec assert_parity(atom(), function(), list(), keyword()) :: :ok
   def assert_parity(op, fun, args, opts \\ []) do
@@ -63,7 +69,35 @@ defmodule NxCL.Parity do
       for dtype <- cell_dtypes(args, expected), do: Recorder.record(op, dtype, :compiler)
     end
 
+    if compiler == NxCL.Compiler and Keyword.get(opts, :backend, true) do
+      assert_backend(op, fun, args, expected, opts)
+    end
+
     :ok
+  end
+
+  # The eager path: arguments on `NxCL.Backend`, default backend `NxCL.Backend`, the
+  # evaluator walks the graph and each op runs as a one-op program.
+  defp assert_backend(op, fun, args, expected, opts) do
+    actual =
+      Nx.with_default_backend(NxCL.Backend, fn ->
+        apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), Enum.map(args, &to_nxcl_backend/1))
+      end)
+
+    try do
+      compare_containers(expected, actual, opts)
+    rescue
+      e in ExUnit.AssertionError ->
+        reraise %{
+                  e
+                  | message: e.message <> "\nop: #{inspect(op)}\npath: backend\nseed: #{seed()}"
+                },
+                __STACKTRACE__
+    end
+
+    if Keyword.get(opts, :record, true) do
+      for dtype <- cell_dtypes(args, expected), do: Recorder.record(op, dtype, :backend)
+    end
   end
 
   @doc "The seed ExUnit runs with; generators derive their keys from it."
@@ -79,6 +113,9 @@ defmodule NxCL.Parity do
 
   defp to_binary_backend(%Nx.Tensor{} = t), do: Nx.backend_copy(t, Nx.BinaryBackend)
   defp to_binary_backend(other), do: other
+
+  defp to_nxcl_backend(%Nx.Tensor{} = t), do: Nx.backend_copy(t, NxCL.Backend)
+  defp to_nxcl_backend(other), do: other
 
   # -- Comparison ----------------------------------------------------------
 
@@ -131,7 +168,7 @@ defmodule NxCL.Parity do
 
   defp compare_values(%Nx.Tensor{type: {kind, _}} = e, a, i, _opts) when kind in [:s, :u] do
     assert Nx.to_binary(e) == Nx.to_binary(a),
-           "leaf #{i}: integer values differ\n  expected #{inspect(Nx.to_flat_list(e), limit: 20)}\n  actual   #{inspect(Nx.to_flat_list(a), limit: 20)}"
+           "leaf #{i}: integer values differ\n  expected #{inspect(Nx.to_flat_list(e), limit: 20, charlists: :as_lists)}\n  actual   #{inspect(Nx.to_flat_list(a), limit: 20, charlists: :as_lists)}"
   end
 
   defp compare_values(%Nx.Tensor{type: type} = e, a, i, opts) do

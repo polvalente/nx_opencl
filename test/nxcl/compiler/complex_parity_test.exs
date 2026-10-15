@@ -233,6 +233,16 @@ defmodule NxCL.ComplexParityTest do
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 
+  # The eager path: arguments on `NxCL.Backend`, each op a one-op program.
+  defp eager(fun, args) do
+    Nx.with_default_backend(NxCL.Backend, fn ->
+      apply(
+        Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator),
+        Enum.map(args, &Nx.backend_copy(&1, NxCL.Backend))
+      )
+    end)
+  end
+
   defp bit(v) when is_float(v) do
     <<s::1, _::63>> = <<v::float-64>>
     s
@@ -244,9 +254,9 @@ defmodule NxCL.ComplexParityTest do
   defp part_ok?(e, a, _tol) when e == 0 and a == 0, do: bit(e) == bit(a)
   defp part_ok?(e, a, tol), do: abs(e - a) <= tol + tol * abs(e)
 
-  defp assert_values(op, type, rows, tol) do
+  defp assert_values(op, type, rows, tol, runner \\ &run/2) do
     z = complex(for({{x, y}, _} <- rows, do: {x, y}), type)
-    out = run(&apply(Nx, op, [&1]), [z])
+    out = runner.(&apply(Nx, op, [&1]), [z])
     assert out.type == type
 
     for {{{x, y}, {er, ei}}, r, i} <-
@@ -662,31 +672,36 @@ defmodule NxCL.ComplexParityTest do
       test "sign is z over |z| #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        # Random points against z / |z|, computed on `BinaryBackend`.
+        # Random points against z / |z|, computed on `BinaryBackend`; the compiler and the
+        # eager backend each get the same checks.
         z = nonzero(type)
         want = Nx.divide(z, Nx.as_type(Nx.abs(z), type))
-        got = run(&Nx.sign/1, [z]) |> Nx.backend_copy(Nx.BinaryBackend)
         tol = if type == {:c, 64}, do: 1.0e-5, else: 1.0e-12
 
-        for part <- [&Nx.real/1, &Nx.imag/1] do
-          assert Nx.all_close(part.(got), part.(want), rtol: tol, atol: tol) |> Nx.to_number() ==
-                   1
+        for {runner, path} <- [{&run/2, :compiler}, {&eager/2, :backend}] do
+          got = runner.(&Nx.sign/1, [z]) |> Nx.backend_copy(Nx.BinaryBackend)
+
+          for part <- [&Nx.real/1, &Nx.imag/1] do
+            assert Nx.all_close(part.(got), part.(want), rtol: tol, atol: tol) |> Nx.to_number() ==
+                     1
+          end
+
+          NxCL.Parity.Recorder.record(:sign, type, path)
+
+          assert_values(
+            :sign,
+            type,
+            [
+              {{3.0, 4.0}, {0.6, 0.8}},
+              {{0.0, 2.0}, {0.0, 1.0}},
+              {{-5.0, 0.0}, {-1.0, 0.0}},
+              {{0.0, 0.0}, {0.0, 0.0}},
+              {{1.0, -1.0}, {0.7071067811865475, -0.7071067811865475}}
+            ],
+            1.0e-5,
+            runner
+          )
         end
-
-        NxCL.Parity.Recorder.record(:sign, type, :compiler)
-
-        assert_values(
-          :sign,
-          type,
-          [
-            {{3.0, 4.0}, {0.6, 0.8}},
-            {{0.0, 2.0}, {0.0, 1.0}},
-            {{-5.0, 0.0}, {-1.0, 0.0}},
-            {{0.0, 0.0}, {0.0, 0.0}},
-            {{1.0, -1.0}, {0.7071067811865475, -0.7071067811865475}}
-          ],
-          1.0e-5
-        )
       end
     end
   end

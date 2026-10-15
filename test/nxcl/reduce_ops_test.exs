@@ -24,7 +24,6 @@ defmodule NxCL.ReduceOpsTest do
     fun |> Nx.Defn.debug_expr_apply(args) |> Lower.lower(flat)
   end
 
-  defp builds, do: Executor.ctx() |> Native.kernel_cache_stats() |> elem(0)
   defp launches, do: Executor.ctx() |> Native.kernel_cache_stats() |> elem(2)
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
@@ -93,18 +92,23 @@ defmodule NxCL.ReduceOpsTest do
 
   describe "kernels" do
     test "reduce(&Nx.add/2) shares the kernel of sum" do
-      # A shape no other test uses, so the first run builds and the second hits the cache.
       x = Nx.iota({3, 41}, type: :f32)
+      sum = &Nx.sum(&1, axes: [1])
+      add = &Nx.reduce(&1, Nx.tensor(0.0), [axes: [1]], fn a, b -> Nx.add(a, b) end)
 
-      before = builds()
-      first = run(&Nx.sum(&1, axes: [1]), [x])
-      assert builds() == before + 1
+      # A device context of its own has an empty kernel cache, so the count does not
+      # depend on which test ran before (the eager backend builds kernels too).
+      ctx = Native.device_ctx_create(0)
+      builds = fn -> ctx |> Native.kernel_cache_stats() |> elem(0) end
 
-      second =
-        run(&Nx.reduce(&1, Nx.tensor(0.0), [axes: [1]], fn a, b -> Nx.add(a, b) end), [x])
+      {:ok, _} = Native.compile_program(ctx, Executor.encode(lower(sum, [x])))
+      built = builds.()
+      assert built >= 1
 
-      assert builds() == before + 1
-      assert Nx.to_binary(first) == Nx.to_binary(second)
+      {:ok, _} = Native.compile_program(ctx, Executor.encode(lower(add, [x])))
+      assert builds.() == built
+
+      assert Nx.to_binary(run(sum, [x])) == Nx.to_binary(run(add, [x]))
     end
 
     test "a thread-sized line reads with one launch, a long line with two passes" do

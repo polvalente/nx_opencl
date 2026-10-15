@@ -280,19 +280,22 @@ defmodule NxCL.LinalgParityTest do
         type = unquote(Macro.escape(type))
 
         for n <- sizes(type) do
+          # The eager run at 257 replays the same default expression op by op for about
+          # 20 s a row and covers no op the smaller rows miss, so it runs below 257 only.
+          eager = [backend: n < 257]
           a = small_or_dense(type, n, nil)
           vector = Gen.random({n}, type, seed: NxCL.Parity.seed() + 8)
           matrix = Gen.random({n, 2}, type, seed: NxCL.Parity.seed() + 9)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, vector])
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, matrix])
+          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, vector], eager)
+          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, matrix], eager)
 
           # Batched: 3 matrices, or 2 at size 257.
           count = if n >= 257, do: 2, else: 3
           a = small(type, n, count)
           b = Gen.random({count, n}, type, seed: NxCL.Parity.seed() + 10)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, b])
+          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, b], eager)
           b = Gen.random({count, n, 2}, type, seed: NxCL.Parity.seed() + 11)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, b])
+          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, b], eager)
         end
       end
     end

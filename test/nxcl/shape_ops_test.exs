@@ -145,7 +145,9 @@ defmodule NxCL.ShapeOpsTest do
           y = Nx.reshape(x, {2, 3})
           {y, Nx.add(y, Nx.reverse(y))}
         end,
-        [x]
+        [x],
+        # The launch count is the compiler's; an eager run would add its own.
+        backend: false
       )
 
       # reverse and add launch; the reshape does not.

@@ -67,9 +67,3 @@ pub fn cached(
     cache.insert(key, kernel.clone());
     Ok(kernel)
 }
-
-// Embedded kernel sources
-pub const ELEMENTWISE_SOURCE: &str = include_str!("kernel_source/elementwise.cl");
-pub const MATMUL_SOURCE: &str = include_str!("kernel_source/matmul.cl");
-pub const REDUCE_SOURCE: &str = include_str!("kernel_source/reduce.cl");
-pub const SOFTMAX_SOURCE: &str = include_str!("kernel_source/softmax.cl");
