@@ -14,7 +14,10 @@ defmodule NxCL.Program.Instruction do
       A `while` has `[cond, body]`; a `cond` has `[pred_1, body_1, ..., else]`
       (see `NxCL.Lower.Control`). Empty for every other op.
 
-  A `cond` or `while` has one result per output. `:out_type` and `:out_shape` are
+  A `host_call` runs an Elixir function on host copies of its operands. Its one
+  attr indexes `NxCL.Program`'s `:host_calls` table (see `NxCL.Lower.HostCall`).
+
+  A `cond`, `while` or `host_call` has one result per output. `:out_type` and `:out_shape` are
   lists, and the k-th result is `{:result, i, k}`. A `while` with the attrs
   `[:static, n]` runs its body `n` times without reading the condition.
 
@@ -24,7 +27,7 @@ defmodule NxCL.Program.Instruction do
     * `{:capture, i}` - the i-th literal tensor of the program.
     * `{:const, i}` - the i-th scalar constant of the program.
     * `{:result, i}` - the result of the i-th instruction.
-    * `{:result, i, k}` - the k-th result of the i-th instruction, a `cond` or `while`.
+    * `{:result, i, k}` - the k-th result of the i-th instruction, a `cond`, `while` or `host_call`.
     * `{:carry, i}` - the i-th loop-carry slot (inside a `while` or `cond` sub-program).
 
   An attr is an integer, an atom, or a binary.

@@ -3,11 +3,11 @@ defmodule NxCL.Executor do
   # Runs an `NxCL.Program` on the device: upload the inputs, run the program
   # natively, read the outputs, rebuild the container.
   #
-  # A program with no `cond` or `while` goes to the native side whole. Otherwise
-  # `NxCL.Executor.Plan` cuts it at the control instructions: each straight-line
-  # segment runs natively as its own program, and this module runs the `cond` and
-  # `while` steps itself. Buffers stay on the device between steps, in a table
-  # keyed by ref. A step drops the buffers it was the last to read.
+  # A program with no `cond`, `while` or `host_call` goes to the native side whole.
+  # Otherwise `NxCL.Executor.Plan` cuts it at the control instructions: each
+  # straight-line segment runs natively as its own program, and this module runs
+  # the `cond`, `while` and `host_call` steps itself (`NxCL.Executor.Host`).
+  # Buffers stay on the device between steps, in a table keyed by ref. A step drops the buffers it was the last to read.
   #
   # Wire term sent to `NxCL.Native.compile_program/2`:
   #
@@ -25,6 +25,7 @@ defmodule NxCL.Executor do
   # the op, the types and the shapes.
 
   alias Nx.Defn.Composite
+  alias NxCL.Executor.Host
   alias NxCL.Executor.Plan
   alias NxCL.Executor.Stats
   alias NxCL.Program
@@ -179,7 +180,7 @@ defmodule NxCL.Executor do
           do: {{:capture, i}, upload(ctx, t)}
 
     shared = Map.merge(captures, const_buffers(ctx, plan))
-    env = %{ctx: ctx, shared: shared}
+    env = %{ctx: ctx, shared: shared, host_calls: program.host_calls}
 
     table =
       program.inputs
@@ -242,6 +243,13 @@ defmodule NxCL.Executor do
     carry = Enum.map(step.operands, &Map.fetch!(table, &1))
     table = Map.drop(table, step.free)
     put_results(table, step.live, loop(step, carry, env))
+  end
+
+  defp run_step(%{kind: :host_call} = step, table, env) do
+    buffers = Enum.map(step.operands, &Map.fetch!(table, &1))
+    table = Map.drop(table, step.free)
+    entry = Enum.at(env.host_calls, step.index)
+    put_results(table, step.live, Host.run(entry, env.ctx, buffers))
   end
 
   defp put_results(table, live, results) do

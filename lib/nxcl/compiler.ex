@@ -33,6 +33,12 @@ defmodule NxCL.Compiler do
   lower raises `ArgumentError` ("does not yet lower op ...") when the function
   is compiled. A dtype the device cannot run (`f64` without `cl_khr_fp64`, or a type
   with no OpenCL mapping yet) raises `NxCL.CompilerError` when the function runs.
+
+  ## Host callbacks
+
+  `Nx.runtime_call/4`, `Nx.io_call/2` and `Nx.Defn.Kernel.print_value/2` run
+  Elixir code in the calling process, between device steps. The executor reads
+  back only the tensors the callback takes. The `:hooks` option raises `ArgumentError`.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -47,7 +53,8 @@ defmodule NxCL.Compiler do
   end
 
   @impl true
-  def __compile__(_key, vars, fun, _opts) do
+  def __compile__(_key, vars, fun, opts) do
+    check_hooks!(opts)
     expr = fun.(vars)
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
@@ -56,6 +63,22 @@ defmodule NxCL.Compiler do
       [Executor.run(program, args)]
     end
   end
+
+  # The named-override map is not wired through.
+  defp check_hooks!(opts) do
+    case Keyword.get(opts, :hooks, %{}) do
+      hooks when hooks == %{} or hooks == [] ->
+        :ok
+
+      hooks ->
+        raise ArgumentError,
+              "NxCL.Compiler does not support the :hooks option (got callbacks for " <>
+                "#{inspect(hooks_keys(hooks))}); io_call nodes run their own callback"
+    end
+  end
+
+  defp hooks_keys(hooks) when is_map(hooks), do: Map.keys(hooks)
+  defp hooks_keys(hooks), do: hooks
 
   @impl true
   def __partitions_options__(opts) do

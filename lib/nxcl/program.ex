@@ -12,6 +12,8 @@ defmodule NxCL.Program do
     * `:captures` - literal tensors the graph holds, read as `{:capture, i}`.
     * `:constants` - scalar constants as `{value, type}`, read as `{:const, i}`.
     * `:instructions` - `NxCL.Program.Instruction` values in run order.
+    * `:host_calls` - side table for `:host_call` instructions (callbacks and
+      templates). An instruction names its entry by index in its attrs.
     * `:outputs` - one ref per flattened output leaf.
     * `:output_template` - the output container with template tensors, used to
       rebuild tuples and maps from `:outputs`.
@@ -32,6 +34,7 @@ defmodule NxCL.Program do
     :output_template,
     captures: [],
     constants: [],
+    host_calls: [],
     ref_counts: %{}
   ]
 
@@ -39,6 +42,7 @@ defmodule NxCL.Program do
           inputs: [{Nx.Type.t(), tuple()} | nil],
           captures: [Nx.Tensor.t()],
           constants: [{number() | atom(), Nx.Type.t()}],
+          host_calls: [map()],
           instructions: [Instruction.t()],
           outputs: [Instruction.ref()],
           output_template: Nx.Container.t(),

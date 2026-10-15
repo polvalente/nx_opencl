@@ -10,7 +10,9 @@ defmodule NxCL.Lower do
   that lacks the output shape of an elementwise op gets a `broadcast` too.
 
   A `cond` or `while` node becomes one instruction with sub-programs
-  (`NxCL.Lower.Control`). `lower_scope/4` lowers each sub-program.
+  (`NxCL.Lower.Control`). `lower_scope/4` lowers each sub-program. An `io_call`
+  or `runtime_call` node becomes one `:host_call` instruction
+  (`NxCL.Lower.HostCall`); its function sits in the program's `:host_calls`.
 
   An op the pass cannot lower raises `ArgumentError` with the prefix
   `"does not yet lower op"`. It never falls back to another path.
@@ -22,6 +24,7 @@ defmodule NxCL.Lower do
   alias NxCL.Lower.Block
   alias NxCL.Lower.Contract
   alias NxCL.Lower.Control
+  alias NxCL.Lower.HostCall
   alias NxCL.Program
   alias NxCL.Program.Builder
   alias NxCL.Program.SubProgram
@@ -68,6 +71,7 @@ defmodule NxCL.Lower do
       captures: [],
       constants: [],
       instrs: [],
+      host_calls: [],
       refs: %{},
       avail: Nx.Defn.Tree.scope_ids(output),
       outer: %{},
@@ -94,6 +98,7 @@ defmodule NxCL.Lower do
       captures: Enum.reverse(state.captures),
       constants: Enum.reverse(state.constants),
       instructions: instructions,
+      host_calls: Enum.reverse(state.host_calls),
       outputs: outputs,
       output_template: Composite.traverse(output, &Nx.to_template/1),
       ref_counts: ref_counts(instructions, outputs)
@@ -140,7 +145,14 @@ defmodule NxCL.Lower do
 
     outputs = Enum.map(roots, &Map.fetch!(inner.refs, &1.data.id))
     sub = %SubProgram{instructions: Enum.reverse(inner.instrs), outputs: outputs}
-    {sub, %{parent | captures: inner.captures, constants: inner.constants}}
+
+    {sub,
+     %{
+       parent
+       | captures: inner.captures,
+         constants: inner.constants,
+         host_calls: inner.host_calls
+     }}
   end
 
   # A literal tensor or constant may sit in both scopes; any other node of the
@@ -518,6 +530,11 @@ defmodule NxCL.Lower do
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :while}} = node, state),
     do: Control.while_node(state, node)
+
+  # -- Host callbacks -----------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op}} = node, state) when op in [:io_call, :runtime_call],
+    do: HostCall.node(state, node)
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op}}, _state), do: unsupported(op, nil)
 

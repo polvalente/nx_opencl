@@ -1,6 +1,6 @@
 defmodule NxCL.Executor.Plan do
   @moduledoc false
-  # Cuts a program that holds `cond` or `while` into steps for `NxCL.Executor`.
+  # Cuts a program that holds `cond`, `while` or `host_call` into steps for `NxCL.Executor`.
   #
   # A scope (the program, or one sub-program) becomes a list of steps:
   #
@@ -9,6 +9,10 @@ defmodule NxCL.Executor.Plan do
   #     from the scope's table; its outputs are the results a later step reads.
   #   * `:cond` and `:while` - run by the executor, which reads the predicate
   #     and runs the sub-scopes it needs.
+  #   * `:host_call` - a callback. The executor reads the operands back, calls
+  #     the function and uploads the results. The step holds only the index of
+  #     its entry in the program's side table, so cached plans never hold a function.
+  #     A host call is never dropped for unused results: it always runs.
   #
   # Each step lists the table keys to drop once its last reader has run.
   # Captures and constants stay in the table until the run ends, because
@@ -18,7 +22,7 @@ defmodule NxCL.Executor.Plan do
   alias NxCL.Program
   alias NxCL.Program.Instruction
 
-  @control [:cond, :while]
+  @control [:cond, :while, :host_call]
 
   defstruct [:scope, :const_keys, :const_wire]
 
@@ -41,7 +45,7 @@ defmodule NxCL.Executor.Plan do
     }
   end
 
-  @doc "True when the program holds a control instruction."
+  @doc "True when the program holds a control or host-call instruction."
   @spec control?(Program.t()) :: boolean()
   def control?(%Program{instructions: instructions}),
     do: Enum.any?(instructions, &(&1.op in @control))
@@ -254,6 +258,18 @@ defmodule NxCL.Executor.Plan do
       cond: cond_scope,
       body: body_scope,
       static: static,
+      live: live_pairs(step.defs, live_defs),
+      free: free
+    }
+  end
+
+  defp finish(%{kind: :host_call} = step, live_defs, free, _types, _constants) do
+    [index] = step.instr.attrs
+
+    %{
+      kind: :host_call,
+      operands: step.reads,
+      index: index,
       live: live_pairs(step.defs, live_defs),
       free: free
     }
