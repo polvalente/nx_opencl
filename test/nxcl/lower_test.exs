@@ -154,8 +154,13 @@ defmodule NxCL.LowerTest do
 
   describe "unsupported input" do
     test "an op that is not lowered raises with the fixed prefix" do
-      assert_raise ArgumentError, ~r/^does not yet lower op :fft/, fn ->
-        lower(fn x -> Nx.fft(x) end, [Nx.tensor([1.0, 2.0], type: :c64)])
+      # Every Nx 1.0 op lowers since stage 12, so the node carries an op Nx does not define.
+      unknown = fn x ->
+        %{x | data: %Nx.Defn.Expr{id: make_ref(), op: :not_an_nx_op, args: [x], context: nil}}
+      end
+
+      assert_raise ArgumentError, ~r/^does not yet lower op :not_an_nx_op/, fn ->
+        lower(unknown, [Nx.tensor([1.0, 2.0])])
       end
     end
 

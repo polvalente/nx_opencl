@@ -36,10 +36,18 @@ defmodule NxCL.Parity do
   """
   @spec assert_parity(atom(), function(), list(), keyword()) :: :ok
   def assert_parity(op, fun, args, opts \\ []) do
+    assert_expected(op, fun, args, reference(fun, args), opts)
+  end
+
+  @doc """
+  Like `assert_parity/4`, but compares against `expected`, a value the caller
+  states, instead of running the reference. For a row where `Nx.BinaryBackend`
+  is wrong or too slow; the row's comment says why. Takes the same options.
+  """
+  @spec assert_expected(atom(), function(), list(), Nx.Container.t(), keyword()) :: :ok
+  def assert_expected(op, fun, args, expected, opts \\ []) do
     compiler = Keyword.get(opts, :compiler, NxCL.Compiler)
     compiler_opts = Keyword.get(opts, :compiler_opts, [])
-
-    expected = reference(fun, args)
 
     actual = apply(Nx.Defn.jit(fun, [compiler: compiler] ++ compiler_opts), args)
 

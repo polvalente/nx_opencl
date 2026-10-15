@@ -6,9 +6,11 @@
 pub mod complex;
 pub mod conv;
 pub mod elementwise;
+pub mod fft;
 pub mod gemm;
 pub mod index;
 pub mod indexing;
+pub mod linalg;
 pub mod movement;
 pub mod reduce;
 pub mod scan;
@@ -54,6 +56,9 @@ pub enum KernelArg {
     Output,
     /// The i-th scratch buffer of the plan.
     Scratch(usize),
+    /// A read-only table the host built (twiddles, chirp). The executor uploads
+    /// it when it decodes the program and keeps it with the kernel launch.
+    Table(Vec<u8>),
     /// The program's error flag, one `int` the kernel sets to a nonzero code on a
     /// bad index. The run fails after the queue drains if it is set.
     ErrorFlag,
@@ -201,6 +206,16 @@ pub fn is_indexing(op: &str) -> bool {
     indexing::handles(op)
 }
 
+/// True when `op` is `fft` or `ifft`.
+pub fn is_fft(op: &str) -> bool {
+    fft::handles(op)
+}
+
+/// True when `op` is `triangular_solve` or `cholesky`.
+pub fn is_linalg(op: &str) -> bool {
+    linalg::handles(op)
+}
+
 /// True when `op` is `batched_gemm` or `conv`.
 pub fn is_gemm(op: &str) -> bool {
     gemm::handles(op) || conv::handles(op)
@@ -218,6 +233,10 @@ pub fn generate_plan(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan
         sort::generate(instr, caps, limits)
     } else if indexing::handles(&instr.op) {
         indexing::generate(instr, caps)
+    } else if fft::handles(&instr.op) {
+        fft::generate(instr, caps)
+    } else if linalg::handles(&instr.op) {
+        linalg::generate(instr, caps, limits)
     } else if gemm::handles(&instr.op) {
         gemm::generate(instr, caps, limits)
     } else if conv::handles(&instr.op) {

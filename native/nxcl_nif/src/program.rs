@@ -35,6 +35,8 @@ enum Arg {
     Scratch(usize),
     /// A scalar passed by value: the bytes of one element, 1, 2, 4 or 8 long.
     Scalar(Vec<u8>),
+    /// A table the host built, uploaded when the program is decoded.
+    Table(Arc<DeviceBuffer>),
     /// The one-`int` error flag of the run; a kernel sets it on a bad index.
     ErrorFlag,
 }
@@ -437,6 +439,9 @@ impl Program {
                                         Arg::Scratch(n) => {
                                             exec.set_arg(&scratch_bufs[*n].buffer.get());
                                         }
+                                        Arg::Table(t) => {
+                                            exec.set_arg(&t.buffer.get());
+                                        }
                                         Arg::Scalar(bytes) => set_scalar(&mut exec, bytes)?,
                                         Arg::ErrorFlag => {
                                             let f = flag.as_ref().expect("flag allocated");
@@ -600,6 +605,8 @@ fn decode_step(
             || codegen::is_window(name)
             || codegen::is_sort(name)
             || codegen::is_indexing(name)
+            || codegen::is_linalg(name)
+            || codegen::is_fft(name)
             || codegen::is_gemm(name) =>
         {
             launch_generated(
@@ -661,19 +668,31 @@ fn launch_generated(
     };
     let plan = codegen::generate_plan(&instr, &ctx.caps, &ctx.limits)?;
     let mut passes = Vec::with_capacity(plan.passes.len());
+    // A table that several passes share is uploaded once.
+    let mut tables: Vec<(Vec<u8>, Arc<DeviceBuffer>)> = Vec::new();
     for spec in plan.passes {
         let kernel = kernel::cached(ctx, &spec.source, &spec.entry, &spec.build_options)?;
-        let args = spec
-            .args
-            .into_iter()
-            .map(|a| match a {
+        let mut args = Vec::with_capacity(spec.args.len());
+        for a in spec.args {
+            args.push(match a {
                 KernelArg::Operand(k) => Arg::Slot(operands[k]),
                 KernelArg::Scalar(bytes) => Arg::Scalar(bytes),
                 KernelArg::Output => Arg::Out,
                 KernelArg::Scratch(n) => Arg::Scratch(n),
                 KernelArg::ErrorFlag => Arg::ErrorFlag,
-            })
-            .collect();
+                KernelArg::Table(bytes) => {
+                    let buf = match tables.iter().find(|(b, _)| *b == bytes) {
+                        Some((_, buf)) => buf.clone(),
+                        None => {
+                            let buf = Arc::new(DeviceBuffer::create_with_data(ctx, &bytes)?);
+                            tables.push((bytes, buf.clone()));
+                            buf
+                        }
+                    };
+                    Arg::Table(buf)
+                }
+            });
+        }
         passes.push(Pass {
             kernel,
             args,

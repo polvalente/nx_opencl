@@ -27,6 +27,7 @@ defmodule NxCL.Lower do
   alias NxCL.Lower.HostCall
   alias NxCL.Program
   alias NxCL.Program.Builder
+  alias NxCL.Program.Builder.Linalg
   alias NxCL.Program.SubProgram
 
   @reduce_ops [:sum, :product, :reduce_max, :reduce_min, :all, :any]
@@ -43,9 +44,6 @@ defmodule NxCL.Lower do
   # Binary ops a `reduce` body may hold: the result has the operand type.
   @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
                bitwise_or bitwise_xor left_shift right_shift)a
-
-  # Blocks whose `default_expr` lowers inline until stage 12 adds the block hook.
-  @inline_blocks [Nx.Block.Take, Nx.Block.TakeAlongAxis]
 
   @unary_ops Builder.unary_ops()
   @binary_ops Builder.binary_ops()
@@ -513,15 +511,44 @@ defmodule NxCL.Lower do
     emit(state, node, Builder.indexed(op, refs, node.type, node.shape, opts[:axes]))
   end
 
-  # `Nx.take/3` and `Nx.take_along_axis/3` are blocks whose default is a `gather`.
+  # -- Linear algebra -----------------------------------------------------
+
   defp expand(
-         %T{data: %Nx.Defn.Expr{op: :block, args: [%{__struct__: mod}, args, default, _fun]}} =
-           node,
+         %T{data: %Nx.Defn.Expr{op: :triangular_solve, args: [a, b, opts]}} = node,
          state
-       )
-       when mod in @inline_blocks do
-    Block.inline(state, node, {args, default}, &expand/2)
+       ) do
+    {state, ra} = cast(state, a, node.type)
+    {state, rb} = cast(state, b, node.type)
+    emit(state, node, Linalg.triangular_solve(ra, rb, node.type, node.shape, opts))
   end
+
+  defp expand(
+         %T{
+           data: %Nx.Defn.Expr{
+             op: :block,
+             args: [%Nx.Block.LinAlg.Cholesky{}, [x], _default, _fun]
+           }
+         } = node,
+         state
+       ) do
+    {state, rx} = cast(state, x, node.type)
+    emit(state, node, Linalg.cholesky(rx, node.type, node.shape))
+  end
+
+  # Nx pads or crops the axis to `:length`; so do we, then one transform.
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in [:fft, :ifft] do
+    {state, rx} = cast(state, x, node.type)
+    axis = opts[:axis]
+    {state, rx} = fit_axis(state, rx, x.shape, node.type, node.shape, axis)
+    emit(state, node, Linalg.fft(op, rx, node.type, node.shape, axis))
+  end
+
+  # -- Blocks -------------------------------------------------------------
+
+  # A block with no native clause above: lower its default or run it on the host.
+  defp expand(%T{data: %Nx.Defn.Expr{op: :block}} = node, state),
+    do: Block.lower(state, node, &expand/2)
 
   # -- Control flow -------------------------------------------------------
 
@@ -621,6 +648,34 @@ defmodule NxCL.Lower do
       end)
 
     {state, Enum.reverse(refs)}
+  end
+
+  # Crops or zero-pads `axis` of the operand `ref` (shape `shape`, type `type`)
+  # to the length of `out` on that axis.
+  defp fit_axis(state, ref, shape, type, out, axis) do
+    have = elem(shape, axis)
+    want = elem(out, axis)
+    fitted = put_elem(shape, axis, want)
+
+    cond do
+      have == want -> {state, ref}
+      have > want -> crop_axis(state, ref, type, fitted)
+      true -> pad_axis(state, ref, type, {shape, fitted, axis})
+    end
+  end
+
+  defp crop_axis(state, ref, type, fitted) do
+    rank = tuple_size(fitted)
+    {state, starts} = start_refs(state, List.duplicate(0, rank))
+    strides = List.duplicate(1, rank)
+    push(state, Builder.slice(ref, starts, type, fitted, Tuple.to_list(fitted), strides))
+  end
+
+  defp pad_axis(state, ref, type, {shape, fitted, axis}) do
+    {state, zero} = put_const(state, 0, type)
+    extra = elem(fitted, axis) - elem(shape, axis)
+    config = for a <- 0..(tuple_size(shape) - 1), do: {0, if(a == axis, do: extra, else: 0), 0}
+    push(state, Builder.pad(ref, zero, type, fitted, config))
   end
 
   defp scalar_const?(state, %T{shape: {}} = operand),

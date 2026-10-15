@@ -203,10 +203,15 @@ defmodule NxCL.CompilerTest do
     end
 
     test "an unsupported op raises ArgumentError when compiled" do
-      jitted = Nx.Defn.jit(fn x -> Nx.fft(x) end, compiler: NxCL.Compiler)
+      # Every Nx 1.0 op lowers since stage 12, so the node carries an op Nx does not define.
+      unknown = fn x ->
+        %{x | data: %Nx.Defn.Expr{id: make_ref(), op: :not_an_nx_op, args: [x], context: nil}}
+      end
+
+      jitted = Nx.Defn.jit(unknown, compiler: NxCL.Compiler)
 
       assert_raise ArgumentError, ~r/^does not yet lower op/, fn ->
-        jitted.(Nx.tensor([1.0, 2.0], type: :c64))
+        jitted.(Nx.tensor([1.0, 2.0]))
       end
     end
   end
