@@ -16,6 +16,9 @@ pub struct DeviceCtx {
     pub caps: Caps,
     /// Workgroup and local-memory limits codegen sizes cooperative kernels from.
     pub limits: Limits,
+    /// Kernel arguments the device takes: `CL_DEVICE_MAX_PARAMETER_SIZE` over
+    /// 8 bytes, the size of a pointer or a `long`.
+    pub max_args: usize,
     pub kernels: Mutex<HashMap<KernelKey, Arc<CompiledKernel>>>,
     pub stats: KernelStats,
     pub live_buffers: Arc<AtomicUsize>,
@@ -64,6 +67,8 @@ impl DeviceCtx {
             local_mem: device.local_mem_size().unwrap_or(0) as usize,
         };
 
+        let max_args = device.max_parameter_size().unwrap_or(0) / 8;
+
         let context = Context::from_device(&device)
             .map_err(|e| format!("Failed to create context: {:?}", e))?;
 
@@ -79,6 +84,7 @@ impl DeviceCtx {
             unified,
             caps,
             limits,
+            max_args,
             kernels: Mutex::new(HashMap::new()),
             stats: KernelStats::default(),
             live_buffers: Arc::new(AtomicUsize::new(0)),
@@ -95,6 +101,7 @@ pub struct DeviceInfo {
     pub local_mem_size: u64,
     pub global_mem_size: u64,
     pub unified_memory: bool,
+    pub max_kernel_args: usize,
     pub extensions: String,
 }
 
@@ -131,6 +138,7 @@ impl DeviceCtx {
             local_mem_size,
             global_mem_size,
             unified_memory: self.unified,
+            max_kernel_args: self.max_args,
             extensions,
         })
     }

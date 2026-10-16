@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use super::complex;
 use super::types::{type_info, DType, Half, Kind, TypeInfo};
-use super::{element_count, Caps, Instr, KernelArg, KernelSpec};
+use super::{element_count, Attr, Caps, Instr, KernelArg, KernelSpec};
 
 const UNARY_FLOAT_FNS: [&str; 21] = [
     "exp", "expm1", "log", "log1p", "sin", "cos", "tan", "sinh", "cosh", "tanh", "asin", "acos",
@@ -976,6 +976,63 @@ pub(super) fn scalar_binary(op: &str, dtype: DType, name: &str) -> Result<Scalar
         helpers: gen.helpers,
         cfns: gen.cfns,
     })
+}
+
+/// The scalar function `static R name(A in0, B in1, ...)` for any elementwise
+/// op, with the arithmetic of the elementwise kernel for `op`. Each parameter
+/// and the result use the storage type of their dtype. The second value is the
+/// type the body computes in, for the extension check. A fused kernel calls one
+/// of these per step.
+pub(super) fn scalar_step(
+    op: &str,
+    operands: &[DType],
+    out: DType,
+    attrs: &[Attr],
+    name: &str,
+) -> Result<(ScalarCode, DType), String> {
+    if !handles(op) {
+        return Err(format!("{} is not an elementwise op", op));
+    }
+    let instr = Instr {
+        op: op.to_string(),
+        operands: operands
+            .iter()
+            .map(|&dtype| super::Operand {
+                dtype,
+                shape: Vec::new(),
+                constant: Some(Vec::new()),
+            })
+            .collect(),
+        out,
+        out_shape: Vec::new(),
+        attrs: attrs.to_vec(),
+    };
+    let mut gen = Gen {
+        instr: &instr,
+        helpers: BTreeMap::new(),
+        locals: Vec::new(),
+        cfns: BTreeMap::new(),
+    };
+    let (expr, compute) = gen.body()?;
+    let result = gen.store(&expr, &compute)?;
+    let params: Vec<String> = operands
+        .iter()
+        .enumerate()
+        .map(|(k, &d)| type_info(d).map(|t| format!("{} in{}", t.storage, k)))
+        .collect::<Result<_, _>>()?;
+    let ret = type_info(out)?.storage;
+    let locals = gen.locals.join("\n");
+    Ok((
+        ScalarCode {
+            funcs: format!(
+                "static {ret} {name}({params}) {{\n{locals}\n  return {result};\n}}\n",
+                params = params.join(", ")
+            ),
+            helpers: gen.helpers,
+            cfns: gen.cfns,
+        },
+        compute.dtype,
+    ))
 }
 
 fn require_float(op: &str, m: &TypeInfo) -> Result<(), String> {

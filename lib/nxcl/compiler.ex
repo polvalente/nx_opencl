@@ -27,6 +27,15 @@ defmodule NxCL.Compiler do
 
   Arguments and results can be containers (tuples, maps, nested).
 
+  ## Options
+
+    * `:fusion` - `false` turns off elementwise fusion (`NxCL.Fusion`). The default
+      is the `:fusion` key of the `:nx_opencl` application environment, `true`
+      when unset.
+    * `:census` - `true` prints the instruction counts of the program when the
+      function compiles (`NxCL.Fusion.Census`). With fusion on, it prints the
+      counts before and after the pass.
+
   ## Unsupported operations
 
   The compiler never falls back to the CPU. An op that `NxCL.Lower` cannot
@@ -45,6 +54,8 @@ defmodule NxCL.Compiler do
 
   alias Nx.Defn.Composite
   alias NxCL.Executor
+  alias NxCL.Fusion
+  alias NxCL.Fusion.Census
   alias NxCL.Lower
 
   @impl true
@@ -58,10 +69,21 @@ defmodule NxCL.Compiler do
     expr = fun.(vars)
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
+    fused = Fusion.fuse(program, fusion: fusion?(opts))
+    if opts[:census], do: print_census(program, fused)
+    program = fused
 
     fn [args] ->
       [Executor.run(program, args)]
     end
+  end
+
+  defp fusion?(opts),
+    do: Keyword.get_lazy(opts, :fusion, fn -> Application.get_env(:nx_opencl, :fusion, true) end)
+
+  defp print_census(program, fused) do
+    IO.puts(Census.format(Census.count(program), "census (unfused)"))
+    if fused != program, do: IO.puts(Census.format(Census.count(fused), "census (fused)"))
   end
 
   # The named-override map is not wired through.

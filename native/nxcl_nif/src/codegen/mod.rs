@@ -7,6 +7,7 @@ pub mod complex;
 pub mod conv;
 pub mod elementwise;
 pub mod fft;
+pub mod fused;
 pub mod gemm;
 pub mod index;
 pub mod indexing;

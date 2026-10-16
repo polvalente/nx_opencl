@@ -1,3 +1,7 @@
+# `NXCL_FUSION=off mix test` runs every row with elementwise fusion off.
+if System.get_env("NXCL_FUSION") in ["0", "off", "false"],
+  do: Application.put_env(:nx_opencl, :fusion, false)
+
 # Tests tagged `requires: :fp64 | :fp16 | :int64_atomics` are excluded when device 0 lacks the extension.
 skipped = for {:requires, cap} = filter <- NxCL.Parity.unsupported_filters(), do: {filter, cap}
 
