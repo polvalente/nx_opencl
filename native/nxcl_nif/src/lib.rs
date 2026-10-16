@@ -6,6 +6,7 @@ mod program;
 
 use buffer::DeviceBuffer;
 use device_ctx::DeviceCtx;
+use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use rustler::{NifResult, OwnedBinary, ResourceArc, Term};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
@@ -51,6 +52,19 @@ unsafe impl Sync for NifDeviceBuffer {}
 #[rustler::resource_impl]
 impl rustler::Resource for NifDeviceCtx {}
 
+/// An extra command queue on a device context. Each one runs a program at a
+/// time, and different queues run at the same time.
+pub struct NifQueue {
+    queue: Mutex<CommandQueue>,
+    ctx: Arc<DeviceCtxInner>,
+}
+
+unsafe impl Send for NifQueue {}
+unsafe impl Sync for NifQueue {}
+
+#[rustler::resource_impl]
+impl rustler::Resource for NifQueue {}
+
 pub struct NifProgram {
     program: program::Program,
     ctx: Arc<DeviceCtxInner>,
@@ -69,13 +83,38 @@ impl rustler::Resource for NifProgram {}
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn device_ctx_create(device_id: usize) -> NifResult<ResourceArc<NifDeviceCtx>> {
-    match DeviceCtx::new(device_id) {
+    open_ctx(None, device_id)
+}
+
+/// Like `device_ctx_create`, with the index counted inside one platform.
+#[rustler::nif(schedule = "DirtyIo")]
+fn device_ctx_create_on(platform: usize, device_id: usize) -> NifResult<ResourceArc<NifDeviceCtx>> {
+    open_ctx(Some(platform), device_id)
+}
+
+fn open_ctx(platform: Option<usize>, device_id: usize) -> NifResult<ResourceArc<NifDeviceCtx>> {
+    match DeviceCtx::new(platform, device_id) {
         Ok(ctx) => {
             let inner = Arc::new(DeviceCtxInner { ctx });
             Ok(ResourceArc::new(NifDeviceCtx { inner }))
         }
         Err(e) => Err(rustler::Error::Term(Box::new(e))),
     }
+}
+
+/// A new command queue on the context, for `eval_program_on`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn queue_create(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<ResourceArc<NifQueue>> {
+    // OpenCL 1.2 entry point, as in `DeviceCtx::new`.
+    #[allow(deprecated)]
+    let queue = CommandQueue::create_default(&ctx.inner.ctx.context, CL_QUEUE_PROFILING_ENABLE)
+        .map_err(|e| {
+            rustler::Error::Term(Box::new(format!("Failed to create command queue: {:?}", e)))
+        })?;
+    Ok(ResourceArc::new(NifQueue {
+        queue: Mutex::new(queue),
+        ctx: ctx.inner.clone(),
+    }))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -206,12 +245,41 @@ fn eval_program(
             .iter()
             .map(|b| b.as_ref().map(|b| b.get()).transpose())
             .collect::<Result<Vec<_>, _>>()?;
-        let outputs = prog.program.eval(&prog.ctx.ctx, externals)?;
-        Ok(outputs
-            .into_iter()
-            .map(|buffer| ResourceArc::new(NifDeviceBuffer::new(buffer, prog.ctx.clone())))
-            .collect())
+        let outputs = prog
+            .program
+            .eval(&prog.ctx.ctx, &prog.ctx.ctx.queue, externals)?;
+        Ok(wrap_outputs(&prog.ctx, outputs))
     })
+}
+
+/// `eval_program` on an extra queue of the program's context.
+#[rustler::nif(schedule = "DirtyIo")]
+fn eval_program_on(
+    prog: ResourceArc<NifProgram>,
+    buffers: Vec<Option<ResourceArc<NifDeviceBuffer>>>,
+    queue: ResourceArc<NifQueue>,
+) -> Result<Vec<ResourceArc<NifDeviceBuffer>>, String> {
+    guarded(|| {
+        if !Arc::ptr_eq(&prog.ctx, &queue.ctx) {
+            return Err("the queue belongs to another device context".to_string());
+        }
+        let externals = buffers
+            .iter()
+            .map(|b| b.as_ref().map(|b| b.get()).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+        let outputs = prog.program.eval(&prog.ctx.ctx, &queue.queue, externals)?;
+        Ok(wrap_outputs(&prog.ctx, outputs))
+    })
+}
+
+fn wrap_outputs(
+    ctx: &Arc<DeviceCtxInner>,
+    outputs: Vec<Arc<DeviceBuffer>>,
+) -> Vec<ResourceArc<NifDeviceBuffer>> {
+    outputs
+        .into_iter()
+        .map(|buffer| ResourceArc::new(NifDeviceBuffer::new(buffer, ctx.clone())))
+        .collect()
 }
 
 // ── Counters ────────────────────────────────────────────

@@ -72,6 +72,8 @@ defmodule NxCL.Lower do
   """
   @spec lower(Nx.Container.t(), non_neg_integer() | nil) :: Program.t()
   def lower(output, num_inputs \\ nil) do
+    NxCL.CacheStats.bump(:lower)
+
     state = %{
       inputs: %{},
       captures: [],

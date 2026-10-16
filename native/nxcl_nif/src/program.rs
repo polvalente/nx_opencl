@@ -11,12 +11,13 @@
 //! keeps the type and shape of every slot, so an instruction needs no operand
 //! types of its own.
 
+use opencl3::command_queue::CommandQueue;
 use opencl3::kernel::ExecuteKernel;
 use opencl3::memory::ClMem;
 use rustler::types::tuple::get_tuple;
 use rustler::{Binary, Term};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::buffer::DeviceBuffer;
 use crate::codegen::fused::{self, Fused, InMap, Src, Step as FusedStep};
@@ -358,6 +359,7 @@ impl Program {
     pub fn eval(
         &self,
         ctx: &DeviceCtx,
+        queue: &Mutex<CommandQueue>,
         externals: Vec<Option<Arc<DeviceBuffer>>>,
     ) -> Result<Vec<Arc<DeviceBuffer>>, String> {
         if externals.len() != self.n_external {
@@ -382,10 +384,7 @@ impl Program {
             None
         };
 
-        let queue = ctx
-            .queue
-            .lock()
-            .map_err(|e| format!("Lock error: {:?}", e))?;
+        let queue = queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
 
         // No wait between steps. The queue is in order, and OpenCL keeps a
         // buffer alive until every queued command that uses it has finished,
@@ -426,6 +425,11 @@ impl Program {
                                 }
                             }
                             let mut next = bufs.iter();
+                            let _launch = pass
+                                .kernel
+                                .launch
+                                .lock()
+                                .map_err(|e| format!("Lock error: {:?}", e))?;
                             let mut exec = ExecuteKernel::new(&pass.kernel.kernel);
                             unsafe {
                                 for a in &pass.args {

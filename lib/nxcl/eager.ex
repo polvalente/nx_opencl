@@ -41,8 +41,9 @@ defmodule NxCL.Eager do
 
     {st, out_refs} = build.(%{instrs: [], constants: [], host_calls: []}, operands)
     program = program(st, tensors, out, List.wrap(out_refs))
-    buffers = Executor.run_buffers(program, Enum.map(tensors, &{:buffer, &1.data.ref}))
-    ctx = Executor.ctx()
+    opts = device_opts(tensors)
+    buffers = Executor.run_buffers(program, Enum.map(tensors, &{:buffer, &1.data.ref}), opts)
+    ctx = NxCL.Devices.fetch!(opts).ctx
 
     {result, []} =
       Composite.traverse(out, buffers, fn t, [buf | rest] ->
@@ -67,6 +68,16 @@ defmodule NxCL.Eager do
   end
 
   # A tensor from another backend goes to the device first.
+  # The device of the first operand that sits on one; the default device otherwise.
+  defp device_opts(tensors) do
+    with %T{data: %NxCL.Backend{ctx: ctx}} <- List.first(tensors),
+         %{key: key} <- NxCL.Devices.for_ctx(ctx) do
+      [device: key]
+    else
+      _ -> []
+    end
+  end
+
   defp device(%T{data: %NxCL.Backend{}} = t), do: t
   defp device(%T{} = t), do: NxCL.Backend.from_binary(t, Nx.to_binary(t), [])
 

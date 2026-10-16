@@ -32,6 +32,13 @@ defmodule NxCL.Compiler do
     * `:fusion` - `false` turns off elementwise fusion (`NxCL.Fusion`). The default
       is the `:fusion` key of the `:nx_opencl` application environment, `true`
       when unset.
+    * `:device` - the device index (or `{platform, index}`) to run on. See
+      `NxCL.Devices`. The default is 0.
+    * `:command_queue` - a queue from `NxCL.Devices.new_queue/1`. The default is
+      the device's own queue. `__partitions_options__/1` gives each partition
+      its own.
+    * `:max_concurrency` - the partition count `__partitions_options__/1` reads.
+    * `:hooks` - must be empty.
     * `:census` - `true` prints the instruction counts of the program when the
       function compiles (`NxCL.Fusion.Census`). With fusion on, it prints the
       counts before and after the pass.
@@ -48,15 +55,29 @@ defmodule NxCL.Compiler do
   `Nx.runtime_call/4`, `Nx.io_call/2` and `Nx.Defn.Kernel.print_value/2` run
   Elixir code in the calling process, between device steps. The executor reads
   back only the tensors the callback takes. The `:hooks` option raises `ArgumentError`.
+
+  ## Caches
+
+  `NxCL.CompileCache` keeps the compiled closure of each function, keyed by the
+  function, its input templates and the device. A repeat call does not trace or
+  lower. `NxCL.ProgramCache` keeps compiled programs by structure, so two
+  functions that lower alike share one.
+
+  An unknown option raises `ArgumentError` naming the key.
   """
 
   @behaviour Nx.Defn.Compiler
 
   alias Nx.Defn.Composite
+  alias NxCL.CacheStats
+  alias NxCL.CompileCache
+  alias NxCL.Compiler.Options
+  alias NxCL.Devices
   alias NxCL.Executor
   alias NxCL.Fusion
   alias NxCL.Fusion.Census
   alias NxCL.Lower
+  alias NxCL.Program
 
   @impl true
   def __jit__(key, vars, fun, args_list, opts) do
@@ -64,17 +85,38 @@ defmodule NxCL.Compiler do
   end
 
   @impl true
-  def __compile__(_key, vars, fun, opts) do
-    check_hooks!(opts)
+  def __compile__(key, vars, fun, opts) do
+    opts = Options.validate!(opts)
+    run_opts = Keyword.take(opts, [:device, :command_queue])
+
+    cache_key =
+      {key, Enum.map(vars, &Composite.traverse(&1, fn t -> Nx.to_template(t) end)),
+       {run_opts, fusion?(opts), opts[:census]}}
+
+    case CompileCache.fetch(cache_key) do
+      {:ok, closure} ->
+        CacheStats.bump(:closure_hit)
+        closure
+
+      {:error, :cache_miss} ->
+        CacheStats.bump(:closure_miss)
+        CompileCache.put(cache_key, build_closure(vars, fun, opts, run_opts))
+    end
+  end
+
+  defp build_closure(vars, fun, opts, run_opts) do
+    # Fail on a bad device when the function compiles, not when it first runs.
+    Devices.fetch!(run_opts)
+
     expr = fun.(vars)
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
     fused = Fusion.fuse(program, fusion: fusion?(opts))
     if opts[:census], do: print_census(program, fused)
-    program = fused
+    program = %Program{fused | signature: Program.signature(fused)}
 
     fn [args] ->
-      [Executor.run(program, args)]
+      [Executor.run(program, args, run_opts)]
     end
   end
 
@@ -86,30 +128,27 @@ defmodule NxCL.Compiler do
     if fused != program, do: IO.puts(Census.format(Census.count(fused), "census (fused)"))
   end
 
-  # The named-override map is not wired through.
-  defp check_hooks!(opts) do
-    case Keyword.get(opts, :hooks, %{}) do
-      hooks when hooks == %{} or hooks == [] ->
-        :ok
+  @impl true
+  def __partitions_options__(opts) do
+    opts = Options.validate!(opts)
+    {n, opts} = Keyword.pop(opts, :max_concurrency, 1)
 
-      hooks ->
-        raise ArgumentError,
-              "NxCL.Compiler does not support the :hooks option (got callbacks for " <>
-                "#{inspect(hooks_keys(hooks))}); io_call nodes run their own callback"
+    for _ <- 1..n//1 do
+      {:ok, queue} = new_queue(opts)
+      Keyword.put(opts, :command_queue, queue)
     end
   end
 
-  defp hooks_keys(hooks) when is_map(hooks), do: Map.keys(hooks)
-  defp hooks_keys(hooks), do: hooks
-
-  @impl true
-  def __partitions_options__(opts) do
-    [opts]
+  defp new_queue(opts) do
+    case Devices.new_queue(opts) do
+      {:ok, queue} -> {:ok, queue}
+      {:error, reason} -> raise NxCL.CompilerError, message: "cannot open a queue: #{reason}"
+    end
   end
 
   @impl true
-  def __to_backend__(_opts) do
-    {NxCL.Backend, []}
+  def __to_backend__(opts) do
+    {NxCL.Backend, Keyword.take(opts, [:device])}
   end
 end
 

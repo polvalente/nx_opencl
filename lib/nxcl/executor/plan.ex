@@ -24,7 +24,7 @@ defmodule NxCL.Executor.Plan do
 
   @control [:cond, :while, :host_call]
 
-  defstruct [:scope, :const_keys, :const_wire]
+  defstruct [:scope, :const_keys, :const_wire, :const_key]
 
   @type t :: %__MODULE__{}
 
@@ -37,11 +37,13 @@ defmodule NxCL.Executor.Plan do
     keys = Enum.sort(needed)
     const_wire = Enum.map(keys, fn {:const, c} -> const_slot(program.constants, c) end)
     outs = for k <- 0..(length(keys) - 1)//1, do: {:const, k}
+    wire = {[], [], const_wire, [], outs}
 
     %__MODULE__{
       scope: scope,
       const_keys: keys,
-      const_wire: {[], [], const_wire, [], outs}
+      const_wire: wire,
+      const_key: {Executor, :consts, :erlang.md5(:erlang.term_to_binary(wire))}
     }
   end
 

@@ -35,14 +35,15 @@ defmodule NxCL.Backend do
 
   ## Device selection
 
-  Currently uses the first available GPU device (index 0). A single
-  OpenCL context is shared across all processes via `persistent_term`.
+  The default is the first available GPU device (index 0). Pass `device:` to
+  `Nx.default_backend/1`, `Nx.backend_transfer/3` or `Nx.Defn.jit/2` to pick
+  another one (see `NxCL.Devices`). `NxCL.Devices` holds one OpenCL context per
+  device and shares it across all processes.
   """
 
   @behaviour Nx.Backend
 
   alias NxCL.Eager
-  alias NxCL.Executor
   alias NxCL.Program.Builder
 
   defstruct [:ref, :ctx]
@@ -57,8 +58,8 @@ defmodule NxCL.Backend do
   # ── Data Transfer ──────────────────────────────────
 
   @impl true
-  def from_binary(%Nx.Tensor{} = tensor, binary, _backend_opts) do
-    ctx = Executor.ctx()
+  def from_binary(%Nx.Tensor{} = tensor, binary, backend_opts) do
+    ctx = NxCL.Devices.fetch!(Keyword.take(backend_opts, [:device])).ctx
     ref = NxCL.Native.buffer_write(ctx, binary)
     put_in(tensor.data, %__MODULE__{ref: ref, ctx: ctx})
   end

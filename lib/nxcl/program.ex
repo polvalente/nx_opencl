@@ -20,6 +20,8 @@ defmodule NxCL.Program do
     * `:ref_counts` - how often each ref is read, by instructions or as an
       output. The native executor derives the same counts from the encoded
       program to free buffers at their last reader.
+    * `:signature` - the value `signature/1` returns, kept by the compiler so a
+      cached program is not hashed again on each call.
 
   See `NxCL.Program.Instruction` for the ref and attr types.
   """
@@ -35,7 +37,8 @@ defmodule NxCL.Program do
     captures: [],
     constants: [],
     host_calls: [],
-    ref_counts: %{}
+    ref_counts: %{},
+    signature: nil
   ]
 
   @type t :: %__MODULE__{
@@ -46,6 +49,33 @@ defmodule NxCL.Program do
           instructions: [Instruction.t()],
           outputs: [Instruction.ref()],
           output_template: Nx.Container.t(),
-          ref_counts: %{Instruction.ref() => non_neg_integer()}
+          ref_counts: %{Instruction.ref() => non_neg_integer()},
+          signature: binary() | nil
         }
+
+  @doc """
+  A hash of what decides the compiled program: the input and capture types and
+  shapes, the constants, and every instruction with its sub-programs. It holds no
+  expression ids and no tensor values, so two functions that lower to the same
+  program have the same signature.
+  """
+  @spec signature(t()) :: binary()
+  def signature(%__MODULE__{signature: signature}) when is_binary(signature), do: signature
+
+  def signature(%__MODULE__{} = program) do
+    term =
+      {program.inputs, Enum.map(program.captures, &{&1.type, &1.shape}), program.constants,
+       Enum.map(program.instructions, &instruction_signature/1), program.outputs}
+
+    :erlang.md5(:erlang.term_to_binary(term))
+  end
+
+  defp instruction_signature(%Instruction{} = instr) do
+    subs =
+      Enum.map(instr.subprograms, fn sub ->
+        {Enum.map(sub.instructions, &instruction_signature/1), sub.outputs}
+      end)
+
+    {instr.op, instr.operands, instr.out_type, instr.out_shape, instr.attrs, subs}
+  end
 end

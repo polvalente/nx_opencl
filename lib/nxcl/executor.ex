@@ -8,6 +8,8 @@ defmodule NxCL.Executor do
   # straight-line segment runs natively as its own program, and this module runs
   # the `cond`, `while` and `host_call` steps itself (`NxCL.Executor.Host`).
   # Buffers stay on the device between steps, in a table keyed by ref. A step drops the buffers it was the last to read.
+  # Compiled programs and plans live in `NxCL.ProgramCache`. A run uses the device and
+  # queue its options name (`NxCL.Devices`).
   #
   # Wire term sent to `NxCL.Native.compile_program/2`:
   #
@@ -25,19 +27,22 @@ defmodule NxCL.Executor do
   # the op, the types and the shapes.
 
   alias Nx.Defn.Composite
+  alias NxCL.Devices
   alias NxCL.Executor.Host
   alias NxCL.Executor.Plan
   alias NxCL.Executor.Stats
   alias NxCL.Program
   alias NxCL.Program.Instruction
+  alias NxCL.ProgramCache
 
   @doc """
   Runs `program` on `args`, the flat list of lazy argument functions that
-  `Nx.Defn.Compiler` passes. Returns the output container.
+  `Nx.Defn.Compiler` passes. Returns the output container. `opts` take `:device`
+  and `:command_queue` (see `NxCL.Devices`).
   """
-  @spec run(Program.t(), [(-> Nx.Tensor.t())]) :: Nx.Container.t()
-  def run(%Program{} = program, args) do
-    program |> run_buffers(args) |> then(&read_outputs(program, &1))
+  @spec run(Program.t(), [(-> Nx.Tensor.t())], keyword()) :: Nx.Container.t()
+  def run(%Program{} = program, args, opts \\ []) do
+    program |> run_buffers(args, opts) |> then(&read_outputs(program, &1))
   end
 
   @doc """
@@ -45,17 +50,18 @@ defmodule NxCL.Executor do
   back. An argument is a lazy function, or `{:buffer, ref}` for a tensor that is
   already on the device (the eager backend passes these).
   """
-  @spec run_buffers(Program.t(), [(-> Nx.Tensor.t()) | {:buffer, reference()}]) :: [reference()]
-  def run_buffers(%Program{} = program, args) do
-    ctx = ctx()
+  @spec run_buffers(Program.t(), [(-> Nx.Tensor.t()) | {:buffer, reference()}], keyword()) ::
+          [reference()]
+  def run_buffers(%Program{} = program, args, opts \\ []) do
+    dev = Devices.fetch!(opts)
 
-    case plan_for(ctx, program) do
-      {:simple, native} -> run_simple(ctx, program, native, args)
-      %Plan{} = plan -> run_plan(ctx, plan, program, args)
+    case plan_for(dev, program) do
+      {:simple, native} -> run_simple(dev, program, native, args)
+      %Plan{} = plan -> run_plan(dev, plan, program, args)
     end
   end
 
-  defp run_simple(ctx, program, native, args) do
+  defp run_simple(%{ctx: ctx} = dev, program, native, args) do
     inputs =
       program.inputs
       |> Enum.with_index()
@@ -68,10 +74,7 @@ defmodule NxCL.Executor do
 
     consts = Enum.map(program.constants, fn _ -> nil end)
 
-    case NxCL.Native.eval_program(native, inputs ++ captures ++ consts) do
-      {:ok, outputs} -> outputs
-      {:error, reason} -> raise NxCL.CompilerError, message: "device run failed: #{reason}"
-    end
+    eval!(dev, native, inputs ++ captures ++ consts)
   end
 
   defp read_outputs(program, outputs) do
@@ -95,19 +98,9 @@ defmodule NxCL.Executor do
     container
   end
 
-  @doc "The shared device context."
+  @doc "The context of the default device."
   @spec ctx() :: reference()
-  def ctx() do
-    case :persistent_term.get(:nxcl_device_ctx, nil) do
-      nil ->
-        ctx = NxCL.Native.device_ctx_create(0)
-        :persistent_term.put(:nxcl_device_ctx, ctx)
-        ctx
-
-      ctx ->
-        ctx
-    end
-  end
+  def ctx(), do: Devices.ctx()
 
   @doc """
   Encodes a program as the term `NxCL.Native.compile_program/2` reads. Exposed
@@ -120,74 +113,45 @@ defmodule NxCL.Executor do
      Enum.map(program.instructions, &encode_instruction/1), program.outputs}
   end
 
-  # The decoded program stays in `persistent_term`, so a repeat call skips decoding
-  # and kernel lookups. Stage 15 replaces this with a bounded cache.
-  defp compiled(ctx, program) do
-    wire = encode(program)
-    cached(ctx, {__MODULE__, wire}, wire)
+  # The decoded program stays in `NxCL.ProgramCache`, so a repeat call skips decoding
+  # and kernel lookups. The key is the program's signature, so the wire term is
+  # only built on a miss.
+  defp compiled(dev, program) do
+    key = {:program, dev.key, Program.signature(program)}
+    cached(dev, key, fn -> encode(program) end)
   end
 
-  defp cached(ctx, key, wire) do
-    case :persistent_term.get(key, nil) do
-      nil ->
-        case NxCL.Native.compile_program(ctx, wire) do
-          {:ok, native} ->
-            :persistent_term.put(key, native)
-            native
-
-          {:error, reason} ->
-            raise NxCL.CompilerError, message: "invalid program: #{reason}"
-        end
-
-      native ->
-        native
-    end
+  defp cached(%{ctx: ctx}, key, wire) do
+    ProgramCache.fetch_or_build(:structural, key, fn ->
+      case NxCL.Native.compile_program(ctx, wire.()) do
+        {:ok, native} -> native
+        {:error, reason} -> raise NxCL.CompilerError, message: "invalid program: #{reason}"
+      end
+    end)
   end
 
   # A program with control flow caches its plan under a key that covers every
   # sub-program. Each segment of the plan compiles the first time it runs.
-  defp plan_for(ctx, program) do
+  defp plan_for(dev, program) do
     if Plan.control?(program) do
-      key = {__MODULE__, :plan, signature(program)}
-
-      case :persistent_term.get(key, nil) do
-        nil ->
-          plan = Plan.build(program)
-          :persistent_term.put(key, plan)
-          plan
-
-        plan ->
-          plan
-      end
-    else
-      {:simple, compiled(ctx, program)}
-    end
-  end
-
-  defp signature(%Program{} = program) do
-    {program.inputs, Enum.map(program.captures, &{&1.type, &1.shape}), program.constants,
-     Enum.map(program.instructions, &instruction_signature/1), program.outputs}
-  end
-
-  defp instruction_signature(%Instruction{} = instr) do
-    subs =
-      Enum.map(instr.subprograms, fn sub ->
-        {Enum.map(sub.instructions, &instruction_signature/1), sub.outputs}
+      ProgramCache.fetch_or_build(:plan, {:plan, Program.signature(program)}, fn ->
+        Plan.build(program)
       end)
-
-    {instr.op, instr.operands, instr.out_type, instr.out_shape, instr.attrs, subs}
+    else
+      {:simple, compiled(dev, program)}
+    end
   end
 
   # -- Segmented run -----------------------------------------------------------
 
-  defp run_plan(ctx, plan, program, args) do
+  defp run_plan(%{ctx: ctx} = dev, plan, program, args) do
     captures =
       for {t, i} <- Enum.with_index(program.captures),
           into: %{},
           do: {{:capture, i}, upload(ctx, t)}
 
-    shared = Map.merge(captures, const_buffers(ctx, plan))
-    env = %{ctx: ctx, shared: shared, host_calls: program.host_calls}
+    shared = Map.merge(captures, const_buffers(dev, plan))
+    env = %{dev: dev, ctx: ctx, shared: shared, host_calls: program.host_calls}
 
     table =
       program.inputs
@@ -204,11 +168,11 @@ defmodule NxCL.Executor do
   end
 
   # Consts that a control step or an output reads as a buffer, made once per run.
-  defp const_buffers(_ctx, %Plan{const_keys: []}), do: %{}
+  defp const_buffers(_dev, %Plan{const_keys: []}), do: %{}
 
-  defp const_buffers(ctx, %Plan{const_keys: keys, const_wire: wire}) do
-    native = cached(ctx, {__MODULE__, :consts, wire}, wire)
-    buffers = eval!(native, List.duplicate(nil, length(keys)))
+  defp const_buffers(dev, %Plan{const_keys: keys, const_wire: wire, const_key: key}) do
+    native = cached(dev, {:program, dev.key, key}, fn -> wire end)
+    buffers = eval!(dev, native, List.duplicate(nil, length(keys)))
     keys |> Enum.zip(buffers) |> Map.new()
   end
 
@@ -228,13 +192,13 @@ defmodule NxCL.Executor do
   end
 
   defp run_step(%{kind: :segment} = step, table, env) do
-    native = segment_native(env.ctx, step)
+    native = segment_native(env.dev, step)
     buffers = Enum.map(step.ins, &Map.fetch!(table, &1)) ++ List.duplicate(nil, step.n_consts)
     Stats.bump(:segment_runs)
 
     table =
       step.outs
-      |> Enum.zip(eval!(native, buffers))
+      |> Enum.zip(eval!(env.dev, native, buffers))
       |> Enum.reduce(table, fn {key, buf}, table -> Map.put(table, key, buf) end)
 
     Map.drop(table, step.free)
@@ -302,10 +266,16 @@ defmodule NxCL.Executor do
     end
   end
 
-  defp segment_native(ctx, %{key: key, wire: wire}), do: cached(ctx, key, wire)
+  defp segment_native(dev, %{key: key, wire: wire}),
+    do: cached(dev, {:program, dev.key, key}, fn -> wire end)
 
-  defp eval!(native, buffers) do
-    case NxCL.Native.eval_program(native, buffers) do
+  defp eval!(%{queue: queue}, native, buffers) do
+    result =
+      if queue,
+        do: NxCL.Native.eval_program_on(native, buffers, queue),
+        else: NxCL.Native.eval_program(native, buffers)
+
+    case result do
       {:ok, outputs} -> outputs
       {:error, reason} -> raise NxCL.CompilerError, message: "device run failed: #{reason}"
     end

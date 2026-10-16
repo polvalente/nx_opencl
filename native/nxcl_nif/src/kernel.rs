@@ -2,13 +2,16 @@ use crate::device_ctx::DeviceCtx;
 use opencl3::kernel::Kernel;
 use opencl3::program::Program;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Cache key: source text, entry name, build options. One cache per device context.
 pub type KernelKey = (String, String, String);
 
 pub struct CompiledKernel {
     pub kernel: Kernel,
+    /// Held from `set_arg` to enqueue: two queues share this kernel object, and
+    /// its arguments are one set per object.
+    pub launch: Mutex<()>,
     pub _program: Program,
 }
 
@@ -30,6 +33,7 @@ impl CompiledKernel {
 
         Ok(Self {
             kernel,
+            launch: Mutex::new(()),
             _program: program,
         })
     }

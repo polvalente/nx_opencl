@@ -47,6 +47,15 @@ defmodule NxCL.Native do
   @spec device_ctx_create(non_neg_integer()) :: reference() | {:error, String.t()}
   def device_ctx_create(_device_id), do: :erlang.nif_error(:nif_not_loaded)
 
+  @doc "Like `device_ctx_create/1`, with the index counted inside one platform."
+  @spec device_ctx_create_on(non_neg_integer(), non_neg_integer()) ::
+          reference() | {:error, String.t()}
+  def device_ctx_create_on(_platform, _device_id), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc "A new command queue on the context, for `eval_program_on/3`."
+  @spec queue_create(reference()) :: reference() | {:error, String.t()}
+  def queue_create(_ctx), do: :erlang.nif_error(:nif_not_loaded)
+
   @spec device_info(reference()) :: [{String.t(), String.t()}]
   def device_info(_ctx), do: :erlang.nif_error(:nif_not_loaded)
 
@@ -81,6 +90,14 @@ defmodule NxCL.Native do
   @spec eval_program(reference(), [reference() | nil]) ::
           {:ok, [reference()]} | {:error, String.t()}
   def eval_program(_program, _buffers), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Like `eval_program/2`, on a queue from `queue_create/1`. The queue must belong
+  to the program's device context.
+  """
+  @spec eval_program_on(reference(), [reference() | nil], reference()) ::
+          {:ok, [reference()]} | {:error, String.t()}
+  def eval_program_on(_program, _buffers, _queue), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc "Kernel cache counters of a device context: `{builds, hits, launches}`."
   @spec kernel_cache_stats(reference()) ::

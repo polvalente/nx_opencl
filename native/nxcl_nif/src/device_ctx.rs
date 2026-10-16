@@ -3,6 +3,7 @@ use crate::kernel::{CompiledKernel, KernelKey};
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use opencl3::context::Context;
 use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
+use opencl3::platform::get_platforms;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
@@ -36,14 +37,36 @@ unsafe impl Send for DeviceCtx {}
 unsafe impl Sync for DeviceCtx {}
 
 impl DeviceCtx {
-    pub fn new(device_index: usize) -> Result<Self, String> {
-        // Try GPU devices first
-        let device_ids = get_all_devices(CL_DEVICE_TYPE_GPU)
-            .ok()
-            .filter(|ids| !ids.is_empty())
-            .map(Ok)
-            .unwrap_or_else(|| get_all_devices(CL_DEVICE_TYPE_ALL))
-            .map_err(|e| format!("Failed to get devices: {:?}", e))?;
+    /// Opens device `device_index`. With `platform` set, the index counts the
+    /// devices of that platform; otherwise it counts every device, GPUs first.
+    pub fn new(platform: Option<usize>, device_index: usize) -> Result<Self, String> {
+        let device_ids = match platform {
+            Some(p) => {
+                let platforms =
+                    get_platforms().map_err(|e| format!("Failed to get platforms: {:?}", e))?;
+                let platform = platforms.get(p).ok_or_else(|| {
+                    format!(
+                        "Platform index {} out of range (found {} platforms)",
+                        p,
+                        platforms.len()
+                    )
+                })?;
+                platform
+                    .get_devices(CL_DEVICE_TYPE_GPU)
+                    .ok()
+                    .filter(|ids| !ids.is_empty())
+                    .map(Ok)
+                    .unwrap_or_else(|| platform.get_devices(CL_DEVICE_TYPE_ALL))
+                    .map_err(|e| format!("Failed to get devices: {:?}", e))?
+            }
+            // Try GPU devices first
+            None => get_all_devices(CL_DEVICE_TYPE_GPU)
+                .ok()
+                .filter(|ids| !ids.is_empty())
+                .map(Ok)
+                .unwrap_or_else(|| get_all_devices(CL_DEVICE_TYPE_ALL))
+                .map_err(|e| format!("Failed to get devices: {:?}", e))?,
+        };
 
         if device_ids.is_empty() {
             return Err("No OpenCL devices found".to_string());
