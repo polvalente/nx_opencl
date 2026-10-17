@@ -7,7 +7,7 @@ runs on the same programs and kernels.
 
 - `NxCL.Compiler` lowers a `defn` expression to a typed program (`NxCL.Program`),
   runs it through a native executor, and caches programs and kernels. Rust
-  generates the OpenCL C. Elementwise chains fuse into one kernel.
+  generates the OpenCL C.
 - Every Nx dtype runs except `s2`, `s4`, `u2`, `u4`, `f8`, `f8_e4m3fn` and `f16`
   (no test device has `cl_khr_fp16`). `f64` and `c128` need `cl_khr_fp64`.
   `c64` and `c128` have their own math preamble, and FFT runs on them.
@@ -19,7 +19,7 @@ runs on the same programs and kernels.
 - `NxCL.Backend` no longer copies an op to the CPU. An op with no lowering
   raises `ArgumentError`.
 - `NxCL.Backend.to_binary/2` returns every element of a vectorized tensor.
-- Compiler options `:device`, `:command_queue`, `:fusion` and `:max_concurrency`;
+- Compiler options `:device`, `:command_queue` and `:max_concurrency`;
   `NxCL.Devices` holds one context per device.
 - `NxCL.Native.device_info/1` reports `driver_version` and `device_type`.
 - A compiled function takes tensors that are already on the device without a

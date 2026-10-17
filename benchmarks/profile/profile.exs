@@ -21,7 +21,6 @@ defmodule Prof do
     cond do
       String.starts_with?(name, "gemm") -> "dot"
       String.starts_with?(name, "conv") or String.starts_with?(name, "im2col") -> "conv"
-      String.starts_with?(name, "fz_") -> "fused elementwise"
       String.starts_with?(name, "ew_") -> "elementwise"
       String.starts_with?(name, "mv_") -> "shape"
       String.starts_with?(name, "rd_") -> "reduce"

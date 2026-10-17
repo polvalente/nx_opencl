@@ -219,7 +219,7 @@ defmodule NxCL.CompileCacheTest do
     end
 
     test "__to_backend__ passes the device on" do
-      assert NxCL.Compiler.__to_backend__(device: 0, fusion: false) == {NxCL.Backend, device: 0}
+      assert NxCL.Compiler.__to_backend__(device: 0) == {NxCL.Backend, device: 0}
     end
   end
 

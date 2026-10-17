@@ -11,7 +11,7 @@ defmodule NxOpencl do
 
     * `NxCL.Compiler` — an `Nx.Defn.Compiler` that traces a `defn`
       function into a program and runs the whole graph on the device, with
-      elementwise fusion and compile caches.
+      compile caches.
 
   ## Eager backend
 

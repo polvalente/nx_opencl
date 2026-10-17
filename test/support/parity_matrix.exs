@@ -52830,7 +52830,7 @@
     kind: :cut
   },
   %{
-    reason: "Model-specific; elementwise fusion covers the general case.",
+    reason: "Model-specific.",
     cut: "`EMLX.Fast.*` fused attention, rope, norm kernels",
     kind: :cut
   },
@@ -52851,7 +52851,7 @@
     kind: :cut
   },
   %{
-    scope: {:out, "Model-specific; elementwise fusion covers the general case."},
+    scope: {:out, "Model-specific."},
     op: :emlx_fast,
     kind: :out_of_scope
   },

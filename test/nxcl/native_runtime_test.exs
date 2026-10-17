@@ -189,26 +189,21 @@ defmodule NxCL.NativeRuntimeTest do
       assert {2, 4, 300} = Native.kernel_cache_stats(ctx)
     end
 
-    # Fusion off: the three elementwise ops run as three kernels. With fusion on they
-    # run as one (see `NxCL.FusionTest`).
-    for {fusion, per_call} <- [{false, 3}, {true, 1}] do
-      test "a jitted function builds nothing after its first call (fusion #{fusion})" do
-        jitted =
-          Nx.Defn.jit(fn x -> x |> Nx.tanh() |> Nx.multiply(x) |> Nx.tanh() end,
-            compiler: NxCL.Compiler,
-            fusion: unquote(fusion)
-          )
+    test "a jitted function builds nothing after its first call" do
+      jitted =
+        Nx.Defn.jit(fn x -> x |> Nx.tanh() |> Nx.multiply(x) |> Nx.tanh() end,
+          compiler: NxCL.Compiler
+        )
 
-        x = Nx.tensor([0.5, 1.0, 1.5])
-        ctx = NxCL.Executor.ctx()
+      x = Nx.tensor([0.5, 1.0, 1.5])
+      ctx = NxCL.Executor.ctx()
 
-        jitted.(x)
-        {builds, hits, launches} = Native.kernel_cache_stats(ctx)
+      jitted.(x)
+      {builds, hits, launches} = Native.kernel_cache_stats(ctx)
 
-        for _ <- 1..99, do: jitted.(x)
-        assert {^builds, ^hits, after_launches} = Native.kernel_cache_stats(ctx)
-        assert after_launches - launches == 99 * unquote(per_call)
-      end
+      for _ <- 1..99, do: jitted.(x)
+      assert {^builds, ^hits, after_launches} = Native.kernel_cache_stats(ctx)
+      assert after_launches - launches == 99 * 3
     end
   end
 

@@ -3,7 +3,7 @@ defmodule NxCL.Compiler.Options do
   # Checks the options `NxCL.Compiler` takes. An unknown key raises
   # `ArgumentError` and names the key.
 
-  @keys [:device, :command_queue, :max_concurrency, :fusion, :hooks]
+  @keys [:device, :command_queue, :max_concurrency, :hooks]
 
   @doc "Validates `opts` and returns them. Raises on an unknown key or a non-empty `:hooks`."
   @spec validate!(keyword()) :: keyword()

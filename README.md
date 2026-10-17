@@ -55,8 +55,8 @@ Nx.dot(a, b)
 ### Defn compiler
 
 Use `NxCL.Compiler` with `Nx.Defn.jit/2` to trace a `defn` function
-into a program and run the whole graph on the GPU. Elementwise chains
-fuse into one kernel, and the compiler caches programs and kernels.
+into a program and run the whole graph on the GPU. The compiler caches
+programs and kernels.
 
 ```elixir
 defmodule MyModel do
@@ -279,7 +279,7 @@ frees the device buffer at once.
 | Multi-device sharding, distributed execution | One device per partition is enough for parity. |
 | Ops Nx rejects on a dtype (for example `bitwise_and` on floats, `max` on complex) | Nx raises for that op and dtype, so there is nothing to match. The compiler raises at lowering too. Decided by the user 2026-10-14. |
 | Sub-byte and 8-bit float dtypes (`s2`, `s4`, `u2`, `u4`, `f8`, `f8_e4m3fn`) | No OpenCL C type; packed storage and widening not needed yet. Decided by the user 2026-10-14. |
-| `EMLX.Fast.*` fused attention, rope, norm kernels | Model-specific; elementwise fusion covers the general case. |
+| `EMLX.Fast.*` fused attention, rope, norm kernels | Model-specific. |
 | `f16` on devices without `cl_khr_fp16` | No device in the test set has the extension, so the cells cannot run. The f16 kernels stay in the code and are tested by Rust source tests. Decided by the user 2026-10-16. |
 | `from_pointer` / `to_pointer` | No portable OpenCL handle to export. |
 | `quantized_matmul`, quantization | Needs its own format and kernels; no demand yet. |

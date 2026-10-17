@@ -22,7 +22,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::buffer::DeviceBuffer;
-use crate::codegen::fused::{self, Fused, InMap, Src, Step as FusedStep};
 use crate::codegen::types::{encode_const, type_info, ConstVal, DType};
 use crate::codegen::{self, Attr, Instr, KernelArg, Operand};
 use crate::device_ctx::DeviceCtx;
@@ -517,42 +516,24 @@ impl Program {
     }
 }
 
-/// The slots a step reads. A launch reads every slot argument; the output
-/// is a fresh slot of its own, never one of these.
-fn step_reads(step: &Step) -> Vec<usize> {
-    match step {
-        Step::Alias { src, .. } => vec![*src],
-        Step::Launch { passes, .. } => passes
-            .iter()
-            .flat_map(|p| p.args.iter())
-            .filter_map(|a| match a {
-                Arg::Slot(o) => Some(*o),
-                _ => None,
-            })
-            .collect(),
-    }
-}
-
 fn liveness(n_external: usize, steps: &[Step], outputs: &[usize]) -> (Vec<Vec<usize>>, Vec<usize>) {
-    let reads: Vec<Vec<usize>> = steps.iter().map(step_reads).collect();
-    liveness_of(n_external, &reads, outputs)
-}
-
-fn liveness_of(
-    n_external: usize,
-    reads: &[Vec<usize>],
-    outputs: &[usize],
-) -> (Vec<Vec<usize>>, Vec<usize>) {
-    let total = n_external + reads.len();
+    let total = n_external + steps.len();
     let mut last_read: Vec<Option<usize>> = vec![None; total];
-    for (i, slots) in reads.iter().enumerate() {
-        for &s in slots {
-            last_read[s] = Some(i);
+    for (i, step) in steps.iter().enumerate() {
+        match step {
+            Step::Alias { src, .. } => last_read[*src] = Some(i),
+            Step::Launch { passes, .. } => {
+                for a in passes.iter().flat_map(|p| p.args.iter()) {
+                    if let Arg::Slot(o) = a {
+                        last_read[*o] = Some(i);
+                    }
+                }
+            }
         }
     }
     let is_output = |s: usize| outputs.contains(&s);
 
-    let mut free_after = vec![Vec::new(); reads.len()];
+    let mut free_after = vec![Vec::new(); steps.len()];
     let mut free_first = Vec::new();
     for s in 0..total {
         if is_output(s) {
@@ -600,16 +581,10 @@ fn decode_step(
         .into_iter()
         .map(|t| layout.slot(t, index))
         .collect::<Result<Vec<_>, _>>()?;
-    // A fused instruction carries nested terms; `decode_fused` reads them.
-    let raw_attrs = attrs;
-    let attrs = if op == "fused" {
-        Vec::new()
-    } else {
-        raw_attrs
-            .iter()
-            .map(|t| decode_attr(*t))
-            .collect::<Result<Vec<_>, _>>()?
-    };
+    let attrs = attrs
+        .into_iter()
+        .map(decode_attr)
+        .collect::<Result<Vec<_>, _>>()?;
     let out_dtype = decode_type(out_type)?;
     let out_shape = decode_shape(out_shape)?;
     let out = layout.n_external + index;
@@ -681,9 +656,6 @@ fn decode_step(
             expect(1)?;
             alias_of(operands[0], layout)
         }
-        "fused" => decode_fused(
-            ctx, layout, &operands, out_dtype, out_shape, &raw_attrs, out,
-        ),
         "launch" => decode_launch(ctx, operands, out, out_bytes, &attrs),
         other => Err(format!("unknown op {}", other)),
     }
@@ -770,95 +742,6 @@ fn plan_step(
     })
 }
 
-fn decode_in_map(term: Term) -> Result<InMap, String> {
-    if let Ok((tag, axes)) = term.decode::<(Term, Vec<usize>)>() {
-        if matches!(tag.atom_to_string().as_deref(), Ok("broadcast")) {
-            return Ok(InMap::Broadcast(axes));
-        }
-    }
-    match term.atom_to_string().as_deref() {
-        Ok("direct") => Ok(InMap::Direct),
-        _ => Err("an input map is :direct or {:broadcast, axes}".to_string()),
-    }
-}
-
-fn decode_src(term: Term) -> Result<Src, String> {
-    let (kind, index): (Term, usize) = term
-        .decode()
-        .map_err(|_| "a step source is {:in, k} or {:step, j}".to_string())?;
-    match kind.atom_to_string().as_deref() {
-        Ok("in") => Ok(Src::In(index)),
-        Ok("step") => Ok(Src::Step(index)),
-        _ => Err("a step source is {:in, k} or {:step, j}".to_string()),
-    }
-}
-
-fn decode_fused_step(term: Term) -> Result<FusedStep, String> {
-    let (op, srcs, ty, attrs): (Term, Vec<Term>, Term, Vec<Term>) = term
-        .decode()
-        .map_err(|_| "a fused step is {op, [src], type, [attr]}".to_string())?;
-    Ok(FusedStep {
-        op: op
-            .atom_to_string()
-            .map_err(|_| "a fused step op must be an atom".to_string())?,
-        srcs: srcs.into_iter().map(decode_src).collect::<Result<_, _>>()?,
-        dtype: decode_type(ty)?,
-        attrs: attrs
-            .into_iter()
-            .map(decode_attr)
-            .collect::<Result<_, _>>()?,
-    })
-}
-
-/// Attrs: `[maps, steps]`. `maps` has one entry per operand (`:direct` or
-/// `{:broadcast, axes}`); `steps` is the list of `{op, [src], type, [attr]}`
-/// with `src = {:in, k} | {:step, j}`. The last step is the result.
-fn decode_fused(
-    ctx: &DeviceCtx,
-    layout: &Layout,
-    operands: &[usize],
-    out_dtype: DType,
-    out_shape: Vec<usize>,
-    raw: &[Term],
-    out: usize,
-) -> Result<Step, String> {
-    let [maps, steps]: [Term; 2] = raw
-        .try_into()
-        .map_err(|_| "fused takes the attrs [maps, steps]".to_string())?;
-    let maps = maps
-        .decode::<Vec<Term>>()
-        .map_err(|_| "fused maps must be a list".to_string())?
-        .into_iter()
-        .map(decode_in_map)
-        .collect::<Result<Vec<_>, _>>()?;
-    let steps = steps
-        .decode::<Vec<Term>>()
-        .map_err(|_| "fused steps must be a list".to_string())?
-        .into_iter()
-        .map(decode_fused_step)
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let mut ops = Vec::with_capacity(operands.len());
-    for &o in operands {
-        let info = &layout.infos[o];
-        ops.push(Operand {
-            dtype: info.dtype()?,
-            shape: info.shape.clone(),
-            constant: info.constant.clone(),
-        });
-    }
-    let out_bytes = byte_size(out_dtype, &out_shape)?;
-    let instr = Instr {
-        op: "fused".to_string(),
-        operands: ops,
-        out: out_dtype,
-        out_shape,
-        attrs: Vec::new(),
-    };
-    let spec = fused::generate(&instr, &Fused { maps, steps }, &ctx.caps, ctx.max_args)?;
-    plan_step(ctx, operands, codegen::Plan::single(spec), out, out_bytes)
-}
-
 /// Attrs: source, entry, build options, dims, global sizes, local sizes, scalars.
 /// Local sizes all zero means the driver picks. The kernel takes the operand
 /// buffers, then the output buffer, then the scalars as `int`.
@@ -909,35 +792,4 @@ fn decode_launch(
         out,
         out_bytes,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // A fused step reads its inputs and writes a fresh slot. Two inputs, three steps:
-    // step 0 (fused) reads slots 0 and 1, step 1 reads slot 0 and step 0's
-    // result, step 2 reads step 1's result.
-    #[test]
-    fn a_fused_step_leaves_an_input_alive_while_a_later_step_reads_it() {
-        let n_ext = 2;
-        let reads = vec![vec![0, 1], vec![0, 2], vec![3]];
-        let (free_after, free_first) = liveness_of(n_ext, &reads, &[4]);
-        assert!(free_first.is_empty());
-        // Input 1 is last read by the fused step; input 0 only by step 1.
-        assert_eq!(free_after[0], vec![1]);
-        assert_eq!(free_after[1], vec![0, 2]);
-        assert_eq!(free_after[2], vec![3]);
-        // The output of each step is its own slot, never an input of that step.
-        for (i, slots) in reads.iter().enumerate() {
-            assert!(!slots.contains(&(n_ext + i)));
-        }
-    }
-
-    #[test]
-    fn an_unread_fused_result_is_freed_after_its_own_step() {
-        let (free_after, _) = liveness_of(1, &[vec![0], vec![0]], &[2]);
-        assert_eq!(free_after[0], vec![1]);
-        assert_eq!(free_after[1], vec![0]);
-    }
 }

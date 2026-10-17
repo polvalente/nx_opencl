@@ -30,9 +30,7 @@ defmodule NxCL.Program.Instruction do
     * `{:result, i, k}` - the k-th result of the i-th instruction, a `cond`, `while` or `host_call`.
     * `{:carry, i}` - the i-th loop-carry slot (inside a `while` or `cond` sub-program).
 
-  An attr is an integer, an atom, or a binary. The attrs of a `:fused`
-  instruction are the exception: they hold nested lists and tuples (see
-  `NxCL.Fusion`).
+  An attr is an integer, an atom, or a binary.
 
   `reshape` and `squeeze` carry the attr `:alias`. Their result shares the
   operand's buffer, so a runtime must not free it twice.
@@ -45,7 +43,7 @@ defmodule NxCL.Program.Instruction do
           {:input | :capture | :const | :result | :carry, non_neg_integer()}
           | {:result, non_neg_integer(), non_neg_integer()}
 
-  @type attr :: integer() | atom() | binary() | list() | tuple()
+  @type attr :: integer() | atom() | binary()
 
   @type t :: %__MODULE__{
           op: atom(),

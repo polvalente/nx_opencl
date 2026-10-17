@@ -7,8 +7,7 @@ defmodule NxCL.Compiler do
 
   Unlike the eager backend (`NxCL.Backend`) which dispatches one op at
   a time, the compiler sees the entire computation graph up front. This
-  enables future optimisations like elementwise fusion, GEMM+bias+activation
-  fusion, and buffer reuse via liveness analysis.
+  enables optimisations like buffer reuse via liveness analysis.
 
   ## Usage
 
@@ -29,9 +28,6 @@ defmodule NxCL.Compiler do
 
   ## Options
 
-    * `:fusion` - `false` turns off elementwise fusion (`NxCL.Fusion`). The default
-      is the `:fusion` key of the `:nx_opencl` application environment, `true`
-      when unset.
     * `:device` - the device index (or `{platform, index}`) to run on. See
       `NxCL.Devices`. The default is 0.
     * `:command_queue` - a queue from `NxCL.Devices.new_queue/1`. The default is
@@ -71,7 +67,6 @@ defmodule NxCL.Compiler do
   alias NxCL.Compiler.Options
   alias NxCL.Devices
   alias NxCL.Executor
-  alias NxCL.Fusion
   alias NxCL.Lower
   alias NxCL.Program
 
@@ -86,8 +81,7 @@ defmodule NxCL.Compiler do
     run_opts = Keyword.take(opts, [:device, :command_queue])
 
     cache_key =
-      {key, Enum.map(vars, &Composite.traverse(&1, fn t -> Nx.to_template(t) end)),
-       {run_opts, fusion?(opts)}}
+      {key, Enum.map(vars, &Composite.traverse(&1, fn t -> Nx.to_template(t) end)), run_opts}
 
     case CompileCache.fetch(cache_key) do
       {:ok, closure} ->
@@ -96,27 +90,23 @@ defmodule NxCL.Compiler do
 
       {:error, :cache_miss} ->
         CacheStats.bump(:closure_miss)
-        CompileCache.put(cache_key, build_closure(vars, fun, opts, run_opts))
+        CompileCache.put(cache_key, build_closure(vars, fun, run_opts))
     end
   end
 
-  defp build_closure(vars, fun, opts, run_opts) do
+  defp build_closure(vars, fun, run_opts) do
     # Fail on a bad device when the function compiles, not when it first runs.
     Devices.fetch!(run_opts)
 
     expr = fun.(vars)
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
-    fused = Fusion.fuse(program, fusion: fusion?(opts))
-    program = %Program{fused | signature: Program.signature(fused)}
+    program = %Program{program | signature: Program.signature(program)}
 
     fn [args] ->
       [Executor.run(program, args, run_opts)]
     end
   end
-
-  defp fusion?(opts),
-    do: Keyword.get_lazy(opts, :fusion, fn -> Application.get_env(:nx_opencl, :fusion, true) end)
 
   @impl true
   def __partitions_options__(opts) do
