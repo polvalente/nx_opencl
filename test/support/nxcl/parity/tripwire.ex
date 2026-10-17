@@ -29,8 +29,6 @@ defmodule NxCL.Parity.Tripwire do
 
   @behaviour Nx.Backend
 
-  alias NxCL.Executor.Stats
-
   defstruct [:binary]
 
   defmodule Fallback do
@@ -77,10 +75,9 @@ defmodule NxCL.Parity.Tripwire do
   @spec guard(term(), (-> result), keyword()) :: result when result: var
   def guard(label, fun, opts \\ []) do
     start()
-    before = Stats.get().host_calls
     outer = Nx.default_backend()
 
-    {result, %{binary: seen_calls, blocks: blocks}} =
+    {result, %{binary: seen_calls, blocks: blocks, host_calls: calls}} =
       trace(fn ->
         Process.put(@outer, outer)
 
@@ -93,7 +90,6 @@ defmodule NxCL.Parity.Tripwire do
         end
       end)
 
-    calls = Stats.get().host_calls - before
     binary_calls = compute_calls(seen_calls)
 
     for struct <- blocks do
@@ -123,8 +119,16 @@ defmodule NxCL.Parity.Tripwire do
   `Nx.BinaryBackend` compute callbacks (as `{name, arity, caller}`) that the calling
   process ran meanwhile; data movement callbacks are not listed. `seen.blocks` lists
   what ran as a host call: a block struct, or `:callback` for a user callback.
+  `seen.host_calls` counts the host steps that ran a function; an `:io_call` with no
+  function is not one.
   """
-  @spec trace((-> result)) :: {result, %{binary: [tuple()], blocks: [module() | :callback]}}
+  @spec trace((-> result)) ::
+          {result,
+           %{
+             binary: [tuple()],
+             blocks: [module() | :callback],
+             host_calls: non_neg_integer()
+           }}
         when result: var
   def trace(fun) do
     collector = begin_trace()
@@ -175,7 +179,7 @@ defmodule NxCL.Parity.Tripwire do
     start()
     Code.ensure_loaded!(Nx.BinaryBackend)
     install_patterns()
-    collector = spawn(fn -> collect(%{binary: MapSet.new(), blocks: []}) end)
+    collector = spawn(fn -> collect(%{binary: MapSet.new(), blocks: [], host_calls: 0}) end)
 
     :erlang.trace(self(), false, [:silent])
     :erlang.trace(self(), true, [:call, {:tracer, collector}])
@@ -227,7 +231,11 @@ defmodule NxCL.Parity.Tripwire do
   Stops tracing `pid` (default: the calling process) and returns what was seen since
   `begin_trace/0` (see `trace/1`).
   """
-  @spec end_trace(pid(), pid()) :: %{binary: [tuple()], blocks: [module() | :callback]}
+  @spec end_trace(pid(), pid()) :: %{
+          binary: [tuple()],
+          blocks: [module() | :callback],
+          host_calls: non_neg_integer()
+        }
   def end_trace(collector, pid \\ self()) do
     # A process that has exited has no trace left to stop.
     try do
@@ -261,16 +269,28 @@ defmodule NxCL.Parity.Tripwire do
 
   defp block_of(_entry), do: :callback
 
+  # `Host.run/3` returns an `:io_call` that has no function at once; nothing runs.
+  defp ran_function?(%{kind: :io_call, fun: nil}), do: false
+  defp ran_function?(_entry), do: true
+
   defp collect(seen) do
     receive do
       {:trace, _pid, :call, {Nx.BinaryBackend, name, args}, caller} ->
         collect(Map.update!(seen, :binary, &MapSet.put(&1, {name, length(args), caller})))
 
       {:trace, _pid, :call, {NxCL.Executor.Host, :run, [entry, _ctx, _buffers]}, _caller} ->
-        collect(Map.update!(seen, :blocks, &[block_of(entry) | &1]))
+        seen = Map.update!(seen, :blocks, &[block_of(entry) | &1])
+
+        collect(
+          if ran_function?(entry), do: Map.update!(seen, :host_calls, &(&1 + 1)), else: seen
+        )
+
+      # `NxCL.TestSupport.Trace` sets patterns on other executor functions.
+      {:trace, _pid, :call, _mfa, _caller} ->
+        collect(seen)
 
       {:done, from, ref} ->
-        seen = %{binary: Enum.sort(seen.binary), blocks: Enum.reverse(seen.blocks)}
+        seen = %{seen | binary: Enum.sort(seen.binary), blocks: Enum.reverse(seen.blocks)}
         send(from, {ref, seen})
     end
   end

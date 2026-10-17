@@ -12,9 +12,9 @@ defmodule NxCL.BlockTest do
   """
   use ExUnit.Case, async: false
 
-  alias NxCL.Executor.Stats
   alias NxCL.Lower
   alias NxCL.Lower.Block
+  alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
 
@@ -151,9 +151,10 @@ defmodule NxCL.BlockTest do
   describe "linear algebra reaches Nx.BinaryBackend only through a host_call" do
     # `host_calls` is the number of `:host_call` instructions the program holds.
     defp run_counted(fun, args) do
-      Stats.reset()
-      result = apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
-      {result, Stats.get().host_calls}
+      {result, counts} =
+        Trace.run(fn -> apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args) end)
+
+      {result, counts.host_calls}
     end
 
     test "cholesky, triangular_solve and fft run with no host call" do

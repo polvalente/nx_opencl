@@ -195,9 +195,8 @@ defmodule NxCL.BackendTest do
             svd: &Nx.LinAlg.svd/1,
             lu: &Nx.LinAlg.lu/1
           ] do
-        NxCL.Executor.Stats.reset()
-        result = fun.(gpu)
-        assert %{host_calls: 1, host_reads: 1} = NxCL.Executor.Stats.get(), "#{name}"
+        {result, counts} = NxCL.TestSupport.Trace.run(fn -> fun.(gpu) end)
+        assert %{host_calls: 1, host_reads: 1} = counts, "#{name}"
 
         for leaf <- Nx.Defn.Composite.flatten_list([result]) do
           assert %NxCL.Backend{} = leaf.data

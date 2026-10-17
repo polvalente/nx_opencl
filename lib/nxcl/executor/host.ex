@@ -9,7 +9,6 @@ defmodule NxCL.Executor.Host do
   # outputs, with no copy and no upload.
 
   alias Nx.Defn.Composite
-  alias NxCL.Executor.Stats
 
   @doc """
   Runs `entry` (a `:host_calls` table entry) on `buffers`, the device buffers of
@@ -19,13 +18,11 @@ defmodule NxCL.Executor.Host do
   def run(%{kind: :io_call, fun: nil}, _ctx, buffers), do: buffers
 
   def run(%{kind: :io_call, fun: fun} = entry, _ctx, buffers) do
-    Stats.bump(:host_calls)
     fun.(read(entry.in_template, buffers))
     buffers
   end
 
   def run(%{kind: :runtime_call} = entry, ctx, buffers) do
-    Stats.bump(:host_calls)
     result = entry.fun.(read(entry.in_template, buffers), entry.opts)
 
     if not Nx.compatible?(entry.out_template, result) do
@@ -35,7 +32,6 @@ defmodule NxCL.Executor.Host do
     end
 
     leaves = Composite.flatten_list([result])
-    Stats.bump(:host_uploads, length(leaves))
     Enum.map(leaves, &NxCL.Native.buffer_write(ctx, &1 |> Nx.to_tensor() |> Nx.to_binary()))
   end
 
@@ -44,8 +40,6 @@ defmodule NxCL.Executor.Host do
     {container, []} =
       Composite.traverse(in_template, buffers, fn template, [buf | rest] ->
         size = Nx.byte_size(template)
-        Stats.bump(:host_reads)
-        Stats.bump(:host_read_bytes, size)
 
         tensor =
           buf

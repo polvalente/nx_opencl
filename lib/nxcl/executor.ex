@@ -30,7 +30,6 @@ defmodule NxCL.Executor do
   alias NxCL.Devices
   alias NxCL.Executor.Host
   alias NxCL.Executor.Plan
-  alias NxCL.Executor.Stats
   alias NxCL.Program
   alias NxCL.Program.Instruction
   alias NxCL.ProgramCache
@@ -194,7 +193,6 @@ defmodule NxCL.Executor do
   defp run_step(%{kind: :segment} = step, table, env) do
     native = segment_native(env.dev, step)
     buffers = Enum.map(step.ins, &Map.fetch!(table, &1)) ++ List.duplicate(nil, step.n_consts)
-    Stats.bump(:segment_runs)
 
     table =
       step.outs
@@ -239,14 +237,12 @@ defmodule NxCL.Executor do
 
   defp loop(%{static: count, body: body}, carry, env) when is_integer(count) do
     Enum.reduce(1..count//1, carry, fn _i, carry ->
-      Stats.bump(:loop_iterations)
       run_sub(body, carry, env)
     end)
   end
 
   defp loop(%{cond: cond_scope, body: body} = step, carry, env) do
     if truthy?(cond_scope, carry, env) do
-      Stats.bump(:loop_iterations)
       loop(step, run_sub(body, carry, env), env)
     else
       carry
@@ -256,7 +252,6 @@ defmodule NxCL.Executor do
   # Runs a predicate scope and reads its scalar back. Nx tests `!= 0`.
   defp truthy?(%{out_types: [{kind, bits} = type]} = scope, carry, env) do
     [buf] = run_sub(scope, carry, env)
-    Stats.bump(:predicate_reads)
     bytes = NxCL.Native.buffer_read(buf, div(bits, 8))
 
     if kind in [:s, :u] do

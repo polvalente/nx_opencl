@@ -34,8 +34,8 @@ defmodule NxCL.HostCallTest do
   import Nx.Defn
   import NxCL.Parity
 
-  alias NxCL.Executor.Stats
   alias NxCL.Lower
+  alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
 
@@ -333,9 +333,7 @@ defmodule NxCL.HostCallTest do
 
       a = Nx.iota({4}, type: :f32)
       b = Nx.iota({1024, 64}, type: :f32)
-      Stats.reset()
-      {a2, c} = run_jit(fun).(a, b)
-      stats = Stats.get()
+      {{a2, c}, stats} = Trace.run(fn -> run_jit(fun).(a, b) end)
 
       assert Nx.to_flat_list(a2) == [1.0, 2.0, 3.0, 4.0]
       assert Nx.shape(c) == {1024, 64}
@@ -353,9 +351,10 @@ defmodule NxCL.HostCallTest do
         {r, big}
       end
 
-      Stats.reset()
-      run_jit(fun).(Nx.iota({3}, type: :f32), Nx.iota({512, 512}, type: :f32))
-      stats = Stats.get()
+      {_, stats} =
+        Trace.run(fn ->
+          run_jit(fun).(Nx.iota({3}, type: :f32), Nx.iota({512, 512}, type: :f32))
+        end)
 
       assert %{host_calls: 1, host_reads: 1, host_read_bytes: 12, host_uploads: 1} = stats
     end
@@ -366,15 +365,17 @@ defmodule NxCL.HostCallTest do
         {x, y, Nx.add(c, 1)}
       end
 
-      Stats.reset()
-      run_jit(fun).(Nx.iota({2}), Nx.iota({3}), Nx.iota({100_000}))
-      assert %{host_reads: 2, host_read_bytes: 20} = Stats.get()
+      {_, stats} =
+        Trace.run(fn -> run_jit(fun).(Nx.iota({2}), Nx.iota({3}), Nx.iota({100_000})) end)
+
+      assert %{host_reads: 2, host_read_bytes: 20} = stats
     end
 
     test "a callback in a while reads once per iteration" do
-      Stats.reset()
-      run_jit(&counted_dynamic/2).(Nx.tensor(0.0), Nx.tensor(5))
-      assert %{host_calls: 5, host_reads: 5, host_read_bytes: 20} = Stats.get()
+      {_, stats} =
+        Trace.run(fn -> run_jit(&counted_dynamic/2).(Nx.tensor(0.0), Nx.tensor(5)) end)
+
+      assert %{host_calls: 5, host_reads: 5, host_read_bytes: 20} = stats
     end
   end
 

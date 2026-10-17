@@ -10,9 +10,9 @@ defmodule NxCL.ControlFlowTest do
   import Nx.Defn
 
   alias NxCL.Executor
-  alias NxCL.Executor.Stats
   alias NxCL.Lower
   alias NxCL.Native
+  alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
 
@@ -153,18 +153,23 @@ defmodule NxCL.ControlFlowTest do
 
     test "a static trip count reads no predicate" do
       run_jit(&counter_static/0).()
-      Stats.reset()
 
-      assert Nx.to_number(run_jit(&counter_static/0).()) == 10
-      assert %{predicate_reads: 0, loop_iterations: 10} = Stats.get()
+      {result, counts} = Trace.run(fn -> run_jit(&counter_static/0).() end)
+
+      assert Nx.to_number(result) == 10
+      # The loop has no cond and a static count, so every scope run is a body run.
+      assert %{predicate_reads: 0, scope_runs: 10} = counts
     end
 
     test "a dynamic loop reads one predicate per iteration, and one more to stop" do
       run_jit(&counter/1).(Nx.tensor(1))
-      Stats.reset()
 
-      assert Nx.to_number(run_jit(&counter/1).(Nx.tensor(7))) == 7
-      assert %{predicate_reads: 8, loop_iterations: 7} = Stats.get()
+      {result, counts} = Trace.run(fn -> run_jit(&counter/1).(Nx.tensor(7)) end)
+
+      assert Nx.to_number(result) == 7
+      # Scope runs are the predicate scopes plus the body runs (7 iterations).
+      assert %{predicate_reads: 8} = counts
+      assert counts.scope_runs - counts.predicate_reads == 7
     end
 
     test "a cond reads predicates in order and stops at the first true one" do
@@ -172,13 +177,11 @@ defmodule NxCL.ControlFlowTest do
       x = Nx.tensor([1.0])
       run_jit(fun).(Nx.tensor(1), Nx.tensor(1), x)
 
-      Stats.reset()
-      run_jit(fun).(Nx.tensor(1), Nx.tensor(1), x)
-      assert %{predicate_reads: 1} = Stats.get()
+      {_, counts} = Trace.run(fn -> run_jit(fun).(Nx.tensor(1), Nx.tensor(1), x) end)
+      assert %{predicate_reads: 1} = counts
 
-      Stats.reset()
-      run_jit(fun).(Nx.tensor(0), Nx.tensor(1), x)
-      assert %{predicate_reads: 2} = Stats.get()
+      {_, counts} = Trace.run(fn -> run_jit(fun).(Nx.tensor(0), Nx.tensor(1), x) end)
+      assert %{predicate_reads: 2} = counts
     end
   end
 

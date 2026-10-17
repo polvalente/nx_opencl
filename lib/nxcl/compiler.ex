@@ -39,9 +39,6 @@ defmodule NxCL.Compiler do
       its own.
     * `:max_concurrency` - the partition count `__partitions_options__/1` reads.
     * `:hooks` - must be empty.
-    * `:census` - `true` prints the instruction counts of the program when the
-      function compiles (`NxCL.Fusion.Census`). With fusion on, it prints the
-      counts before and after the pass.
 
   ## Unsupported operations
 
@@ -75,7 +72,6 @@ defmodule NxCL.Compiler do
   alias NxCL.Devices
   alias NxCL.Executor
   alias NxCL.Fusion
-  alias NxCL.Fusion.Census
   alias NxCL.Lower
   alias NxCL.Program
 
@@ -91,7 +87,7 @@ defmodule NxCL.Compiler do
 
     cache_key =
       {key, Enum.map(vars, &Composite.traverse(&1, fn t -> Nx.to_template(t) end)),
-       {run_opts, fusion?(opts), opts[:census]}}
+       {run_opts, fusion?(opts)}}
 
     case CompileCache.fetch(cache_key) do
       {:ok, closure} ->
@@ -112,7 +108,6 @@ defmodule NxCL.Compiler do
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
     fused = Fusion.fuse(program, fusion: fusion?(opts))
-    if opts[:census], do: print_census(program, fused)
     program = %Program{fused | signature: Program.signature(fused)}
 
     fn [args] ->
@@ -122,11 +117,6 @@ defmodule NxCL.Compiler do
 
   defp fusion?(opts),
     do: Keyword.get_lazy(opts, :fusion, fn -> Application.get_env(:nx_opencl, :fusion, true) end)
-
-  defp print_census(program, fused) do
-    IO.puts(Census.format(Census.count(program), "census (unfused)"))
-    if fused != program, do: IO.puts(Census.format(Census.count(fused), "census (fused)"))
-  end
 
   @impl true
   def __partitions_options__(opts) do
