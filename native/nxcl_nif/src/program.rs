@@ -2,7 +2,9 @@
 //!
 //! `Program::decode` turns the wire term built by `NxCL.Executor` into steps and
 //! builds every kernel through the device cache. `Program::eval` enqueues the
-//! steps in order on the one in-order queue and waits once, in `finish`.
+//! steps in order on the one in-order queue. On the context's own queue it returns
+//! after a flush, and a read of an output waits; on any other queue, or when a
+//! kernel reports an error code, it waits once, in `finish`.
 //!
 //! Wire term: `{inputs, captures, consts, [instr], [out_ref]}` where
 //! `inputs = [{type, shape} | nil]`, `captures = [{type, shape}]`,
@@ -384,6 +386,18 @@ impl Program {
             None
         };
 
+        // The default queue returns without waiting; a read of an output blocks.
+        let lazy = !self.uses_flag && std::ptr::eq(queue, &ctx.queue);
+        if !std::ptr::eq(queue, &ctx.queue) {
+            // Outputs of an earlier run on the default queue may still be queued.
+            let default = ctx
+                .queue
+                .lock()
+                .map_err(|e| format!("Lock error: {:?}", e))?;
+            default
+                .finish()
+                .map_err(|e| format!("Device error: {:?}", e))?;
+        }
         let queue = queue.lock().map_err(|e| format!("Lock error: {:?}", e))?;
 
         // No wait between steps. The queue is in order, and OpenCL keeps a
@@ -458,7 +472,7 @@ impl Program {
                                 if !pass.local.is_empty() {
                                     exec.set_local_work_sizes(&pass.local);
                                 }
-                                // The event is dropped; `finish` waits for it.
+                                // The event is dropped; `finish` or a read waits for it.
                                 exec.enqueue_nd_range(&queue)
                                     .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
                             }
@@ -475,7 +489,12 @@ impl Program {
         })();
 
         // Drain the queue even after an error, before any buffer goes away.
-        let finished = queue.finish().map_err(|e| format!("Device error: {:?}", e));
+        let finished = if lazy && run.is_ok() {
+            // Flush so the device starts now; a read waits for the rest.
+            queue.flush().map_err(|e| format!("Device error: {:?}", e))
+        } else {
+            queue.finish().map_err(|e| format!("Device error: {:?}", e))
+        };
         drop(queue);
         run?;
         finished?;

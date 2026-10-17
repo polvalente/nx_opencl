@@ -69,6 +69,13 @@ defmodule NxCL.Native do
   def buffer_read(_buf, _size), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
+  Reads several buffers with one wait on the device. Each item is `{buffer, size}`;
+  the result lists the binaries in the same order.
+  """
+  @spec buffer_read_many(reference(), [{reference(), non_neg_integer()}]) :: [binary()]
+  def buffer_read_many(_ctx, _items), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
   Drops the handle's hold on the device memory. The memory goes when no other
   handle shares it. Reading a freed handle raises. Returns `false` when the
   handle was already free.
@@ -85,7 +92,9 @@ defmodule NxCL.Native do
 
   @doc """
   Runs a compiled program on a list of buffers (inputs, captures, constants in
-  slot order; `nil` for an unread input). Waits once, at the end.
+  slot order; `nil` for an unread input). On the default queue it returns before the
+  device is done and the first read of an output waits; a program that can report an
+  error code waits at the end.
   """
   @spec eval_program(reference(), [reference() | nil]) ::
           {:ok, [reference()]} | {:error, String.t()}

@@ -1,5 +1,5 @@
 use opencl3::memory::{Buffer, CL_MEM_COPY_HOST_PTR, CL_MEM_READ_WRITE};
-use opencl3::types::CL_TRUE;
+use opencl3::types::{CL_FALSE, CL_TRUE};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -80,5 +80,46 @@ impl DeviceBuffer {
             .map_err(|e| format!("Failed to read buffer: {:?}", e))?;
 
         Ok(output)
+    }
+
+    /// Reads several buffers with one wait: the reads queue without blocking and a
+    /// single `finish` ends them. Each item is a buffer and a byte count.
+    pub fn read_many(
+        ctx: &DeviceCtx,
+        items: &[(Arc<DeviceBuffer>, usize)],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        let mut outputs: Vec<Vec<u8>> = items
+            .iter()
+            .map(|(buf, size)| vec![0u8; std::cmp::min(*size, buf.size)])
+            .collect();
+
+        let queue = ctx
+            .queue
+            .lock()
+            .map_err(|e| format!("Lock error: {:?}", e))?;
+
+        let mut events = Vec::with_capacity(items.len());
+        let mut failure = None;
+        for ((buf, _), output) in items.iter().zip(outputs.iter_mut()) {
+            if output.is_empty() {
+                continue;
+            }
+            match unsafe { queue.enqueue_read_buffer(&buf.buffer, CL_FALSE, 0, output, &[]) } {
+                Ok(event) => events.push(event),
+                Err(e) => {
+                    failure = Some(format!("Failed to read buffer: {:?}", e));
+                    break;
+                }
+            }
+        }
+
+        // The output vectors must outlive every queued read, even after an error.
+        let finished = queue.finish().map_err(|e| format!("Device error: {:?}", e));
+        drop(events);
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        finished?;
+        Ok(outputs)
     }
 }

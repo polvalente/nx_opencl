@@ -7,7 +7,7 @@ mod program;
 use buffer::DeviceBuffer;
 use device_ctx::DeviceCtx;
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
-use rustler::{NifResult, OwnedBinary, ResourceArc, Term};
+use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc, Term};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -201,6 +201,31 @@ fn buffer_read(buf: ResourceArc<NifDeviceBuffer>, size: usize) -> NifResult<Owne
         }
         Err(e) => Err(rustler::Error::RaiseTerm(Box::new(e))),
     }
+}
+
+/// Reads several buffers with one wait. `items` is `[{buffer, size}]`.
+#[rustler::nif(schedule = "DirtyIo")]
+fn buffer_read_many<'a>(
+    env: Env<'a>,
+    ctx: ResourceArc<NifDeviceCtx>,
+    items: Vec<(ResourceArc<NifDeviceBuffer>, usize)>,
+) -> NifResult<Vec<Binary<'a>>> {
+    let devices = items
+        .iter()
+        .map(|(buf, size)| buf.get().map(|b| (b, *size)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| rustler::Error::RaiseTerm(Box::new(e)))?;
+    let data = DeviceBuffer::read_many(&ctx.inner.ctx, &devices)
+        .map_err(|e| rustler::Error::RaiseTerm(Box::new(e)))?;
+    data.iter()
+        .map(|bytes| {
+            let mut binary = OwnedBinary::new(bytes.len()).ok_or(rustler::Error::RaiseTerm(
+                Box::new("Failed to allocate binary".to_string()),
+            ))?;
+            binary.as_mut_slice().copy_from_slice(bytes);
+            Ok(binary.release(env))
+        })
+        .collect()
 }
 
 /// Drops the handle's hold on the device memory. Reading the handle afterwards is

@@ -22,6 +22,9 @@ runs on the same programs and kernels.
 - Compiler options `:device`, `:command_queue`, `:fusion` and `:max_concurrency`;
   `NxCL.Devices` holds one context per device.
 - `NxCL.Native.device_info/1` reports `driver_version` and `device_type`.
+- A compiled function takes tensors that are already on the device without a
+  read back and a new upload. A run on the default queue returns before the
+  device finishes, and a program with several outputs reads them with one wait.
 - Requires `{:nx, "~> 1.0"}`. Axon (`~> 0.9`) is a test dependency only.
 - Tests: Nx doctests on the backend and through the compiler, gradient
   equivalence, three Axon models, a no-fallback tripwire, and a parity matrix

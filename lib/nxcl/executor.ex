@@ -41,7 +41,9 @@ defmodule NxCL.Executor do
   """
   @spec run(Program.t(), [(-> Nx.Tensor.t())], keyword()) :: Nx.Container.t()
   def run(%Program{} = program, args, opts \\ []) do
-    program |> run_buffers(args, opts) |> then(&read_outputs(program, &1))
+    program
+    |> run_buffers(args, opts)
+    |> then(&read_outputs(program, Devices.fetch!(opts).ctx, &1))
   end
 
   @doc """
@@ -76,15 +78,21 @@ defmodule NxCL.Executor do
     eval!(dev, native, inputs ++ captures ++ consts)
   end
 
-  defp read_outputs(program, outputs) do
+  # One wait for all outputs: each blocking read costs a device round trip.
+  defp read_outputs(program, ctx, outputs) do
     leaves = Composite.flatten_list([program.output_template])
 
+    binaries =
+      NxCL.Native.buffer_read_many(
+        ctx,
+        Enum.zip_with(outputs, leaves, &{&1, Nx.byte_size(&2)})
+      )
+
     tensors =
-      outputs
+      binaries
       |> Enum.zip(leaves)
-      |> Enum.map(fn {buf, template} ->
-        buf
-        |> NxCL.Native.buffer_read(Nx.byte_size(template))
+      |> Enum.map(fn {binary, template} ->
+        binary
         |> Nx.from_binary(template.type)
         |> Nx.reshape(template.shape, names: template.names)
       end)
@@ -302,7 +310,14 @@ defmodule NxCL.Executor do
     do: {instr.op, instr.operands, instr.out_type, instr.out_shape, instr.attrs}
 
   defp to_buffer(_ctx, {:buffer, ref}), do: ref
-  defp to_buffer(ctx, arg), do: upload(ctx, arg.())
+
+  # A tensor already on this device goes in as it is: no read back, no new upload.
+  defp to_buffer(ctx, arg) do
+    case arg.() do
+      %Nx.Tensor{data: %NxCL.Backend{ref: ref, ctx: ^ctx}} -> ref
+      tensor -> upload(ctx, tensor)
+    end
+  end
 
   defp upload(ctx, tensor), do: NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
 end

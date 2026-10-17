@@ -26,3 +26,7 @@ nx_opencl-*.tar
 /priv/native/
 /native/nxcl_nif/target/
 
+# Benchmark project and the profiling shim.
+/benchmarks/_build/
+/benchmarks/deps/
+/benchmarks/profile/*.dylib
