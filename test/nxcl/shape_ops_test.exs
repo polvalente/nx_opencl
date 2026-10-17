@@ -7,7 +7,7 @@ defmodule NxCL.ShapeOpsTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
   alias NxCL.Lower
   alias NxCL.Native
@@ -133,8 +133,7 @@ defmodule NxCL.ShapeOpsTest do
     test "an aliased buffer stays alive for a later kernel" do
       x = Nx.iota({6}, type: :f32)
 
-      assert_parity(
-        :reshape,
+      assert_same(
         fn x ->
           y = Nx.reshape(x, {2, 3})
           {y, Nx.add(y, Nx.reverse(y))}
@@ -267,7 +266,7 @@ defmodule NxCL.ShapeOpsTest do
       assert ops(lower(layer, [x, w, b])) ==
                [:reshape, :reshape, :batched_gemm, :reshape, :broadcast, :add, :sigmoid]
 
-      assert_parity(:sigmoid, layer, [x, w, b], rtol: 1.0e-4, atol: 1.0e-4)
+      assert_same(layer, [x, w, b], rtol: 1.0e-4, atol: 1.0e-4)
     end
   end
 end

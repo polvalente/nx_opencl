@@ -1,30 +1,23 @@
-defmodule NxCL.Parity.Tripwire do
+defmodule NxCL.TestSupport.NoFallback do
   @moduledoc """
-  The no-fallback tripwire: an `Nx.Backend` that raises on every compute callback.
+  A backend that raises on every compute callback, to show that a program runs on
+  the device and not on the host CPU.
 
-  Installed as the default backend while `NxCL.Compiler` or `NxCL.Backend` runs a
-  row (`guard/2`), so any code on the compute path that builds an intermediate
-  with the default backend raises `NxCL.Parity.Tripwire.Fallback` instead of
-  computing on the CPU. Only data movement works: `from_binary`, `to_binary`,
-  `constant`, `inspect`, the copy and free callbacks, and `reshape` and `squeeze`, which change
-  only the shape of the host copy of a result (the executor reshapes what it reads
-  back from the device).
+  `guard/1` runs a function with this backend as the default, so code on the
+  compute path that builds an intermediate with the default backend raises
+  `NxCL.TestSupport.NoFallback.Fallback` instead of computing on the CPU. Only
+  data movement works: `from_binary`, `to_binary`, `constant`, `inspect`, the copy
+  and free callbacks, and `reshape` and `squeeze`, which change only the shape of
+  the host copy of a result (the executor reshapes what it reads back from the
+  device).
 
   The one allowed crossing is a host call. A callback that `Nx.runtime_call/4` or
   `Nx.io_call/2` runs computes on the host by design, so a compute callback that
   runs inside `NxCL.Executor.Host` goes to `Nx.BinaryBackend` instead of raising.
-  A block host function (`qr`, `eigh`, `svd`, `lu`) runs under `Nx.BinaryBackend`
-  on purpose (`NxCL.Lower.Block`) and never reaches this backend.
 
-  `guard/2` also traces calls into `Nx.BinaryBackend` made by the running process
+  `guard/1` also traces calls into `Nx.BinaryBackend` made by the running process
   (an op that names `Nx.BinaryBackend` itself, bypassing the default). Such a
-  call is a fallback unless the row made a host call.
-
-  Host calls are counted by kind: the block that ran on the host
-  (`:block_lin_alg_qr`, `:block_lin_alg_eigh`, `:block_lin_alg_svd`,
-  `:block_lin_alg_lu`, read from `NxCL.Lower.Block`) or `:callback` for a
-  callback the user passed to `Nx.runtime_call/4`, `Nx.io_call/2` or a hook. An
-  op built on a host block, such as `solve` on `lu`, counts under the block.
+  call is a fallback unless the function made a host call.
   """
 
   @behaviour Nx.Backend
@@ -32,12 +25,10 @@ defmodule NxCL.Parity.Tripwire do
   defstruct [:binary]
 
   defmodule Fallback do
-    @moduledoc "Raised when a compute callback runs on the tripwire backend."
+    @moduledoc "Raised when a compute callback runs on the no-fallback backend."
     defexception [:message]
   end
 
-  @table __MODULE__
-  @outer {__MODULE__, :outer}
   @collector {__MODULE__, :collector}
 
   # Callbacks that move data or change a shape; every other callback computes.
@@ -54,81 +45,34 @@ defmodule NxCL.Parity.Tripwire do
     :squeeze
   ]
 
-  @doc "Creates the table that holds host call counts per row label."
-  @spec start() :: :ok
-  def start do
-    if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:named_table, :public, :set])
-    end
-
-    :ok
-  end
-
   @doc """
-  Runs `fun` with this backend as the default and returns its result. With
-  `default: false` the default backend stays as it is: the eager run needs it,
-  because the evaluator builds the output of `iota` and the like on it. Host calls
-  the executor ran meanwhile are added to the count of their kind (see the module
-  doc). Raises `Fallback` when `Nx.BinaryBackend` computed during `fun` and no host
-  call ran.
+  Runs `fun` with this backend as the default and returns its result. Raises
+  `Fallback` when `Nx.BinaryBackend` computed during `fun` and no host call ran.
   """
-  @spec guard(term(), (-> result), keyword()) :: result when result: var
-  def guard(label, fun, opts \\ []) do
-    start()
-    outer = Nx.default_backend()
-
-    {result, %{binary: seen_calls, blocks: blocks, host_calls: calls}} =
-      trace(fn ->
-        Process.put(@outer, outer)
-
-        try do
-          if Keyword.get(opts, :default, true),
-            do: Nx.with_default_backend(__MODULE__, fun),
-            else: fun.()
-        after
-          Process.delete(@outer)
-        end
-      end)
+  @spec guard((-> result)) :: result when result: var
+  def guard(fun) do
+    {result, %{binary: seen_calls, host_calls: calls}} =
+      trace(fn -> Nx.with_default_backend(__MODULE__, fun) end)
 
     binary_calls = compute_calls(seen_calls)
 
-    for struct <- blocks do
-      kind = kind(struct)
-      :ets.update_counter(@table, kind, 1, {kind, 0})
-    end
-
     if binary_calls != [] and calls == 0 do
       raise Fallback,
-            "#{inspect(label)}: Nx.BinaryBackend computed with no host call: " <>
-              inspect(Enum.uniq(binary_calls))
+            "Nx.BinaryBackend computed with no host call: " <> inspect(Enum.uniq(binary_calls))
     end
 
     result
   end
 
-  # `Nx.Block.LinAlg.LU` -> `:block_lin_alg_lu`, as the matrix names the op.
-  defp kind(:callback), do: :callback
-
-  defp kind(struct) do
-    "Elixir.Nx.Block." <> rest = Atom.to_string(struct)
-    String.to_atom("block_" <> Enum.map_join(String.split(rest, "."), "_", &Macro.underscore/1))
-  end
-
   @doc """
   Runs `fun` and returns `{result, seen}`. `seen.binary` lists each distinct
-  `Nx.BinaryBackend` compute callbacks (as `{name, arity, caller}`) that the calling
-  process ran meanwhile; data movement callbacks are not listed. `seen.blocks` lists
-  what ran as a host call: a block struct, or `:callback` for a user callback.
+  `Nx.BinaryBackend` compute callback (as `{name, arity, caller}`) that the calling
+  process ran meanwhile; data movement callbacks are not listed.
   `seen.host_calls` counts the host steps that ran a function; an `:io_call` with no
   function is not one.
   """
   @spec trace((-> result)) ::
-          {result,
-           %{
-             binary: [tuple()],
-             blocks: [module() | :callback],
-             host_calls: non_neg_integer()
-           }}
+          {result, %{binary: [tuple()], host_calls: non_neg_integer()}}
         when result: var
   def trace(fun) do
     collector = begin_trace()
@@ -150,36 +94,12 @@ defmodule NxCL.Parity.Tripwire do
   @spec compute_calls([tuple()]) :: [tuple()]
   def compute_calls(calls), do: Enum.reject(calls, &match?({_, _, {Nx.Defn.Expr, _, _}}, &1))
 
-  @doc """
-  Runs `fun` with the default backend and the trace that were in effect before
-  `guard/2`. `NxCL.Parity.Tripwire.Compiler` wraps the user function with it: the
-  function builds the expression, and any concrete tensor it computes on is the
-  row's own literal, not the compute path.
-  """
-  @spec paused((-> result)) :: result when result: var
-  def paused(fun) do
-    case {Process.get(@outer), Process.get(@collector)} do
-      {nil, _} ->
-        fun.()
-
-      {outer, collector} ->
-        :erlang.trace(self(), false, [:call])
-
-        try do
-          Nx.with_default_backend(outer, fun)
-        after
-          :erlang.trace(self(), true, [:call, {:tracer, collector}])
-        end
-    end
-  end
-
   @doc "Starts tracing the calling process; give the result to `end_trace/2`."
   @spec begin_trace() :: pid()
   def begin_trace do
-    start()
     Code.ensure_loaded!(Nx.BinaryBackend)
     install_patterns()
-    collector = spawn(fn -> collect(%{binary: MapSet.new(), blocks: [], host_calls: 0}) end)
+    collector = spawn(fn -> collect(%{binary: MapSet.new(), host_calls: 0}) end)
 
     :erlang.trace(self(), false, [:silent])
     :erlang.trace(self(), true, [:call, {:tracer, collector}])
@@ -231,11 +151,7 @@ defmodule NxCL.Parity.Tripwire do
   Stops tracing `pid` (default: the calling process) and returns what was seen since
   `begin_trace/0` (see `trace/1`).
   """
-  @spec end_trace(pid(), pid()) :: %{
-          binary: [tuple()],
-          blocks: [module() | :callback],
-          host_calls: non_neg_integer()
-        }
+  @spec end_trace(pid(), pid()) :: %{binary: [tuple()], host_calls: non_neg_integer()}
   def end_trace(collector, pid \\ self()) do
     # A process that has exited has no trace left to stop.
     try do
@@ -255,20 +171,6 @@ defmodule NxCL.Parity.Tripwire do
     end
   end
 
-  # The block struct a host entry runs, or `:callback` for a user callback. The closure
-  # `NxCL.Lower.Block.host_entry/4` builds holds the block struct in its environment.
-  defp block_of(%{fun: fun}) when is_function(fun) do
-    with {:module, NxCL.Lower.Block} <- Function.info(fun, :module),
-         {:env, env} <- Function.info(fun, :env),
-         %{__struct__: struct} <- Enum.find(env, &match?(%{__struct__: _}, &1)) do
-      struct
-    else
-      _ -> :callback
-    end
-  end
-
-  defp block_of(_entry), do: :callback
-
   # `Host.run/3` returns an `:io_call` that has no function at once; nothing runs.
   defp ran_function?(%{kind: :io_call, fun: nil}), do: false
   defp ran_function?(_entry), do: true
@@ -279,8 +181,6 @@ defmodule NxCL.Parity.Tripwire do
         collect(Map.update!(seen, :binary, &MapSet.put(&1, {name, length(args), caller})))
 
       {:trace, _pid, :call, {NxCL.Executor.Host, :run, [entry, _ctx, _buffers]}, _caller} ->
-        seen = Map.update!(seen, :blocks, &[block_of(entry) | &1])
-
         collect(
           if ran_function?(entry), do: Map.update!(seen, :host_calls, &(&1 + 1)), else: seen
         )
@@ -290,24 +190,8 @@ defmodule NxCL.Parity.Tripwire do
         collect(seen)
 
       {:done, from, ref} ->
-        seen = %{seen | binary: Enum.sort(seen.binary), blocks: Enum.reverse(seen.blocks)}
-        send(from, {ref, seen})
+        send(from, {ref, %{seen | binary: Enum.sort(seen.binary)}})
     end
-  end
-
-  @doc "Host call counts per row label, since the last `reset/0`."
-  @spec host_calls() :: %{term() => pos_integer()}
-  def host_calls do
-    start()
-    Map.new(:ets.tab2list(@table))
-  end
-
-  @doc "Clears the counts."
-  @spec reset() :: :ok
-  def reset do
-    start()
-    :ets.delete_all_objects(@table)
-    :ok
   end
 
   @impl true
@@ -363,7 +247,7 @@ defmodule NxCL.Parity.Tripwire do
         apply(Nx.BinaryBackend, unquote(name), Enum.map(unquote(args), &to_binary_data/1))
       else
         raise Fallback,
-              "#{unquote(name)}/#{unquote(arity)} ran on the tripwire backend: " <>
+              "#{unquote(name)}/#{unquote(arity)} ran on the no-fallback backend: " <>
                 "an intermediate fell back to the default backend instead of the device"
       end
     end
@@ -380,38 +264,4 @@ defmodule NxCL.Parity.Tripwire do
 
   defp to_binary_data(list) when is_list(list), do: Enum.map(list, &to_binary_data/1)
   defp to_binary_data(other), do: other
-end
-
-defmodule NxCL.Parity.Tripwire.Compiler do
-  @moduledoc """
-  Runs another compiler (`inner:`) with the tracing of `NxCL.Parity.Tripwire`
-  paused while the user function builds its expression.
-  """
-  @behaviour Nx.Defn.Compiler
-
-  alias NxCL.Parity.Tripwire
-
-  @impl true
-  def __jit__(key, vars, fun, args_list, opts) do
-    {inner, opts} = Keyword.pop!(opts, :inner)
-    inner.__jit__(key, vars, &Tripwire.paused(fn -> fun.(&1) end), args_list, opts)
-  end
-
-  @impl true
-  def __compile__(key, vars, fun, opts) do
-    {inner, opts} = Keyword.pop!(opts, :inner)
-    inner.__compile__(key, vars, &Tripwire.paused(fn -> fun.(&1) end), opts)
-  end
-
-  @impl true
-  def __partitions_options__(opts) do
-    {inner, opts} = Keyword.pop!(opts, :inner)
-    inner.__partitions_options__(opts)
-  end
-
-  @impl true
-  def __to_backend__(opts) do
-    {inner, opts} = Keyword.pop!(opts, :inner)
-    inner.__to_backend__(opts)
-  end
 end

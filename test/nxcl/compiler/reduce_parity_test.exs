@@ -1,13 +1,13 @@
 defmodule NxCL.ReduceParityTest do
   @moduledoc """
   Differential rows for reductions, arg reductions, scans and windows, through
-  `NxCL.Parity` against `Nx.BinaryBackend`: `sum product reduce_max reduce_min
+  `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`: `sum product reduce_max reduce_min
   all any argmax argmin reduce`, `cumulative_sum cumulative_product
   cumulative_min cumulative_max`, and `window_sum window_product window_max
   window_min window_reduce window_scatter_max window_scatter_min`, on every
   dtype Nx accepts for the op. Nx raises for `reduce_max reduce_min argmax
   argmin`, the min/max scans and windows, and `sort` on `c64` and `c128`, so
-  those cells are out of scope (see the parity matrix generator).
+  those combinations are not supported.
 
   Float inputs for sums and scans hold small integers, so every partial sum is
   exact and the order of a tree reduction cannot change the answer. `f16` and
@@ -21,9 +21,9 @@ defmodule NxCL.ReduceParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 600_000
@@ -62,7 +62,7 @@ defmodule NxCL.ReduceParityTest do
   end
 
   defp exact({kind, _} = type, shape, seed) do
-    key = Nx.Random.key(NxCL.Parity.seed() + seed)
+    key = Nx.Random.key(NxCL.TestSupport.Compare.seed() + seed)
     lim = if low?(type), do: 1, else: 8
     lo = if kind == :u, do: 0, else: -lim
     {t, _} = Nx.Random.randint(key, lo, lim + 1, shape: shape, type: :s32)
@@ -74,7 +74,7 @@ defmodule NxCL.ReduceParityTest do
   # Entries of magnitude 1, so a long product neither overflows nor vanishes.
   # Integers keep their random values: their products wrap the same way.
   defp units({:c, _} = type, shape) do
-    key = Nx.Random.key(NxCL.Parity.seed())
+    key = Nx.Random.key(NxCL.TestSupport.Compare.seed())
     {k, _} = Nx.Random.randint(key, 0, 4, shape: shape, type: :s32)
     re = Nx.take(Nx.tensor([1.0, 0.0, -1.0, 0.0]), k)
     im = Nx.take(Nx.tensor([0.0, 1.0, 0.0, -1.0]), k)
@@ -115,21 +115,21 @@ defmodule NxCL.ReduceParityTest do
         type = unquote(Macro.escape(type))
 
         for shape <- shapes(type), axes <- axes_for(shape), keep <- [false, true] do
-          assert_parity(:sum, &Nx.sum(&1, axes: axes, keep_axes: keep), [exact(type, shape)])
+          assert_same(&Nx.sum(&1, axes: axes, keep_axes: keep), [exact(type, shape)])
         end
 
         # Few elements per line: random non-integer values stay inside the tolerance.
         for shape <- [{3, 5}, {2, 3, 4}, {63}, {65}], axes <- [nil, [0]] do
-          assert_parity(:sum, &Nx.sum(&1, axes: axes), [Gen.random(shape, type)],
+          assert_same(&Nx.sum(&1, axes: axes), [Gen.random(shape, type)],
             atol: if(low?(type), do: 0.5, else: 1.0e-4)
           )
         end
 
         # Few outputs and many elements (sliced), many outputs (one group each).
-        assert_parity(:sum, &Nx.sum(&1, axes: [0]), [exact(type, {4097, 3})])
-        assert_parity(:sum, &Nx.sum(&1, axes: [1]), [exact(type, {3, 4097})])
-        assert_parity(:sum, &Nx.sum(&1, axes: [1]), [exact(type, {70, 100})])
-        assert_parity(:sum, &Nx.sum(&1, axes: [0]), [exact(type, {100, 70})])
+        assert_same(&Nx.sum(&1, axes: [0]), [exact(type, {4097, 3})])
+        assert_same(&Nx.sum(&1, axes: [1]), [exact(type, {3, 4097})])
+        assert_same(&Nx.sum(&1, axes: [1]), [exact(type, {70, 100})])
+        assert_same(&Nx.sum(&1, axes: [0]), [exact(type, {100, 70})])
       end
 
       @tag requires: Map.get(@needs, type)
@@ -137,13 +137,13 @@ defmodule NxCL.ReduceParityTest do
         type = unquote(Macro.escape(type))
 
         for shape <- shapes(type), axes <- axes_for(shape), keep <- [false, true] do
-          assert_parity(:product, &Nx.product(&1, axes: axes, keep_axes: keep), [
+          assert_same(&Nx.product(&1, axes: axes, keep_axes: keep), [
             units(type, shape)
           ])
         end
 
         for shape <- [{3, 5}, {2, 3, 4}], axes <- [nil, [1]] do
-          assert_parity(:product, &Nx.product(&1, axes: axes), [Gen.random(shape, type)],
+          assert_same(&Nx.product(&1, axes: axes), [Gen.random(shape, type)],
             atol: 1.0e-2,
             rtol: 1.0e-2
           )
@@ -155,8 +155,8 @@ defmodule NxCL.ReduceParityTest do
         type = unquote(Macro.escape(type))
 
         for shape <- Gen.shapes(), axes <- axes_for(shape), keep <- [false, true] do
-          assert_parity(:all, &Nx.all(&1, axes: axes, keep_axes: keep), [Gen.random(shape, type)])
-          assert_parity(:any, &Nx.any(&1, axes: axes, keep_axes: keep), [Gen.random(shape, type)])
+          assert_same(&Nx.all(&1, axes: axes, keep_axes: keep), [Gen.random(shape, type)])
+          assert_same(&Nx.any(&1, axes: axes, keep_axes: keep), [Gen.random(shape, type)])
         end
       end
     end
@@ -169,14 +169,14 @@ defmodule NxCL.ReduceParityTest do
         zeros = Nx.broadcast(Nx.tensor(0, type: type), {3, 70})
 
         for t <- [ones, zeros, Nx.concatenate([ones, zeros], axis: 0)] do
-          assert_parity(:all, &Nx.all(&1, axes: [1]), [t])
-          assert_parity(:any, &Nx.any(&1, axes: [1]), [t])
-          assert_parity(:all, &Nx.all/1, [t])
-          assert_parity(:any, &Nx.any/1, [t])
+          assert_same(&Nx.all(&1, axes: [1]), [t])
+          assert_same(&Nx.any(&1, axes: [1]), [t])
+          assert_same(&Nx.all/1, [t])
+          assert_same(&Nx.any/1, [t])
         end
 
-        assert_parity(:all, &Nx.all/1, [with_edges(type, 70)])
-        assert_parity(:any, &Nx.any/1, [with_edges(type, 70)])
+        assert_same(&Nx.all/1, [with_edges(type, 70)])
+        assert_same(&Nx.any/1, [with_edges(type, 70)])
       end
     end
 
@@ -214,19 +214,19 @@ defmodule NxCL.ReduceParityTest do
 
         for shape <- Gen.shapes(), axes <- axes_for(shape), keep <- [false, true] do
           t = Gen.random(shape, type)
-          assert_parity(:reduce_max, &Nx.reduce_max(&1, axes: axes, keep_axes: keep), [t])
-          assert_parity(:reduce_min, &Nx.reduce_min(&1, axes: axes, keep_axes: keep), [t])
+          assert_same(&Nx.reduce_max(&1, axes: axes, keep_axes: keep), [t])
+          assert_same(&Nx.reduce_min(&1, axes: axes, keep_axes: keep), [t])
         end
 
         # Edge values: NaN, infinities and signed zero for floats; the extremes for integers.
         for n <- [7, 70, 4097] do
           t = with_edges(type, n)
-          assert_parity(:reduce_max, &Nx.reduce_max/1, [t])
-          assert_parity(:reduce_min, &Nx.reduce_min/1, [t])
+          assert_same(&Nx.reduce_max/1, [t])
+          assert_same(&Nx.reduce_min/1, [t])
         end
 
-        assert_parity(:reduce_max, &Nx.reduce_max(&1, axes: [0]), [Gen.random({4097, 3}, type)])
-        assert_parity(:reduce_min, &Nx.reduce_min(&1, axes: [1]), [Gen.random({70, 100}, type)])
+        assert_same(&Nx.reduce_max(&1, axes: [0]), [Gen.random({4097, 3}, type)])
+        assert_same(&Nx.reduce_min(&1, axes: [1]), [Gen.random({70, 100}, type)])
       end
 
       @tag requires: Map.get(@needs, type)
@@ -239,14 +239,12 @@ defmodule NxCL.ReduceParityTest do
             axis <- [nil | axis_list(shape)] do
           t = Gen.random(shape, type)
 
-          assert_parity(
-            :argmax,
+          assert_same(
             &Nx.argmax(&1, axis: axis, tie_break: tie, keep_axis: keep),
             [t]
           )
 
-          assert_parity(
-            :argmin,
+          assert_same(
             &Nx.argmin(&1, axis: axis, tie_break: tie, keep_axis: keep),
             [t]
           )
@@ -254,15 +252,15 @@ defmodule NxCL.ReduceParityTest do
 
         # Ties on every element, and edge values (NaN beats numbers).
         for tie <- [:low, :high], n <- [7, 70, 4097] do
-          assert_parity(:argmax, &Nx.argmax(&1, tie_break: tie), [with_edges(type, n)])
-          assert_parity(:argmin, &Nx.argmin(&1, tie_break: tie), [with_edges(type, n)])
+          assert_same(&Nx.argmax(&1, tie_break: tie), [with_edges(type, n)])
+          assert_same(&Nx.argmin(&1, tie_break: tie), [with_edges(type, n)])
           flat = Nx.broadcast(Nx.tensor(3, type: type), {n})
-          assert_parity(:argmax, &Nx.argmax(&1, tie_break: tie), [flat])
-          assert_parity(:argmin, &Nx.argmin(&1, tie_break: tie), [flat])
+          assert_same(&Nx.argmax(&1, tie_break: tie), [flat])
+          assert_same(&Nx.argmin(&1, tie_break: tie), [flat])
         end
 
-        assert_parity(:argmax, &Nx.argmax(&1, axis: 0, type: :s32), [Gen.random({4097, 3}, type)])
-        assert_parity(:argmin, &Nx.argmin(&1, axis: 1, type: :u16), [Gen.random({70, 100}, type)])
+        assert_same(&Nx.argmax(&1, axis: 0, type: :s32), [Gen.random({4097, 3}, type)])
+        assert_same(&Nx.argmin(&1, axis: 1, type: :u16), [Gen.random({70, 100}, type)])
       end
     end
   end
@@ -281,15 +279,13 @@ defmodule NxCL.ReduceParityTest do
           t = exact(type, shape)
 
           # The bodies Nx folds like a sum and a product.
-          assert_parity(
-            :reduce,
+          assert_same(
             &Nx.reduce(&1, init.(&1), [axes: axes], fn a, b -> Nx.add(a, b) end),
             [t]
           )
 
           # A body that is not a monoid folds in order: `x * x + acc`.
-          assert_parity(
-            :reduce,
+          assert_same(
             &Nx.reduce(&1, init.(&1), [axes: axes, keep_axes: true], fn a, acc ->
               Nx.add(Nx.multiply(a, a), acc)
             end),
@@ -297,8 +293,7 @@ defmodule NxCL.ReduceParityTest do
           )
         end
 
-        assert_parity(
-          :reduce,
+        assert_same(
           &Nx.reduce(&1, one.(&1), [axes: [1]], fn a, b -> Nx.multiply(a, b) end),
           [
             units(type, {3, 70})
@@ -306,8 +301,7 @@ defmodule NxCL.ReduceParityTest do
         )
 
         # A non-identity initial value is folded in once.
-        assert_parity(
-          :reduce,
+        assert_same(
           &Nx.reduce(&1, Nx.tensor(3, type: Nx.type(&1)), [axes: [1]], fn a, b -> Nx.add(a, b) end),
           [exact(type, {3, 70})]
         )
@@ -319,16 +313,14 @@ defmodule NxCL.ReduceParityTest do
       test "reduce with max and min bodies on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(
-          :reduce,
+        assert_same(
           &Nx.reduce(&1, Nx.Constants.min_finite(Nx.type(&1)), [axes: [1]], fn a, b ->
             Nx.max(a, b)
           end),
           [Gen.random({3, 70}, type)]
         )
 
-        assert_parity(
-          :reduce,
+        assert_same(
           &Nx.reduce(&1, Nx.Constants.max_finite(Nx.type(&1)), [axes: [0]], fn a, b ->
             Nx.min(a, b)
           end),
@@ -351,14 +343,12 @@ defmodule NxCL.ReduceParityTest do
         for shape <- fit(type, @scan_shapes),
             axis <- axis_list(shape),
             reverse <- [false, true] do
-          assert_parity(
-            :block_cumulative_sum,
+          assert_same(
             &Nx.cumulative_sum(&1, axis: axis, reverse: reverse),
             [exact(type, shape)]
           )
 
-          assert_parity(
-            :block_cumulative_product,
+          assert_same(
             &Nx.cumulative_product(&1, axis: axis, reverse: reverse),
             [units(type, shape)]
           )
@@ -366,7 +356,7 @@ defmodule NxCL.ReduceParityTest do
 
         # Lines past one block, with a few and with many lines.
         for shape <- [{2, 600}, {600, 2}, {3, 5000}, {70, 300}], axis <- [0, 1] do
-          assert_parity(:block_cumulative_sum, &Nx.cumulative_sum(&1, axis: axis), [
+          assert_same(&Nx.cumulative_sum(&1, axis: axis), [
             exact(type, shape)
           ])
         end
@@ -381,14 +371,12 @@ defmodule NxCL.ReduceParityTest do
         for shape <- @scan_shapes, axis <- axis_list(shape), reverse <- [false, true] do
           t = Gen.random(shape, type)
 
-          assert_parity(
-            :block_cumulative_min,
+          assert_same(
             &Nx.cumulative_min(&1, axis: axis, reverse: reverse),
             [t]
           )
 
-          assert_parity(
-            :block_cumulative_max,
+          assert_same(
             &Nx.cumulative_max(&1, axis: axis, reverse: reverse),
             [t]
           )
@@ -396,8 +384,8 @@ defmodule NxCL.ReduceParityTest do
 
         for n <- [7, 70, 4097], reverse <- [false, true] do
           t = with_edges(type, n)
-          assert_parity(:block_cumulative_min, &Nx.cumulative_min(&1, reverse: reverse), [t])
-          assert_parity(:block_cumulative_max, &Nx.cumulative_max(&1, reverse: reverse), [t])
+          assert_same(&Nx.cumulative_min(&1, reverse: reverse), [t])
+          assert_same(&Nx.cumulative_max(&1, reverse: reverse), [t])
         end
       end
     end
@@ -427,14 +415,13 @@ defmodule NxCL.ReduceParityTest do
         type = unquote(Macro.escape(type))
 
         for {shape, window, opts} <- @window_cases do
-          assert_parity(:window_sum, &Nx.window_sum(&1, window, opts), [exact(type, shape)])
+          assert_same(&Nx.window_sum(&1, window, opts), [exact(type, shape)])
 
-          assert_parity(:window_product, &Nx.window_product(&1, window, opts), [
+          assert_same(&Nx.window_product(&1, window, opts), [
             units(type, shape)
           ])
 
-          assert_parity(
-            :window_reduce,
+          assert_same(
             &Nx.window_reduce(&1, Nx.tensor(0, type: Nx.type(&1)), window, opts, fn a, b ->
               Nx.add(a, b)
             end),
@@ -442,8 +429,7 @@ defmodule NxCL.ReduceParityTest do
           )
 
           # A body that is not a monoid, so the cells are folded in order.
-          assert_parity(
-            :window_reduce,
+          assert_same(
             &Nx.window_reduce(&1, Nx.tensor(1, type: Nx.type(&1)), window, opts, fn a, acc ->
               Nx.add(Nx.multiply(a, a), acc)
             end),
@@ -452,8 +438,7 @@ defmodule NxCL.ReduceParityTest do
         end
 
         # A non-zero initial value that is not the identity.
-        assert_parity(
-          :window_reduce,
+        assert_same(
           &Nx.window_reduce(
             &1,
             Nx.tensor(5, type: Nx.type(&1)),
@@ -475,8 +460,8 @@ defmodule NxCL.ReduceParityTest do
 
         for {shape, window, opts} <- @window_cases do
           t = Gen.random(shape, type)
-          assert_parity(:window_max, &Nx.window_max(&1, window, opts), [t])
-          assert_parity(:window_min, &Nx.window_min(&1, window, opts), [t])
+          assert_same(&Nx.window_max(&1, window, opts), [t])
+          assert_same(&Nx.window_min(&1, window, opts), [t])
 
           # The source has the shape of the windowed output. Nx's scatter ops take no
           # `window_dilations`.
@@ -484,14 +469,12 @@ defmodule NxCL.ReduceParityTest do
           source = Nx.window_sum(exact(type, shape), window, sopts)
           init = fn t -> Nx.tensor(0, type: Nx.type(t)) end
 
-          assert_parity(
-            :window_scatter_max,
+          assert_same(
             &Nx.window_scatter_max(&1, &2, init.(&1), window, sopts),
             [t, source]
           )
 
-          assert_parity(
-            :window_scatter_min,
+          assert_same(
             &Nx.window_scatter_min(&1, &2, init.(&1), window, sopts),
             [t, source]
           )
@@ -499,8 +482,8 @@ defmodule NxCL.ReduceParityTest do
 
         # Special values and ties inside a window.
         t = with_edges(type, 70) |> Nx.reshape({7, 10})
-        assert_parity(:window_max, &Nx.window_max(&1, {2, 3}), [t])
-        assert_parity(:window_min, &Nx.window_min(&1, {2, 3}, padding: :same), [t])
+        assert_same(&Nx.window_max(&1, {2, 3}), [t])
+        assert_same(&Nx.window_min(&1, {2, 3}, padding: :same), [t])
       end
     end
   end
@@ -536,10 +519,10 @@ defmodule NxCL.ReduceParityTest do
 
     test "1M s32 values against the reference" do
       x = Gen.random({1_048_576}, {:s, 32})
-      assert_parity(:sum, &Nx.sum/1, [x])
-      assert_parity(:reduce_max, &Nx.reduce_max/1, [x])
-      assert_parity(:argmax, &Nx.argmax(&1, tie_break: :high), [x])
-      assert_parity(:argmin, &Nx.argmin/1, [x])
+      assert_same(&Nx.sum/1, [x])
+      assert_same(&Nx.reduce_max/1, [x])
+      assert_same(&Nx.argmax(&1, tie_break: :high), [x])
+      assert_same(&Nx.argmin/1, [x])
     end
 
     test "cumulative_sum of 1M s32 ones counts from 1" do

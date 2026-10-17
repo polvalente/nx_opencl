@@ -1,8 +1,7 @@
 defmodule NxCL.E2E.ModelsTest do
   @moduledoc """
   Three Axon models through `NxCL.Compiler`, each compared with the evaluator on
-  `Nx.BinaryBackend` (`NxCL.Parity`, which also runs the eager backend and the
-  no-fallback tripwire):
+  `Nx.BinaryBackend` (`NxCL.TestSupport.Compare`, which also runs the eager backend):
 
     * an MLP: forward pass, and one training step (loss, gradient, SGD update);
     * a small CNN: forward pass, and one training step;
@@ -18,13 +17,13 @@ defmodule NxCL.E2E.ModelsTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
   @moduletag :opencl
   @moduletag timeout: 600_000
 
-  @forward [record: false, rtol: 1.0e-4, atol: 1.0e-4]
-  @step [record: false, rtol: 1.0e-3, atol: 1.0e-3]
+  @forward [rtol: 1.0e-4, atol: 1.0e-4]
+  @step [rtol: 1.0e-3, atol: 1.0e-3]
 
   # -- Models -----------------------------------------------------------------------
 
@@ -139,9 +138,9 @@ defmodule NxCL.E2E.ModelsTest do
 
   defp forward_fun(predict_fn), do: fn state, x -> predict_fn.(state, %{"x" => x}) end
 
-  # The parity check, and with `NXCL_MODELS_REPORT=1` the largest absolute error.
+  # The comparison, and with `NXCL_MODELS_REPORT=1` the largest absolute error.
   defp assert_model(name, fun, args, opts) do
-    assert_parity(name, fun, args, opts)
+    assert_same(fun, args, opts)
 
     if System.get_env("NXCL_MODELS_REPORT") == "1" do
       expected = apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), args)

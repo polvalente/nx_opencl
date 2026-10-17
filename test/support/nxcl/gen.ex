@@ -1,7 +1,7 @@
-defmodule NxCL.Parity.Gen do
+defmodule NxCL.TestSupport.Gen do
   @moduledoc """
-  Seeded input generators for `NxCL.Parity`. The seed is ExUnit's seed, which
-  the harness prints on failure.
+  Seeded input generators for `NxCL.TestSupport.Compare`. The seed is ExUnit's seed, which
+  `Compare` prints on failure.
   """
 
   @shapes [
@@ -25,18 +25,18 @@ defmodule NxCL.Parity.Gen do
                end),
               do: {kind, size}
 
-  @doc "Shapes the harness covers: scalar, one element, off-by-one around 64, large, ranks 2, 3, and 5. Nx 1.0 rejects zero-size dimensions, so `{0}` is absent."
+  @doc "Shapes the generators cover: scalar, one element, off-by-one around 64, large, ranks 2, 3, and 5. Nx 1.0 rejects zero-size dimensions, so `{0}` is absent."
   @spec shapes() :: [tuple()]
   def shapes, do: @shapes
 
-  @doc "Every dtype the pinned Nx accepts, as listed in the parity matrix."
+  @doc "Every dtype the pinned Nx accepts, by kind and size."
   @spec dtypes() :: [Nx.Type.t()]
   def dtypes, do: @dtypes
 
   @doc "Random tensor on `Nx.BinaryBackend`. Floats lie in [-4, 4]; integers span a small range."
   @spec random(tuple(), Nx.Type.t(), keyword()) :: Nx.Tensor.t()
   def random(shape, type, opts \\ []) do
-    key = Nx.Random.key(Keyword.get(opts, :seed, NxCL.Parity.seed()))
+    key = Nx.Random.key(Keyword.get(opts, :seed, NxCL.TestSupport.Compare.seed()))
     {tensor, _key} = do_random(key, shape, type)
     tensor
   end

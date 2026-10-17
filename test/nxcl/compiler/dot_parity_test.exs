@@ -1,6 +1,6 @@
 defmodule NxCL.DotParityTest do
   @moduledoc """
-  Differential rows for `dot` through `NxCL.Parity` against `Nx.BinaryBackend`, on
+  Differential rows for `dot` through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`, on
   every dtype Nx accepts: vector with vector, matrix with vector, vector with
   matrix, matrix with matrix, batch axes, an outer product (no contracted axis),
   and three contracted axes. Sizes 1, 7, 33, 128 and 513 appear on every axis role.
@@ -17,9 +17,9 @@ defmodule NxCL.DotParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 600_000
@@ -52,7 +52,7 @@ defmodule NxCL.DotParityTest do
   end
 
   defp exact({kind, _} = type, shape, seed) do
-    key = Nx.Random.key(NxCL.Parity.seed() + seed)
+    key = Nx.Random.key(NxCL.TestSupport.Compare.seed() + seed)
     lo = if kind == :u, do: 0, else: -2
     {t, _} = Nx.Random.randint(key, lo, 3, shape: shape, type: :s32)
     Nx.as_type(t, type)
@@ -68,7 +68,7 @@ defmodule NxCL.DotParityTest do
         type = unquote(Macro.escape(type))
 
         for n <- [1, 7, 33, 128, 513] do
-          assert_parity(:dot, &Nx.dot/2, pair(type, {n}, {n}))
+          assert_same(&Nx.dot/2, pair(type, {n}, {n}))
         end
       end
 
@@ -77,8 +77,8 @@ defmodule NxCL.DotParityTest do
         type = unquote(Macro.escape(type))
 
         for {m, k} <- [{1, 1}, {7, 33}, {513, 7}, {33, 513}, {128, 128}] do
-          assert_parity(:dot, &Nx.dot/2, pair(type, {m, k}, {k}))
-          assert_parity(:dot, &Nx.dot/2, pair(type, {k}, {k, m}))
+          assert_same(&Nx.dot/2, pair(type, {m, k}, {k}))
+          assert_same(&Nx.dot/2, pair(type, {k}, {k, m}))
         end
       end
 
@@ -98,7 +98,7 @@ defmodule NxCL.DotParityTest do
         ]
 
         for {xs, ys} <- shapes do
-          assert_parity(:dot, &Nx.dot/2, pair(type, xs, ys))
+          assert_same(&Nx.dot/2, pair(type, xs, ys))
         end
       end
 
@@ -112,18 +112,16 @@ defmodule NxCL.DotParityTest do
               {{2, 1, 33}, {2, 33, 70}},
               {{2, 70, 33}, {2, 33, 1}}
             ] do
-          assert_parity(
-            :dot,
+          assert_same(
             &Nx.dot(&1, [2], [0], &2, [1], [0]),
             pair(type, xs, ys)
           )
         end
 
         # Vectors per batch entry, and two batch axes.
-        assert_parity(:dot, &Nx.dot(&1, [1], [0], &2, [1], [0]), pair(type, {4, 33}, {4, 33}))
+        assert_same(&Nx.dot(&1, [1], [0], &2, [1], [0]), pair(type, {4, 33}, {4, 33}))
 
-        assert_parity(
-          :dot,
+        assert_same(
           &Nx.dot(&1, [3], [0, 1], &2, [2], [0, 1]),
           pair(type, {2, 3, 7, 9}, {2, 3, 9, 5})
         )
@@ -133,28 +131,25 @@ defmodule NxCL.DotParityTest do
       test "an outer product has no contracted axis" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(:dot, &Nx.dot(&1, [], &2, []), pair(type, {7}, {33}))
-        assert_parity(:dot, &Nx.dot(&1, [], [0], &2, [], [0]), pair(type, {4, 7}, {4, 33}))
+        assert_same(&Nx.dot(&1, [], &2, []), pair(type, {7}, {33}))
+        assert_same(&Nx.dot(&1, [], [0], &2, [], [0]), pair(type, {4, 7}, {4, 33}))
       end
 
       @tag requires: Map.get(@needs, type)
       test "three contracted axes, and contracted axes that are not adjacent" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(
-          :dot,
+        assert_same(
           &Nx.dot(&1, [1, 2, 3], &2, [0, 1, 2]),
           pair(type, {7, 3, 4, 5}, {3, 4, 5, 9})
         )
 
-        assert_parity(
-          :dot,
+        assert_same(
           &Nx.dot(&1, [0, 2], &2, [1, 0]),
           pair(type, {5, 7, 3}, {3, 5, 9})
         )
 
-        assert_parity(
-          :dot,
+        assert_same(
           &Nx.dot(&1, [2, 0, 1], [], &2, [0, 1, 3], []),
           pair(type, {3, 4, 5}, {5, 3, 6, 4})
         )
@@ -165,10 +160,10 @@ defmodule NxCL.DotParityTest do
   describe "dot results" do
     test "integers wrap on the width of the type" do
       for type <- [{:s, 8}, {:u, 8}, {:s, 16}, {:u, 32}, {:s, 32}, {:u, 64}, {:s, 64}] do
-        key = Nx.Random.key(NxCL.Parity.seed())
+        key = Nx.Random.key(NxCL.TestSupport.Compare.seed())
         {big, _} = Nx.Random.randint(key, -100_000, 100_000, shape: {9, 33}, type: :s64)
         {w, _} = Nx.Random.randint(key, -100_000, 100_000, shape: {33, 5}, type: :s64)
-        assert_parity(:dot, &Nx.dot/2, [Nx.as_type(big, type), Nx.as_type(w, type)])
+        assert_same(&Nx.dot/2, [Nx.as_type(big, type), Nx.as_type(w, type)])
       end
     end
 
@@ -181,19 +176,17 @@ defmodule NxCL.DotParityTest do
     test "operands of different types merge as Nx does" do
       x = Gen.random({7, 33}, {:s, 32})
       y = Gen.random({33, 5}, {:f, 32})
-      assert_parity(:dot, &Nx.dot/2, [x, y], record: false)
+      assert_same(&Nx.dot/2, [x, y])
 
-      assert_parity(:dot, &Nx.dot/2, [Nx.as_type(x, {:s, 8}), Nx.as_type(y, {:bf, 16})],
-        record: false
-      )
+      assert_same(&Nx.dot/2, [Nx.as_type(x, {:s, 8}), Nx.as_type(y, {:bf, 16})])
 
       z = Nx.as_type(Gen.random({33, 5}, {:f, 32}), {:c, 64})
-      assert_parity(:dot, &Nx.dot/2, [Nx.as_type(x, {:f, 32}), z], record: false)
+      assert_same(&Nx.dot/2, [Nx.as_type(x, {:f, 32}), z])
     end
 
     test "random floats stay within the tolerance of the reference" do
       for {xs, ys} <- [{{33, 128}, {128, 33}}, {{7, 513}, {513, 7}}] do
-        assert_parity(:dot, &Nx.dot/2, [Gen.random(xs, {:f, 32}), Gen.random(ys, {:f, 32})],
+        assert_same(&Nx.dot/2, [Gen.random(xs, {:f, 32}), Gen.random(ys, {:f, 32})],
           rtol: 1.0e-4,
           atol: 1.0e-4
         )
@@ -201,13 +194,11 @@ defmodule NxCL.DotParityTest do
     end
 
     test "a dot inside a larger function matches the reference" do
-      assert_parity(
-        :dot,
+      assert_same(
         fn x, w, b -> x |> Nx.dot(w) |> Nx.add(b) |> Nx.sigmoid() end,
         [exact({:f, 32}, {5, 70}, 1), exact({:f, 32}, {70, 3}, 2), exact({:f, 32}, {3}, 3)],
         rtol: 1.0e-4,
-        atol: 1.0e-4,
-        record: false
+        atol: 1.0e-4
       )
     end
   end

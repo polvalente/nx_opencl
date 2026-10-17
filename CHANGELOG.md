@@ -26,7 +26,7 @@ runs on the same programs and kernels.
   read back and a new upload. A run on the default queue returns before the
   device finishes, and a program with several outputs reads them with one wait.
 - Requires `{:nx, "~> 1.0"}`. Axon (`~> 0.9`) is a test dependency only.
-- Tests: Nx doctests on the backend and through the compiler, gradient
-  equivalence, three Axon models, a no-fallback tripwire, and a parity matrix
-  that every op, dtype and path must pass on a GPU and on PoCL. A workflow runs
-  the suite on PoCL.
+- Tests: Nx doctests on the backend and through the compiler, each op and dtype
+  against `Nx.BinaryBackend`, gradient equivalence, three Axon models, and a
+  check that ops run on the device and not on the CPU. A workflow runs the
+  suite on PoCL.

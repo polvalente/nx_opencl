@@ -32,7 +32,7 @@ defmodule NxCL.HostCallTest do
 
   import ExUnit.CaptureIO
   import Nx.Defn
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
   alias NxCL.Lower
   alias NxCL.TestSupport.Trace
@@ -114,7 +114,7 @@ defmodule NxCL.HostCallTest do
         Nx.sum(z) |> Nx.add(z)
       end
 
-      assert_parity(:runtime_call, fun, [x, w])
+      assert_same(fun, [x, w])
     end
 
     test "passes options and returns tuples and maps" do
@@ -139,7 +139,7 @@ defmodule NxCL.HostCallTest do
         {Nx.add(a, 1), Nx.multiply(b, 2), m}
       end
 
-      assert_parity(:runtime_call, fun, [x])
+      assert_same(fun, [x])
     end
 
     test "a wrong shape raises and names both templates" do
@@ -169,7 +169,7 @@ defmodule NxCL.HostCallTest do
       x = Nx.tensor([1.0, 2.0])
       compiled = run_jit(fun)
 
-      assert_parity(:io_call, fun, [x])
+      assert_same(fun, [x])
       flush()
 
       assert Nx.to_flat_list(compiled.(x)) == [4.0, 6.0]
@@ -186,7 +186,7 @@ defmodule NxCL.HostCallTest do
         assert Nx.to_flat_list(a) == Nx.to_flat_list(e)
         assert [{^label, _}] = a_msgs
         assert a_msgs == e_msgs
-        assert_parity(:io_call, &branches/2, [Nx.tensor(p), x], record: false)
+        assert_same(&branches/2, [Nx.tensor(p), x])
         flush()
       end
     end

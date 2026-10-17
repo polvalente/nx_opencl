@@ -1,7 +1,7 @@
 defmodule NxCL.ElementwiseParityTest do
   @moduledoc """
   Differential rows for every elementwise op: each op on each dtype Nx accepts
-  for it, through `NxCL.Parity` against `Nx.BinaryBackend`. A second group
+  for it, through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`. A second group
   holds one named row per semantic rule (NaN, overflow, zero divisor, shift
   width, integer division and remainder, casts). Where `BinaryBackend` raises
   or is wrong, the row states the expected values itself.
@@ -14,9 +14,10 @@ defmodule NxCL.ElementwiseParityTest do
   use ExUnit.Case, async: false
 
   import Bitwise
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
+  import NxCL.TestSupport.Device, only: [capability?: 1]
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
 
@@ -110,7 +111,7 @@ defmodule NxCL.ElementwiseParityTest do
         op = unquote(op)
         type = unquote(Macro.escape(type))
 
-        assert_parity(op, fn x -> apply(Nx, op, [x]) end, [op_data(op, type)], tol(op, type))
+        assert_same(fn x -> apply(Nx, op, [x]) end, [op_data(op, type)], tol(op, type))
       end
     end
 
@@ -122,7 +123,7 @@ defmodule NxCL.ElementwiseParityTest do
       test "erf_inv #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
         x = Nx.divide(Gen.random({65}, type), Nx.tensor(4.0, type: type))
-        assert_parity(:erf_inv, &Nx.erf_inv/1, [x], tol(:erf_inv, type))
+        assert_same(&Nx.erf_inv/1, [x], tol(:erf_inv, type))
       end
     end
 
@@ -138,7 +139,7 @@ defmodule NxCL.ElementwiseParityTest do
     for type <- @ints do
       test "erf_inv #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
-        assert_parity(:erf_inv, &Nx.erf_inv/1, [Nx.tensor([0, 0], type: type)])
+        assert_same(&Nx.erf_inv/1, [Nx.tensor([0, 0], type: type)])
       end
     end
   end
@@ -163,7 +164,7 @@ defmodule NxCL.ElementwiseParityTest do
             do: Gen.random({65}, type),
             else: data(type)
 
-        assert_parity(op, fn x -> apply(Nx, op, [x]) end, [x], tol(op, type))
+        assert_same(fn x -> apply(Nx, op, [x]) end, [x], tol(op, type))
       end
     end
 
@@ -172,7 +173,7 @@ defmodule NxCL.ElementwiseParityTest do
         op = unquote(op)
         type = unquote(Macro.escape(type))
 
-        assert_parity(op, fn x -> apply(Nx, op, [x]) end, [
+        assert_same(fn x -> apply(Nx, op, [x]) end, [
           Nx.concatenate([data(type), wide(type)])
         ])
       end
@@ -185,7 +186,7 @@ defmodule NxCL.ElementwiseParityTest do
       test "#{op} #{Nx.Type.to_string(type)}" do
         op = unquote(op)
         type = unquote(Macro.escape(type))
-        assert_parity(op, fn x -> apply(Nx, op, [x]) end, [data(type)])
+        assert_same(fn x -> apply(Nx, op, [x]) end, [data(type)])
       end
     end
 
@@ -195,7 +196,7 @@ defmodule NxCL.ElementwiseParityTest do
 
       test "logical_not #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
-        assert_parity(:block_logical_not, &Nx.logical_not/1, [data(type)])
+        assert_same(&Nx.logical_not/1, [data(type)])
       end
     end
   end
@@ -218,7 +219,7 @@ defmodule NxCL.ElementwiseParityTest do
             do: Nx.concatenate([data(type), Nx.reverse(wide(type))]),
             else: Nx.reverse(data(type))
 
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b], tol(op, type))
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b], tol(op, type))
       end
     end
 
@@ -232,7 +233,7 @@ defmodule NxCL.ElementwiseParityTest do
         a = data(type)
         # Integer zero divisors give inf in the float result; both sides agree.
         b = if kind in [:s, :u], do: Nx.reverse(a), else: Nx.reverse(a)
-        assert_parity(:divide, &Nx.divide/2, [a, b], tol(:divide, type))
+        assert_same(&Nx.divide/2, [a, b], tol(:divide, type))
       end
     end
 
@@ -240,7 +241,7 @@ defmodule NxCL.ElementwiseParityTest do
       test "atan2 #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
         a = fn_data(type)
-        assert_parity(:atan2, &Nx.atan2/2, [a, Nx.reverse(a)])
+        assert_same(&Nx.atan2/2, [a, Nx.reverse(a)])
       end
     end
 
@@ -252,7 +253,7 @@ defmodule NxCL.ElementwiseParityTest do
         type = unquote(Macro.escape(type))
         a = Gen.random({65}, type)
         b = Nx.reverse(Gen.random({65}, type))
-        assert_parity(:atan2, &Nx.atan2/2, [a, b], tol(:atan2, type))
+        assert_same(&Nx.atan2/2, [a, b], tol(:atan2, type))
       end
     end
 
@@ -269,7 +270,7 @@ defmodule NxCL.ElementwiseParityTest do
         type = unquote(Macro.escape(type))
         a = Gen.random({65}, type)
         b = Nx.reverse(nonzero(Gen.random({65}, type)))
-        assert_parity(:remainder, &Nx.remainder/2, [a, b], tol(:remainder, type))
+        assert_same(&Nx.remainder/2, [a, b], tol(:remainder, type))
       end
 
       if type == {:f, 64}, do: @tag(requires: :fp64)
@@ -280,7 +281,7 @@ defmodule NxCL.ElementwiseParityTest do
         type = unquote(Macro.escape(type))
         a = Gen.random({65}, type)
         b = Nx.reverse(Gen.random({65}, type))
-        assert_parity(:pow, &Nx.pow/2, [a, b], tol(:pow, type))
+        assert_same(&Nx.pow/2, [a, b], tol(:pow, type))
       end
     end
 
@@ -290,14 +291,14 @@ defmodule NxCL.ElementwiseParityTest do
         type = unquote(Macro.escape(type))
         a = Nx.concatenate([data(type), wide(type)])
         b = Nx.concatenate([nonzero(Nx.reverse(data(type))), nonzero(Nx.reverse(wide(type)))])
-        assert_parity(:quotient, &Nx.quotient/2, [a, b])
+        assert_same(&Nx.quotient/2, [a, b])
       end
 
       test "remainder #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
         a = Nx.concatenate([data(type), wide(type)])
         b = Nx.concatenate([nonzero(Nx.reverse(data(type))), nonzero(Nx.reverse(wide(type)))])
-        assert_parity(:remainder, &Nx.remainder/2, [a, b])
+        assert_same(&Nx.remainder/2, [a, b])
       end
 
       test "pow #{Nx.Type.to_string(type)}" do
@@ -307,7 +308,7 @@ defmodule NxCL.ElementwiseParityTest do
         exps =
           Nx.bitwise_and(Nx.concatenate([data(type), wide(type)]), Nx.tensor(63, type: type))
 
-        assert_parity(:pow, &Nx.pow/2, [a, Nx.reverse(exps)])
+        assert_same(&Nx.pow/2, [a, Nx.reverse(exps)])
       end
 
       for op <- ~w(bitwise_and bitwise_or bitwise_xor)a do
@@ -316,7 +317,7 @@ defmodule NxCL.ElementwiseParityTest do
           type = unquote(Macro.escape(type))
           a = Nx.concatenate([data(type), wide(type)])
           b = Nx.reverse(a)
-          assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
+          assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
         end
       end
 
@@ -331,7 +332,7 @@ defmodule NxCL.ElementwiseParityTest do
           counts =
             Nx.remainder(Nx.iota({n}, type: :s32), 2 * bits(type) + 1) |> Nx.as_type(type)
 
-          assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, counts])
+          assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, counts])
         end
       end
     end
@@ -348,8 +349,8 @@ defmodule NxCL.ElementwiseParityTest do
         a = data(type)
         # Same values, shifted by one place: equal and unequal pairs both occur.
         b = Nx.concatenate([a[1..-1//1], a[0..0]])
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, a])
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, a])
       end
     end
   end
@@ -385,7 +386,7 @@ defmodule NxCL.ElementwiseParityTest do
         a = Gen.random({65}, ta)
         # Positive exponents keep `pow` away from the integer cases that raise.
         b = right_operand(op, tb)
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
       end
     end
 
@@ -397,7 +398,7 @@ defmodule NxCL.ElementwiseParityTest do
         tb = unquote(Macro.escape(tb))
         a = Gen.random({65}, ta)
         b = nonzero(Gen.random({65}, tb))
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
       end
     end
   end
@@ -407,7 +408,7 @@ defmodule NxCL.ElementwiseParityTest do
   describe "scalar constants" do
     # A scalar literal reaches the kernel as a scalar argument, not a buffer.
     test "a constant of another type: u8 plus 300 wraps" do
-      assert_parity(:add, fn x -> Nx.add(x, 300) end, [Nx.tensor([1, 2, 255], type: :u8)])
+      assert_same(fn x -> Nx.add(x, 300) end, [Nx.tensor([1, 2, 255], type: :u8)])
     end
 
     for {op, c} <-
@@ -425,40 +426,40 @@ defmodule NxCL.ElementwiseParityTest do
       test "#{op} with a float constant" do
         op = unquote(op)
         c = unquote(c) * 1.0
-        assert_parity(op, fn x -> apply(Nx, op, [x, c]) end, [Gen.random({65}, {:f, 32})])
-        assert_parity(op, fn x -> apply(Nx, op, [c, x]) end, [Gen.random({65}, {:f, 32})])
+        assert_same(fn x -> apply(Nx, op, [x, c]) end, [Gen.random({65}, {:f, 32})])
+        assert_same(fn x -> apply(Nx, op, [c, x]) end, [Gen.random({65}, {:f, 32})])
       end
     end
 
     test "NaN and infinity constants" do
       x = Gen.random({65}, {:f, 32})
-      assert_parity(:add, fn x -> Nx.add(x, :nan) end, [x])
-      assert_parity(:max, fn x -> Nx.max(x, :infinity) end, [x])
-      assert_parity(:min, fn x -> Nx.min(x, :neg_infinity) end, [x])
+      assert_same(fn x -> Nx.add(x, :nan) end, [x])
+      assert_same(fn x -> Nx.max(x, :infinity) end, [x])
+      assert_same(fn x -> Nx.min(x, :neg_infinity) end, [x])
     end
 
     for type <- @ints do
       test "integer constants on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
         x = Nx.concatenate([data(type), wide(type)])
-        assert_parity(:add, fn x -> Nx.add(x, 7) end, [x])
-        assert_parity(:multiply, fn x -> Nx.multiply(x, 3) end, [x])
-        assert_parity(:bitwise_and, fn x -> Nx.bitwise_and(x, 5) end, [x])
-        assert_parity(:left_shift, fn x -> Nx.left_shift(x, 2) end, [x])
-        assert_parity(:less, fn x -> Nx.less(x, 3) end, [x])
+        assert_same(fn x -> Nx.add(x, 7) end, [x])
+        assert_same(fn x -> Nx.multiply(x, 3) end, [x])
+        assert_same(fn x -> Nx.bitwise_and(x, 5) end, [x])
+        assert_same(fn x -> Nx.left_shift(x, 2) end, [x])
+        assert_same(fn x -> Nx.less(x, 3) end, [x])
       end
     end
 
     test "select and clip with scalar constants" do
       x = data({:f, 32})
-      assert_parity(:select, fn x -> Nx.select(Nx.greater(x, 0), x, 0.5) end, [x])
-      assert_parity(:select, fn x -> Nx.select(Nx.greater(x, 0), 1, x) end, [x])
-      assert_parity(:clip, fn x -> Nx.clip(x, -1.0, 1.0) end, [Gen.random({65}, {:f, 32})])
-      assert_parity(:clip, fn x -> Nx.clip(x, 2, 5) end, [Nx.iota({10}, type: :s32)])
+      assert_same(fn x -> Nx.select(Nx.greater(x, 0), x, 0.5) end, [x])
+      assert_same(fn x -> Nx.select(Nx.greater(x, 0), 1, x) end, [x])
+      assert_same(fn x -> Nx.clip(x, -1.0, 1.0) end, [Gen.random({65}, {:f, 32})])
+      assert_same(fn x -> Nx.clip(x, 2, 5) end, [Nx.iota({10}, type: :s32)])
     end
 
     test "a scalar tensor mixed with a vector gets an explicit broadcast" do
-      assert_parity(:add, fn x, s -> Nx.add(x, s) end, [Nx.tensor([1.0, 2.0]), Nx.tensor(1.0)])
+      assert_same(fn x, s -> Nx.add(x, s) end, [Nx.tensor([1.0, 2.0]), Nx.tensor(1.0)])
     end
   end
 
@@ -478,7 +479,7 @@ defmodule NxCL.ElementwiseParityTest do
         a = data(type)
         b = Nx.reverse(a)
         pred = Nx.greater(Nx.iota(Nx.shape(a), type: :s32), 30)
-        assert_parity(:select, &Nx.select/3, [pred, a, b])
+        assert_same(&Nx.select/3, [pred, a, b])
       end
 
       if type == {:f, 64}, do: @tag(requires: :fp64)
@@ -489,7 +490,7 @@ defmodule NxCL.ElementwiseParityTest do
         type = unquote(Macro.escape(type))
         {kind, _} = type
         x = if kind in [:f, :bf], do: Gen.random({65}, type), else: data(type)
-        assert_parity(:clip, fn x -> Nx.clip(x, 1, 5) end, [x])
+        assert_same(fn x -> Nx.clip(x, 1, 5) end, [x])
       end
     end
 
@@ -497,7 +498,7 @@ defmodule NxCL.ElementwiseParityTest do
       p = Nx.tensor([0.0, 1.5, :nan, -0.0], type: :f32)
       a = Nx.tensor([1, 2, 3, 4], type: :s32)
       b = Nx.tensor([10.5, 20.5, 30.5, 40.5], type: :f32)
-      assert_parity(:select, &Nx.select/3, [p, a, b])
+      assert_same(&Nx.select/3, [p, a, b])
     end
   end
 
@@ -524,7 +525,7 @@ defmodule NxCL.ElementwiseParityTest do
               ])
           end
 
-        assert_parity(:as_type, fn x -> Nx.as_type(x, to) end, [x])
+        assert_same(fn x -> Nx.as_type(x, to) end, [x])
       end
     end
 
@@ -547,8 +548,8 @@ defmodule NxCL.ElementwiseParityTest do
         b = unquote(Macro.escape(b))
         {kind, _} = a
         x = if kind in [:f, :bf], do: Gen.random({65}, a), else: data(a)
-        assert_parity(:bitcast, fn x -> Nx.bitcast(x, b) end, [x])
-        assert_parity(:bitcast, fn x -> x |> Nx.bitcast(b) |> Nx.bitcast(a) end, [x])
+        assert_same(fn x -> Nx.bitcast(x, b) end, [x])
+        assert_same(fn x -> x |> Nx.bitcast(b) |> Nx.bitcast(a) end, [x])
       end
     end
   end
@@ -563,12 +564,12 @@ defmodule NxCL.ElementwiseParityTest do
       test "parameter, tensor, constant, reshape and squeeze keep #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
         x = data(type)
-        assert_parity(:parameter, fn x -> x end, [x])
+        assert_same(fn x -> x end, [x])
         literal = Nx.reverse(x)
-        assert_parity(:tensor, fn x -> Nx.add(x, literal) end, [x])
-        assert_parity(:constant, fn x -> Nx.add(x, Nx.tensor(1, type: type)) end, [x])
-        assert_parity(:reshape, fn x -> Nx.reshape(x, {Nx.size(x), 1}) end, [x])
-        assert_parity(:squeeze, fn x -> x |> Nx.reshape({1, Nx.size(x)}) |> Nx.squeeze() end, [x])
+        assert_same(fn x -> Nx.add(x, literal) end, [x])
+        assert_same(fn x -> Nx.add(x, Nx.tensor(1, type: type)) end, [x])
+        assert_same(fn x -> Nx.reshape(x, {Nx.size(x), 1}) end, [x])
+        assert_same(fn x -> x |> Nx.reshape({1, Nx.size(x)}) |> Nx.squeeze() end, [x])
       end
     end
 
@@ -597,8 +598,8 @@ defmodule NxCL.ElementwiseParityTest do
     test "max and min return NaN if either side is NaN" do
       a = Nx.tensor([:nan, 1.0, :nan, 2.0])
       b = Nx.tensor([1.0, :nan, :nan, 3.0])
-      assert_parity(:max, &Nx.max/2, [a, b])
-      assert_parity(:min, &Nx.min/2, [a, b])
+      assert_same(&Nx.max/2, [a, b])
+      assert_same(&Nx.min/2, [a, b])
     end
 
     test "comparisons with NaN are false, not_equal is true" do
@@ -606,35 +607,35 @@ defmodule NxCL.ElementwiseParityTest do
       b = Nx.tensor([1.0, :nan, :nan, :infinity])
 
       for op <- ~w(equal not_equal greater greater_equal less less_equal)a do
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
       end
     end
 
     test "NaN counts as true in the logical ops and select" do
       a = Nx.tensor([:nan, 0.0, -0.0, 1.0])
       b = Nx.tensor([1.0, :nan, 0.0, 0.0])
-      assert_parity(:logical_and, &Nx.logical_and/2, [a, b])
-      assert_parity(:logical_or, &Nx.logical_or/2, [a, b])
-      assert_parity(:logical_xor, &Nx.logical_xor/2, [a, b])
-      assert_parity(:select, &Nx.select/3, [a, Nx.tensor([1, 2, 3, 4]), Nx.tensor([5, 6, 7, 8])])
+      assert_same(&Nx.logical_and/2, [a, b])
+      assert_same(&Nx.logical_or/2, [a, b])
+      assert_same(&Nx.logical_xor/2, [a, b])
+      assert_same(&Nx.select/3, [a, Nx.tensor([1, 2, 3, 4]), Nx.tensor([5, 6, 7, 8])])
     end
 
     test "is_nan and is_infinity find NaN and the infinities" do
       x = Nx.tensor([:nan, :infinity, :neg_infinity, 1.0, 0.0])
-      assert_parity(:is_nan, &Nx.is_nan/1, [x])
-      assert_parity(:is_infinity, &Nx.is_infinity/1, [x])
+      assert_same(&Nx.is_nan/1, [x])
+      assert_same(&Nx.is_infinity/1, [x])
     end
 
     test "clip turns NaN into the lower bound, as BinaryBackend does" do
       x = Nx.tensor([:nan, 5.0, -5.0, :infinity, :neg_infinity, 0.5])
-      assert_parity(:clip, fn x -> Nx.clip(x, -1.0, 1.0) end, [x])
+      assert_same(fn x -> Nx.clip(x, -1.0, 1.0) end, [x])
     end
 
     test "NaN input to a float function gives NaN" do
       x = Nx.tensor([:nan, 1.0])
 
       for op <- ~w(exp log sin tanh sqrt sigmoid)a do
-        assert_parity(op, fn x -> apply(Nx, op, [x]) end, [x])
+        assert_same(fn x -> apply(Nx, op, [x]) end, [x])
       end
     end
 
@@ -697,8 +698,8 @@ defmodule NxCL.ElementwiseParityTest do
 
     test "NaN cast to an integer gives 0" do
       x = Nx.tensor([:nan, 1.5])
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :s32) end, [x])
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :u8) end, [x])
+      assert_same(fn x -> Nx.as_type(x, :s32) end, [x])
+      assert_same(fn x -> Nx.as_type(x, :u8) end, [x])
     end
   end
 
@@ -706,8 +707,8 @@ defmodule NxCL.ElementwiseParityTest do
     test "u8 add and multiply wrap" do
       a = Nx.tensor([200, 255, 16, 0], type: :u8)
       b = Nx.tensor([100, 1, 17, 255], type: :u8)
-      assert_parity(:add, &Nx.add/2, [a, b])
-      assert_parity(:multiply, &Nx.multiply/2, [a, b])
+      assert_same(&Nx.add/2, [a, b])
+      assert_same(&Nx.multiply/2, [a, b])
       assert_list(run(&Nx.add/2, [a, b]), [44, 0, 33, 255])
 
       assert_list(
@@ -722,40 +723,40 @@ defmodule NxCL.ElementwiseParityTest do
         min = Nx.to_number(Nx.Constants.min_finite(type))
         a = Nx.tensor([max, min, max, min, 3], type: type)
         b = Nx.tensor([1, -1, max, min, -4], type: type)
-        assert_parity(:add, &Nx.add/2, [a, b])
-        assert_parity(:subtract, &Nx.subtract/2, [a, b])
-        assert_parity(:multiply, &Nx.multiply/2, [a, b])
-        assert_parity(:negate, &Nx.negate/1, [a])
-        assert_parity(:abs, &Nx.abs/1, [a])
+        assert_same(&Nx.add/2, [a, b])
+        assert_same(&Nx.subtract/2, [a, b])
+        assert_same(&Nx.multiply/2, [a, b])
+        assert_same(&Nx.negate/1, [a])
+        assert_same(&Nx.abs/1, [a])
       end
     end
 
     test "u16 multiply stays correct above the signed 32-bit range" do
       a = Nx.tensor([65535, 65535, 40000], type: :u16)
-      assert_parity(:multiply, &Nx.multiply/2, [a, a])
+      assert_same(&Nx.multiply/2, [a, a])
     end
 
     test "float overflow gives infinity" do
       a = Nx.tensor([3.0e38, -3.0e38, 1.0e30], type: :f32)
-      assert_parity(:multiply, &Nx.multiply/2, [a, a])
-      assert_parity(:add, &Nx.add/2, [a, a])
-      assert_parity(:exp, &Nx.exp/1, [Nx.tensor([100.0, -200.0, 88.0])])
+      assert_same(&Nx.multiply/2, [a, a])
+      assert_same(&Nx.add/2, [a, a])
+      assert_same(&Nx.exp/1, [Nx.tensor([100.0, -200.0, 88.0])])
     end
 
     test "casts: float out of range wraps, infinity saturates, int narrows by wrapping" do
       f = Nx.tensor([1.0e10, -1.0e10, 3.0e9, 300.7, -1.5, 1.0e30, :infinity, :neg_infinity])
 
       for to <- [:s8, :u8, :s16, :u16, :s32, :u32, :s64, :u64] do
-        assert_parity(:as_type, fn x -> Nx.as_type(x, to) end, [f])
+        assert_same(fn x -> Nx.as_type(x, to) end, [f])
       end
 
       wide = Nx.tensor([1.0e19, -1.0e19, 1.0e20, 2.0e19], type: :f32)
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :u64) end, [wide])
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :s64) end, [wide])
+      assert_same(fn x -> Nx.as_type(x, :u64) end, [wide])
+      assert_same(fn x -> Nx.as_type(x, :s64) end, [wide])
 
       for from <- @ints, to <- @ints do
         x = Nx.concatenate([data(from), wide(from)])
-        assert_parity(:as_type, fn x -> Nx.as_type(x, to) end, [x])
+        assert_same(fn x -> Nx.as_type(x, to) end, [x])
       end
     end
 
@@ -778,14 +779,14 @@ defmodule NxCL.ElementwiseParityTest do
     test "casts to f16 round to nearest even and overflow to infinity" do
       x = Nx.tensor(@half_cast_values, type: :f32)
 
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :f16) end, [x])
-      assert_parity(:as_type, fn x -> x |> Nx.as_type(:f16) |> Nx.as_type(:f32) end, [x])
+      assert_same(fn x -> Nx.as_type(x, :f16) end, [x])
+      assert_same(fn x -> x |> Nx.as_type(:f16) |> Nx.as_type(:f32) end, [x])
     end
 
     test "casts to bf16 round to nearest even and overflow to infinity" do
       x = Nx.tensor(@half_cast_values, type: :f32)
 
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :bf16) end, [x])
+      assert_same(fn x -> Nx.as_type(x, :bf16) end, [x])
     end
 
     test "casts to bf16 round to nearest even; BinaryBackend truncates, so the row states the values" do
@@ -809,16 +810,16 @@ defmodule NxCL.ElementwiseParityTest do
 
       f = Nx.bitcast(x, :f16)
       finite = Nx.select(Nx.is_nan(f), Nx.tensor(0.0, type: :f16), f)
-      assert_parity(:as_type, fn x -> Nx.as_type(x, :f32) end, [finite])
+      assert_same(fn x -> Nx.as_type(x, :f32) end, [finite])
     end
 
     test "integer pow wraps" do
       a = Nx.tensor([3, 2, -3, 7], type: :s32)
       b = Nx.tensor([40, 31, 21, 20], type: :s32)
-      assert_parity(:pow, &Nx.pow/2, [a, b])
+      assert_same(&Nx.pow/2, [a, b])
       a8 = Nx.tensor([3, 2, 255, 7], type: :u8)
       b8 = Nx.tensor([5, 9, 3, 4], type: :u8)
-      assert_parity(:pow, &Nx.pow/2, [a8, b8])
+      assert_same(&Nx.pow/2, [a8, b8])
     end
   end
 
@@ -826,14 +827,14 @@ defmodule NxCL.ElementwiseParityTest do
     test "float divide by zero gives inf and NaN" do
       a = Nx.tensor([1.0, -1.0, 0.0, :nan])
       b = Nx.tensor([0.0, 0.0, 0.0, 0.0])
-      assert_parity(:divide, &Nx.divide/2, [a, b])
+      assert_same(&Nx.divide/2, [a, b])
       assert_list(run(&Nx.divide/2, [a, b]), [:infinity, :neg_infinity, :nan, :nan])
     end
 
     test "integer divide by zero goes through float, so it gives inf" do
       a = Nx.tensor([1, -1, 0, 7], type: :s32)
       b = Nx.tensor([0, 0, 0, 2], type: :s32)
-      assert_parity(:divide, &Nx.divide/2, [a, b])
+      assert_same(&Nx.divide/2, [a, b])
     end
 
     # `BinaryBackend` raises on these, so the rows state the device's rule:
@@ -875,8 +876,8 @@ defmodule NxCL.ElementwiseParityTest do
     test "quotient truncates toward zero; remainder takes the sign of the dividend" do
       a = Nx.tensor([7, -7, 7, -7, 6, -6, 0], type: :s32)
       b = Nx.tensor([2, 2, -2, -2, 3, 3, 5], type: :s32)
-      assert_parity(:quotient, &Nx.quotient/2, [a, b])
-      assert_parity(:remainder, &Nx.remainder/2, [a, b])
+      assert_same(&Nx.quotient/2, [a, b])
+      assert_same(&Nx.remainder/2, [a, b])
       assert_list(run(&Nx.quotient/2, [a, b]), [3, -3, -3, 3, 2, -2, 0])
       assert_list(run(&Nx.remainder/2, [a, b]), [1, -1, 1, -1, 0, 0, 0])
     end
@@ -896,15 +897,15 @@ defmodule NxCL.ElementwiseParityTest do
         max = Nx.to_number(Nx.Constants.max_finite(type))
         a = Nx.tensor([max, max, 1], type: type)
         b = Nx.tensor([2, max, max], type: type)
-        assert_parity(:quotient, &Nx.quotient/2, [a, b])
-        assert_parity(:remainder, &Nx.remainder/2, [a, b])
+        assert_same(&Nx.quotient/2, [a, b])
+        assert_same(&Nx.remainder/2, [a, b])
       end
     end
 
     test "float remainder takes the sign of the dividend" do
       a = Nx.tensor([5.5, -5.5, 5.5, -5.5])
       b = Nx.tensor([2.0, 2.0, -2.0, -2.0])
-      assert_parity(:remainder, &Nx.remainder/2, [a, b])
+      assert_same(&Nx.remainder/2, [a, b])
     end
   end
 
@@ -918,8 +919,8 @@ defmodule NxCL.ElementwiseParityTest do
 
         for v <- Enum.uniq([max, min]) do
           a = Nx.broadcast(Nx.tensor(v, type: type), {6})
-          assert_parity(:left_shift, &Nx.left_shift/2, [a, counts])
-          assert_parity(:right_shift, &Nx.right_shift/2, [a, counts])
+          assert_same(&Nx.left_shift/2, [a, counts])
+          assert_same(&Nx.right_shift/2, [a, counts])
         end
       end
     end
@@ -927,14 +928,14 @@ defmodule NxCL.ElementwiseParityTest do
     test "signed right shift is arithmetic" do
       a = Nx.tensor([-128, -1, 127, -64, 64], type: :s8)
       b = Nx.tensor([2, 1, 3, 6, 6], type: :s8)
-      assert_parity(:right_shift, &Nx.right_shift/2, [a, b])
+      assert_same(&Nx.right_shift/2, [a, b])
       assert_list(run(&Nx.right_shift/2, [a, b]), [-32, -1, 15, -1, 1])
     end
 
     test "left shift keeps only the bits that fit" do
       a = Nx.tensor([-1, 100, 1, 255], type: :s16)
       b = Nx.tensor([15, 1, 15, 12], type: :s16)
-      assert_parity(:left_shift, &Nx.left_shift/2, [a, b])
+      assert_same(&Nx.left_shift/2, [a, b])
     end
   end
 
@@ -942,39 +943,39 @@ defmodule NxCL.ElementwiseParityTest do
     test "float pow: negative base with a fraction is NaN, 0^0 is 1" do
       a = Nx.tensor([-8.0, 0.0, 2.0, -2.0, 0.0, 4.0])
       b = Nx.tensor([0.3333, 0.0, 0.5, 3.0, 2.0, -1.0])
-      assert_parity(:pow, &Nx.pow/2, [a, b])
+      assert_same(&Nx.pow/2, [a, b])
     end
 
     test "integer pow by repeated squaring" do
       for type <- @ints do
         a = Nx.tensor([0, 1, 2, 3, 5, 7], type: type)
         b = Nx.tensor([0, 5, 7, 4, 3, 2], type: type)
-        assert_parity(:pow, &Nx.pow/2, [a, b])
+        assert_same(&Nx.pow/2, [a, b])
       end
     end
 
     test "round is half away from zero" do
       x = Nx.tensor([2.5, -2.5, 0.5, -0.5, 1.5, -1.5, 0.4999, 3.0])
-      assert_parity(:round, &Nx.round/1, [x])
+      assert_same(&Nx.round/1, [x])
       assert_list(run(&Nx.round/1, [x]), [3.0, -3.0, 1.0, -1.0, 2.0, -2.0, 0.0, 3.0])
     end
 
     test "ceil, floor and round leave integers alone" do
       x = Nx.tensor([-3, 0, 4], type: :s16)
-      for op <- ~w(ceil floor round)a, do: assert_parity(op, fn x -> apply(Nx, op, [x]) end, [x])
+      for op <- ~w(ceil floor round)a, do: assert_same(fn x -> apply(Nx, op, [x]) end, [x])
     end
   end
 
   describe "rule: special functions" do
     test "sigmoid stays finite for large negative input" do
       x = Nx.tensor([-100.0, -1000.0, 100.0, 0.0, -20.0, 20.0])
-      assert_parity(:sigmoid, &Nx.sigmoid/1, [x])
+      assert_same(&Nx.sigmoid/1, [x])
       assert Enum.all?(Nx.to_flat_list(run(&Nx.sigmoid/1, [x])), &is_float/1)
     end
 
     test "erf_inv tails" do
       x = Nx.tensor([0.999999, -0.999999, 0.9999, 0.5, -0.5, 0.0, 1.0e-8, 0.99999994])
-      assert_parity(:erf_inv, &Nx.erf_inv/1, [x])
+      assert_same(&Nx.erf_inv/1, [x])
     end
 
     test "erf_inv at +-1 is infinite and outside (-1, 1) is NaN" do
@@ -984,7 +985,7 @@ defmodule NxCL.ElementwiseParityTest do
 
     test "erf, erfc and cbrt on negatives and large values" do
       x = Nx.tensor([-8.0, -0.5, 0.0, 0.5, 3.0, 6.0, 10.0])
-      for op <- ~w(erf erfc cbrt)a, do: assert_parity(op, fn x -> apply(Nx, op, [x]) end, [x])
+      for op <- ~w(erf erfc cbrt)a, do: assert_same(fn x -> apply(Nx, op, [x]) end, [x])
     end
 
     test "count_leading_zeros and population_count at every width" do
@@ -992,8 +993,8 @@ defmodule NxCL.ElementwiseParityTest do
         max = Nx.to_number(Nx.Constants.max_finite(type))
         min = Nx.to_number(Nx.Constants.min_finite(type))
         x = Nx.tensor([0, 1, 2, max, min, 16, 3], type: type)
-        assert_parity(:count_leading_zeros, &Nx.count_leading_zeros/1, [x])
-        assert_parity(:population_count, &Nx.population_count/1, [x])
+        assert_same(&Nx.count_leading_zeros/1, [x])
+        assert_same(&Nx.population_count/1, [x])
       end
 
       assert_list(run(&Nx.count_leading_zeros/1, [Nx.tensor([0, 1, -1, 16], type: :s8)]), [

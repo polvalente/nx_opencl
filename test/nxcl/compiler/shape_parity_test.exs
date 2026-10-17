@@ -3,7 +3,7 @@ defmodule NxCL.ShapeParityTest do
   Differential rows for the shape and data-movement ops: `broadcast`,
   `transpose`, `reverse`, `slice`, `put_slice`, `pad`, `concatenate`, `stack`,
   `iota`, `eye`, a constant of a shape, `metadata` and `elem`, on every dtype
-  through `NxCL.Parity` against `Nx.BinaryBackend`. A second group states the
+  through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`. A second group states the
   expected values itself: dynamic starts below 0 and past the end, and rank 0.
 
   `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry
@@ -15,9 +15,9 @@ defmodule NxCL.ShapeParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
 
@@ -53,58 +53,55 @@ defmodule NxCL.ShapeParityTest do
       test "broadcast, transpose and reverse on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(:broadcast, &Nx.broadcast(&1, {2, 3, 4}, axes: [1, 2]), [data(type, {3, 1})])
+        assert_same(&Nx.broadcast(&1, {2, 3, 4}, axes: [1, 2]), [data(type, {3, 1})])
 
-        assert_parity(:broadcast, &Nx.broadcast(&1, {2, 3, 4}, axes: [0, 1]), [data(type, {2, 3})])
+        assert_same(&Nx.broadcast(&1, {2, 3, 4}, axes: [0, 1]), [data(type, {2, 3})])
 
-        assert_parity(:broadcast, &Nx.broadcast(&1, {5, 7}), [data(type, {})])
-        assert_parity(:broadcast, &Nx.broadcast(&1, {4097}, axes: [0]), [data(type, {1})])
-        assert_parity(:broadcast, &Nx.broadcast(&1, {3, 65}), [data(type, {65})])
+        assert_same(&Nx.broadcast(&1, {5, 7}), [data(type, {})])
+        assert_same(&Nx.broadcast(&1, {4097}, axes: [0]), [data(type, {1})])
+        assert_same(&Nx.broadcast(&1, {3, 65}), [data(type, {65})])
 
-        assert_parity(:transpose, &Nx.transpose/1, [data(type, {3, 5})])
-        assert_parity(:transpose, &Nx.transpose(&1, axes: [2, 0, 1]), [data(type, {2, 3, 4})])
+        assert_same(&Nx.transpose/1, [data(type, {3, 5})])
+        assert_same(&Nx.transpose(&1, axes: [2, 0, 1]), [data(type, {2, 3, 4})])
 
-        assert_parity(:transpose, &Nx.transpose(&1, axes: [4, 2, 0, 1, 3]), [
+        assert_same(&Nx.transpose(&1, axes: [4, 2, 0, 1, 3]), [
           data(type, {2, 1, 3, 1, 2})
         ])
 
-        assert_parity(:transpose, &Nx.transpose/1, [data(type, {})])
+        assert_same(&Nx.transpose/1, [data(type, {})])
 
-        assert_parity(:reverse, &Nx.reverse/1, [data(type, {4097})])
-        assert_parity(:reverse, &Nx.reverse(&1, axes: [0, 2]), [data(type, {2, 3, 4})])
-        assert_parity(:reverse, &Nx.reverse(&1, axes: [1]), [data(type, {3, 5})])
-        assert_parity(:reverse, &Nx.reverse/1, [data(type, {})])
+        assert_same(&Nx.reverse/1, [data(type, {4097})])
+        assert_same(&Nx.reverse(&1, axes: [0, 2]), [data(type, {2, 3, 4})])
+        assert_same(&Nx.reverse(&1, axes: [1]), [data(type, {3, 5})])
+        assert_same(&Nx.reverse/1, [data(type, {})])
       end
 
       @tag requires: Map.get(@needs, type)
       test "slice and put_slice on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(:slice, &Nx.slice(&1, [1, 0, 1], [1, 3, 2]), [data(type, {2, 3, 4})])
+        assert_same(&Nx.slice(&1, [1, 0, 1], [1, 3, 2]), [data(type, {2, 3, 4})])
 
-        assert_parity(:slice, &Nx.slice(&1, [0, 1, 0], [2, 2, 4], strides: [1, 1, 3]), [
+        assert_same(&Nx.slice(&1, [0, 1, 0], [2, 2, 4], strides: [1, 1, 3]), [
           data(type, {2, 3, 4})
         ])
 
-        assert_parity(:slice, &Nx.slice(&1, [3], [1000], strides: [7]), [data(type, {1000})])
-        assert_parity(:slice, &Nx.slice(&1, [], []), [data(type, {})])
-        assert_parity(:slice, &Nx.slice(&1, [1], [60]), [data(type, {65})])
+        assert_same(&Nx.slice(&1, [3], [1000], strides: [7]), [data(type, {1000})])
+        assert_same(&Nx.slice(&1, [], []), [data(type, {})])
+        assert_same(&Nx.slice(&1, [1], [60]), [data(type, {65})])
 
         # Dynamic starts, in range.
-        assert_parity(
-          :slice,
+        assert_same(
           fn x, i, j -> Nx.slice(x, [i, j], [2, 3]) end,
           [data(type, {5, 6}), scalar({:s, 32}, 2), scalar({:u, 8}, 1)]
         )
 
-        assert_parity(
-          :put_slice,
+        assert_same(
           &Nx.put_slice(&1, [1, 2], &2),
           [data(type, {4, 5}), data(type, {2, 3})]
         )
 
-        assert_parity(
-          :put_slice,
+        assert_same(
           fn x, u, i -> Nx.put_slice(x, [i, 0], u) end,
           [
             data(type, {4097}) |> Nx.reshape({4097, 1}),
@@ -115,7 +112,7 @@ defmodule NxCL.ShapeParityTest do
 
         # Rank 0 `put_slice` crashes `BinaryBackend`; an explicit row covers it below.
 
-        assert_parity(:put_slice, &Nx.put_slice(&1, [0], &2), [data(type, {65}), data(type, {65})])
+        assert_same(&Nx.put_slice(&1, [0], &2), [data(type, {65}), data(type, {65})])
       end
 
       @tag requires: Map.get(@needs, type)
@@ -124,20 +121,20 @@ defmodule NxCL.ShapeParityTest do
         zero = scalar(type, 0)
         seven = scalar(type, 7)
 
-        assert_parity(:pad, &Nx.pad(&1, zero, [{1, 2, 0}, {0, 0, 0}]), [data(type, {3, 5})])
-        assert_parity(:pad, &Nx.pad(&1, seven, [{1, 1, 2}, {2, 0, 1}]), [data(type, {3, 5})])
+        assert_same(&Nx.pad(&1, zero, [{1, 2, 0}, {0, 0, 0}]), [data(type, {3, 5})])
+        assert_same(&Nx.pad(&1, seven, [{1, 1, 2}, {2, 0, 1}]), [data(type, {3, 5})])
         # Negative low and high padding, with and without interior padding.
-        assert_parity(:pad, &Nx.pad(&1, seven, [{-1, -2, 0}, {2, -1, 1}]), [data(type, {5, 4})])
-        assert_parity(:pad, &Nx.pad(&1, zero, [{-2, 3, 2}]), [data(type, {65})])
-        assert_parity(:pad, &Nx.pad(&1, seven, [{0, 0, 0}]), [data(type, {63})])
-        assert_parity(:pad, &Nx.pad(&1, seven, []), [data(type, {})])
+        assert_same(&Nx.pad(&1, seven, [{-1, -2, 0}, {2, -1, 1}]), [data(type, {5, 4})])
+        assert_same(&Nx.pad(&1, zero, [{-2, 3, 2}]), [data(type, {65})])
+        assert_same(&Nx.pad(&1, seven, [{0, 0, 0}]), [data(type, {63})])
+        assert_same(&Nx.pad(&1, seven, []), [data(type, {})])
 
-        assert_parity(:pad, &Nx.pad(&1, seven, [{0, 1, 1}, {1, 0, 0}, {2, 2, 0}]), [
+        assert_same(&Nx.pad(&1, seven, [{0, 1, 1}, {1, 0, 0}, {2, 2, 0}]), [
           data(type, {2, 3, 4})
         ])
 
         # The pad value comes from a tensor argument.
-        assert_parity(:pad, fn x, v -> Nx.pad(x, v, [{2, 1, 1}]) end, [
+        assert_same(fn x, v -> Nx.pad(x, v, [{2, 1, 1}]) end, [
           data(type, {10}),
           data(type, {})
         ])
@@ -147,71 +144,67 @@ defmodule NxCL.ShapeParityTest do
       test "concatenate and stack on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(
-          :concatenate,
+        assert_same(
           fn a, b, c -> Nx.concatenate([a, b, c], axis: 1) end,
           [data(type, {2, 3}), data(type, {2, 1}), data(type, {2, 4})]
         )
 
-        assert_parity(
-          :concatenate,
+        assert_same(
           fn a, b -> Nx.concatenate([a, b]) end,
           [data(type, {65}), data(type, {63})]
         )
 
-        assert_parity(
-          :concatenate,
+        assert_same(
           fn a, b -> Nx.concatenate([a, b], axis: 2) end,
           [data(type, {2, 3, 4}), data(type, {2, 3, 1})]
         )
 
-        assert_parity(:concatenate, fn a -> Nx.concatenate([a, a, a]) end, [data(type, {1000})])
+        assert_same(fn a -> Nx.concatenate([a, a, a]) end, [data(type, {1000})])
 
         for axis <- 0..2 do
-          assert_parity(
-            :stack,
+          assert_same(
             fn a, b -> Nx.stack([a, b, a], axis: axis) end,
             [data(type, {2, 3}), data(type, {2, 3})]
           )
         end
 
-        assert_parity(:stack, fn a, b -> Nx.stack([a, b]) end, [data(type, {}), data(type, {})])
-        assert_parity(:stack, fn a -> Nx.stack([a, a]) end, [data(type, {4097})])
+        assert_same(fn a, b -> Nx.stack([a, b]) end, [data(type, {}), data(type, {})])
+        assert_same(fn a -> Nx.stack([a, a]) end, [data(type, {4097})])
       end
 
       @tag requires: Map.get(@needs, type)
       test "iota, eye and constants of a shape on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        assert_parity(:iota, fn -> Nx.iota({2, 3, 4}, axis: 1, type: type) end, [])
-        assert_parity(:iota, fn -> Nx.iota({2, 3, 4}, axis: 2, type: type) end, [])
-        assert_parity(:iota, fn -> Nx.iota({2, 3, 4}, type: type) end, [])
-        assert_parity(:iota, fn -> Nx.iota({65}, type: type) end, [])
-        assert_parity(:iota, fn -> Nx.iota({}, type: type) end, [])
-        assert_parity(:iota, fn -> Nx.iota({4097}, axis: 0, type: type) end, [])
+        assert_same(fn -> Nx.iota({2, 3, 4}, axis: 1, type: type) end, [])
+        assert_same(fn -> Nx.iota({2, 3, 4}, axis: 2, type: type) end, [])
+        assert_same(fn -> Nx.iota({2, 3, 4}, type: type) end, [])
+        assert_same(fn -> Nx.iota({65}, type: type) end, [])
+        assert_same(fn -> Nx.iota({}, type: type) end, [])
+        assert_same(fn -> Nx.iota({4097}, axis: 0, type: type) end, [])
 
-        assert_parity(:eye, fn -> Nx.eye({3, 3}, type: type) end, [])
-        assert_parity(:eye, fn -> Nx.eye({2, 3, 5}, type: type) end, [])
-        assert_parity(:eye, fn -> Nx.eye(65, type: type) end, [])
+        assert_same(fn -> Nx.eye({3, 3}, type: type) end, [])
+        assert_same(fn -> Nx.eye({2, 3, 5}, type: type) end, [])
+        assert_same(fn -> Nx.eye(65, type: type) end, [])
 
         # A constant of a shape is a scalar constant that fills the shape.
         c = scalar(type, 5)
 
-        assert_parity(:constant, fn x -> Nx.add(x, Nx.broadcast(c, {2, 3})) end, [
+        assert_same(fn x -> Nx.add(x, Nx.broadcast(c, {2, 3})) end, [
           data(type, {2, 3})
         ])
 
-        assert_parity(:constant, fn -> Nx.broadcast(c, {63}) end, [])
+        assert_same(fn -> Nx.broadcast(c, {63}) end, [])
 
         # A scalar tensor next to a tensor gets an explicit broadcast.
-        assert_parity(:broadcast, fn x, s -> Nx.add(x, s) end, [data(type, {65}), data(type, {})])
+        assert_same(fn x, s -> Nx.add(x, s) end, [data(type, {65}), data(type, {})])
 
-        assert_parity(:broadcast, fn x, y -> Nx.add(x, y) end, [
+        assert_same(fn x, y -> Nx.add(x, y) end, [
           data(type, {2, 3}),
           data(type, {3})
         ])
 
-        assert_parity(:broadcast, fn x, y -> Nx.add(x, y) end, [
+        assert_same(fn x, y -> Nx.add(x, y) end, [
           data(type, {2, 1, 4}),
           data(type, {3, 1})
         ])
@@ -222,14 +215,13 @@ defmodule NxCL.ShapeParityTest do
         type = unquote(Macro.escape(type))
         x = data(type, {2, 3})
 
-        assert_parity(:parameter, fn x -> x end, [x])
+        assert_same(fn x -> x end, [x])
         literal = Nx.reverse(x)
-        assert_parity(:tensor, fn x -> Nx.add(x, literal) end, [x])
-        assert_parity(:metadata, fn x -> Nx.Defn.Kernel.stop_grad(x) end, [x])
+        assert_same(fn x -> Nx.add(x, literal) end, [x])
+        assert_same(fn x -> Nx.Defn.Kernel.stop_grad(x) end, [x])
 
         # A tuple through `metadata`: `elem` picks each element.
-        assert_parity(
-          :elem,
+        assert_same(
           fn x ->
             {a, b} = Nx.Defn.Kernel.stop_grad({x, Nx.reverse(x)})
             Nx.concatenate([a, b])
@@ -237,8 +229,8 @@ defmodule NxCL.ShapeParityTest do
           [x]
         )
 
-        assert_parity(:reshape, &Nx.reshape(&1, {3, 2}), [x])
-        assert_parity(:squeeze, fn x -> x |> Nx.reshape({1, 6, 1}) |> Nx.squeeze() end, [x])
+        assert_same(&Nx.reshape(&1, {3, 2}), [x])
+        assert_same(fn x -> x |> Nx.reshape({1, 6, 1}) |> Nx.squeeze() end, [x])
       end
     end
   end
@@ -252,11 +244,11 @@ defmodule NxCL.ShapeParityTest do
         type = unquote(Macro.escape(type))
         x = data(type, {65})
         # `Nx.imag` of a real tensor traces to a zero broadcast.
-        assert_parity(:imag, &Nx.imag/1, [x])
-        assert_parity(:imag, &Nx.imag/1, [data(type, {2, 3})])
-        assert_parity(:real, &Nx.real/1, [x])
-        assert_parity(:conjugate, &Nx.conjugate/1, [x], signed_zero: true)
-        assert_parity(:block_phase, &Nx.phase/1, [x])
+        assert_same(&Nx.imag/1, [x])
+        assert_same(&Nx.imag/1, [data(type, {2, 3})])
+        assert_same(&Nx.real/1, [x])
+        assert_same(&Nx.conjugate/1, [x], signed_zero: true)
+        assert_same(&Nx.phase/1, [x])
       end
     end
   end
@@ -373,8 +365,7 @@ defmodule NxCL.ShapeParityTest do
     test "dot, broadcast, add and sigmoid run through the compiler on f32" do
       layer = fn x, w, b -> x |> Nx.dot(w) |> Nx.add(Nx.broadcast(b, {4, 3})) |> Nx.sigmoid() end
 
-      assert_parity(
-        :broadcast,
+      assert_same(
         layer,
         [Gen.random({4, 5}, {:f, 32}), Gen.random({5, 3}, {:f, 32}), Gen.random({3}, {:f, 32})],
         rtol: 1.0e-4,

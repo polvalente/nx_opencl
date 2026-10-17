@@ -1,7 +1,7 @@
 defmodule NxCL.FFTParityTest do
   @moduledoc """
   Differential rows for `fft`, `ifft` and the `fft2`, `ifft2`, `rfft` and `irfft`
-  blocks through `NxCL.Parity` against `Nx.BinaryBackend`.
+  blocks through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
 
   Lengths 2, 8, 100, 1024 and 4097 cover the radix-2 passes and Bluestein. Float
   inputs scale by `1 / sqrt(n)` for `fft` and by `sqrt(n)` for `ifft`, so the
@@ -23,9 +23,9 @@ defmodule NxCL.FFTParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 600_000
@@ -82,16 +82,16 @@ defmodule NxCL.FFTParityTest do
 
         for n <- lengths(type) do
           x = input(type, {2, n}, 1 / :math.sqrt(n))
-          assert_parity(:fft, &Nx.fft/1, [x])
+          assert_same(&Nx.fft/1, [x])
           y = input(type, {n}, :math.sqrt(n))
-          assert_parity(:ifft, &Nx.ifft/1, [y])
+          assert_same(&Nx.ifft/1, [y])
         end
 
         # Length 1: the reference returns an empty tensor, so state the answer.
         x = Gen.random({3, 1}, type)
         complex = Nx.as_type(x, Nx.Type.to_complex(type))
-        assert_expected(:fft, &Nx.fft/1, [x], complex)
-        assert_expected(:ifft, &Nx.ifft/1, [x], complex)
+        assert_expected(&Nx.fft/1, [x], complex)
+        assert_expected(&Nx.ifft/1, [x], complex)
       end
 
       @tag requires: Map.get(@needs, type)
@@ -101,16 +101,16 @@ defmodule NxCL.FFTParityTest do
 
         # Pad, crop, a middle axis, and a power-of-two length.
         for opts <- [[axis: 1], [length: 3], [axis: 1, length: :power_of_two]] do
-          assert_parity(:fft, &Nx.fft(&1, opts), [x])
-          assert_parity(:ifft, &Nx.ifft(&1, opts), [x])
+          assert_same(&Nx.fft(&1, opts), [x])
+          assert_same(&Nx.ifft(&1, opts), [x])
         end
 
         # Axis 0 with a new length: the reference is wrong, so state the answer.
-        for {op, kind} <- [fft: :fft, ifft: :ifft] do
+        for kind <- [:fft, :ifft] do
           expected =
             on_last_axis(x, 0, fn t -> apply(Nx, kind, [t, [axis: -1, length: 5]]) end)
 
-          assert_expected(op, &apply(Nx, kind, [&1, [axis: 0, length: 5]]), [x], expected)
+          assert_expected(&apply(Nx, kind, [&1, [axis: 0, length: 5]]), [x], expected)
         end
       end
     end
@@ -149,8 +149,8 @@ defmodule NxCL.FFTParityTest do
         ifft =
           Nx.stack(for p <- positions, do: Nx.divide(spectrum.(p, 1), Nx.tensor(n, type: :f64)))
 
-        assert_expected(:fft, &Nx.fft/1, [x], fft)
-        assert_expected(:ifft, &Nx.ifft/1, [x], ifft)
+        assert_expected(&Nx.fft/1, [x], fft)
+        assert_expected(&Nx.ifft/1, [x], ifft)
       end
     end
   end
@@ -165,7 +165,7 @@ defmodule NxCL.FFTParityTest do
           x = Gen.random(shape, type)
           axis = tuple_size(shape) - 1
           round_trip = fn x -> x |> Nx.fft(axis: axis) |> Nx.ifft(axis: axis) end
-          assert_expected(:fft, round_trip, [x], x)
+          assert_expected(round_trip, [x], x)
         end
       end
     end
@@ -180,12 +180,12 @@ defmodule NxCL.FFTParityTest do
 
         for shape <- shapes do
           x = input(type, shape, 0.2)
-          assert_parity(:block_fft2, &Nx.fft2/1, [x])
-          assert_parity(:block_ifft2, &Nx.ifft2/1, [x])
-          assert_parity(:block_fft2, &Nx.fft2(&1, lengths: [4, :power_of_two]), [x])
+          assert_same(&Nx.fft2/1, [x])
+          assert_same(&Nx.ifft2/1, [x])
+          assert_same(&Nx.fft2(&1, lengths: [4, :power_of_two]), [x])
 
           if tuple_size(shape) == 2 do
-            assert_parity(:block_ifft2, &Nx.ifft2(&1, axes: [0, 1], lengths: [3, 5]), [x])
+            assert_same(&Nx.ifft2(&1, axes: [0, 1], lengths: [3, 5]), [x])
           else
             # Axes 0 and 1 of a rank 3 tensor: the reference is wrong, so state the answer.
             perm = [2, 0, 1]
@@ -197,7 +197,6 @@ defmodule NxCL.FFTParityTest do
               |> Nx.transpose(axes: [1, 2, 0])
 
             assert_expected(
-              :block_ifft2,
               &Nx.ifft2(&1, axes: [0, 1], lengths: [3, 5]),
               [x],
               expected
@@ -209,16 +208,16 @@ defmodule NxCL.FFTParityTest do
         unless complex?(type) do
           for n <- [4, 7, 8, 100] do
             x = input(type, {2, n}, 0.3)
-            assert_parity(:block_rfft, &Nx.rfft/1, [x])
-            assert_parity(:block_rfft, &Nx.rfft(&1, length: 16), [x])
+            assert_same(&Nx.rfft/1, [x])
+            assert_same(&Nx.rfft(&1, length: 16), [x])
           end
         end
 
         # `irfft` mirrors the half spectrum: even and odd lengths.
         for m <- [3, 5, 9] do
           x = input(type, {2, m}, 0.3)
-          assert_parity(:block_irfft, &Nx.irfft/1, [x])
-          assert_parity(:block_irfft, &Nx.irfft(&1, length: 2 * m - 1), [x])
+          assert_same(&Nx.irfft/1, [x])
+          assert_same(&Nx.irfft(&1, length: 2 * m - 1), [x])
         end
       end
     end

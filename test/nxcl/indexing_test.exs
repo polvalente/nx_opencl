@@ -5,11 +5,12 @@ defmodule NxCL.IndexingTest do
   so the device must), the `indexed_put` duplicate rule with stated values, the
   100 000-update `indexed_add` against an `f64` sum, the embedding lookup, the
   error for 64-bit atomics, and zero-size inputs through the native wire. The
-  reference rules are listed in the moduledoc of the parity test.
+  reference rules are listed in the moduledoc of that test.
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
+  import NxCL.TestSupport.Device, only: [capability?: 1]
 
   alias NxCL.Lower
   alias NxCL.Native
@@ -219,7 +220,7 @@ defmodule NxCL.IndexingTest do
 
     test "100 000 updates onto 10 targets match an f64 sum within the summation bound" do
       n = 100_000
-      key = Nx.Random.key(NxCL.Parity.seed())
+      key = Nx.Random.key(NxCL.TestSupport.Compare.seed())
       {idx, key} = Nx.Random.randint(key, 0, 10, shape: {n, 1}, type: :s32)
       {upd, _key} = Nx.Random.uniform(key, 0.0, 1.0, shape: {n}, type: :f32)
       target = Nx.broadcast(0.0, {10})
@@ -248,21 +249,19 @@ defmodule NxCL.IndexingTest do
       upd = Nx.remainder(Nx.iota({n}, type: :s32), 1000)
       target = Nx.broadcast(0, {10})
 
-      assert_parity(:indexed_add, &Nx.indexed_add/3, [target, idx, upd])
+      assert_same(&Nx.indexed_add/3, [target, idx, upd])
     end
   end
 
   describe "embedding lookup" do
     test "take of a {1000, 64} table with {32, 128} ids matches the reference" do
-      key = Nx.Random.key(NxCL.Parity.seed())
+      key = Nx.Random.key(NxCL.TestSupport.Compare.seed())
       {table, key} = Nx.Random.uniform(key, -1.0, 1.0, shape: {1000, 64}, type: :f32)
       {ids, _key} = Nx.Random.randint(key, 0, 1000, shape: {32, 128}, type: :s32)
 
-      assert_parity(:block_take, &Nx.take(&1, &2, axis: 0), [table, ids])
+      assert_same(&Nx.take(&1, &2, axis: 0), [table, ids])
 
-      assert_parity(:block_take, &Nx.take(&1, &2, axis: 0), [table, Nx.as_type(ids, :u16)],
-        record: false
-      )
+      assert_same(&Nx.take(&1, &2, axis: 0), [table, Nx.as_type(ids, :u16)])
 
       out = run(&Nx.take(&1, &2, axis: 0), [table, ids])
       assert out.shape == {32, 128, 64}
@@ -277,7 +276,7 @@ defmodule NxCL.IndexingTest do
         upd = Nx.tensor([1, 2], type: type)
 
         if capability?(:int64_atomics) do
-          # The device has them: the add runs (the parity rows check the sums).
+          # The device has them: the add runs (the differential rows check the sums).
           if type in [{:f, 64}, {:c, 128}] and not capability?(:fp64) do
             assert_raise NxCL.CompilerError, ~r/cl_khr_fp64/, fn ->
               run(&Nx.indexed_add/3, [t, idx, upd])
@@ -298,9 +297,9 @@ defmodule NxCL.IndexingTest do
     test "gather and indexed_put on 64-bit types need no atomics" do
       t = Nx.iota({4, 2}, type: :s64)
       idx = Nx.tensor([[1], [3]])
-      assert_parity(:gather, &Nx.gather/2, [t, idx])
+      assert_same(&Nx.gather/2, [t, idx])
 
-      assert_parity(:indexed_put, &Nx.indexed_put/3, [
+      assert_same(&Nx.indexed_put/3, [
         t,
         idx,
         Nx.tensor([[7, 8], [9, 10]], type: :s64)

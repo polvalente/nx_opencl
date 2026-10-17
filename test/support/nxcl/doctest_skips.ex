@@ -12,8 +12,8 @@ defmodule NxCL.DoctestSkips do
   The reasons fall in four groups:
 
     * the expected text prints more digits than a device result keeps (the last
-      digit of an `f64`, rounding noise in a `c64` transform). The parity rows
-      for the op compare within a tolerance;
+      digit of an `f64`, rounding noise in a `c64` transform). The differential
+      rows for the op compare within a tolerance;
     * the reference text is not the true value (`erf_inv` on `f64`);
     * the example needs a dtype that is out of scope (see the README);
     * the example needs `f64` or 64-bit atomics, and the device has neither.
@@ -21,9 +21,9 @@ defmodule NxCL.DoctestSkips do
   An entry never loosens a tolerance: it means the example does not run.
   """
 
-  @f64_digits "The f64 example prints 16 digits of a libm result; the device differs in the last digit. The parity rows for the op compare within a tolerance."
-  @c64_noise "The c64 transform prints rounding noise near 1e-7 where the text shows exact zeros (the reference computes in f64 and rounds). The FFT parity rows compare within a tolerance."
-  @f32_digit "The f32 example prints the last digit of a device libm result, which differs from the text. The parity rows compare within a tolerance."
+  @f64_digits "The f64 example prints 16 digits of a libm result; the device differs in the last digit. The differential rows for the op compare within a tolerance."
+  @c64_noise "The c64 transform prints rounding noise near 1e-7 where the text shows exact zeros (the reference computes in f64 and rounds). The FFT rows compare within a tolerance."
+  @f32_digit "The f32 example prints the last digit of a device libm result, which differs from the text. The differential rows compare within a tolerance."
 
   @skips %{
     Nx => [
@@ -40,7 +40,7 @@ defmodule NxCL.DoctestSkips do
       {{:log, 2}, @f32_digit},
       {{:logsumexp, 2}, @f32_digit},
       {{:erf_inv, 1},
-       "The text shows an f64 result that is only right to single precision (3e-8 off); the device gives the true value, which the elementwise parity rows check."},
+       "The text shows an f64 result that is only right to single precision (3e-8 off); the device gives the true value, which the elementwise rows check."},
       {{:fft, 2}, @c64_noise},
       {{:ifft, 2}, @c64_noise},
       {{:fft2, 2}, @c64_noise},
@@ -97,7 +97,7 @@ defmodule NxCL.DoctestSkips do
 
     gated =
       for {cap, fun, _reason} <- Map.get(@needs, mod, []),
-          not NxCL.Parity.capability?(cap),
+          not NxCL.TestSupport.Device.capability?(cap),
           do: fun
 
     always ++ gated

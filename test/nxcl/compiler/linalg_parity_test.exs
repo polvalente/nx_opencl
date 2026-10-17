@@ -7,7 +7,7 @@ defmodule NxCL.LinalgParityTest do
   @moduledoc """
   Differential rows for `cholesky`, `triangular_solve`, `solve`, `determinant`,
   the host blocks (`qr`, `eigh`, `svd`, `lu`), `all_close`, `top_k` and a user
-  block through `NxCL.Parity` against `Nx.BinaryBackend`.
+  block through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
 
   Inputs are well conditioned: a Cholesky input is `L L^H` for a lower factor `L`
   with a diagonal of about 2 and small off-diagonal entries; a triangular solve
@@ -31,9 +31,9 @@ defmodule NxCL.LinalgParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 1_800_000
@@ -72,7 +72,7 @@ defmodule NxCL.LinalgParityTest do
   # A dense matrix with a diagonal of about 2, in the wide type of `type`.
   defp dense(n, type, seed) do
     wide = wide_type(type)
-    r = Gen.random({n, n}, wide, seed: NxCL.Parity.seed() + seed)
+    r = Gen.random({n, n}, wide, seed: NxCL.TestSupport.Compare.seed() + seed)
     scaled = Nx.multiply(r, Nx.tensor(0.1 / :math.sqrt(n), type: {:f, 64}))
     Nx.add(scaled, Nx.multiply(Nx.eye(n), Nx.tensor(2.0, type: {:f, 64})))
   end
@@ -152,7 +152,7 @@ defmodule NxCL.LinalgParityTest do
 
   defp rhs(type, n, left, m) do
     shape = if left, do: {n, m}, else: {m, n}
-    Gen.random(shape, type, seed: NxCL.Parity.seed() + 4)
+    Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 4)
   end
 
   # -- cholesky ---------------------------------------------------------------
@@ -168,15 +168,15 @@ defmodule NxCL.LinalgParityTest do
 
           if integer?(type) do
             a = small(type, n, batch) |> spd_ints()
-            assert_parity(:block_lin_alg_cholesky, &Nx.LinAlg.cholesky/1, [a])
+            assert_same(&Nx.LinAlg.cholesky/1, [a])
           else
             a = stacked_or_single(batch, &gram(factors.(&1))) |> Nx.as_type(type)
 
             if double?(type) do
               l = stacked_or_single(batch, factors) |> Nx.as_type(type)
-              assert_expected(:block_lin_alg_cholesky, &Nx.LinAlg.cholesky/1, [a], l)
+              assert_expected(&Nx.LinAlg.cholesky/1, [a], l)
             else
-              assert_parity(:block_lin_alg_cholesky, &Nx.LinAlg.cholesky/1, [a])
+              assert_same(&Nx.LinAlg.cholesky/1, [a])
             end
           end
         end
@@ -191,7 +191,7 @@ defmodule NxCL.LinalgParityTest do
         ill = Nx.tensor([[1.0, 1.0], [1.0, 1.0001]]) |> Nx.as_type(type)
 
         for a <- [not_pd, singular, ill] do
-          assert_parity(:block_lin_alg_cholesky, &Nx.LinAlg.cholesky/1, [a])
+          assert_same(&Nx.LinAlg.cholesky/1, [a])
         end
       end
     end
@@ -222,13 +222,13 @@ defmodule NxCL.LinalgParityTest do
 
           for opts <- options do
             b = rhs(type, n, opts[:left_side], 2)
-            assert_parity(:triangular_solve, &Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
+            assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
           end
 
           # A vector right-hand side.
           for opts <- Enum.take(options, 4) do
-            b = Gen.random({n}, type, seed: NxCL.Parity.seed() + 5)
-            assert_parity(:triangular_solve, &Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
+            b = Gen.random({n}, type, seed: NxCL.TestSupport.Compare.seed() + 5)
+            assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
           end
         end
 
@@ -238,10 +238,15 @@ defmodule NxCL.LinalgParityTest do
             opts <- @some_options do
           a = batched(type, batch, n)
           shape = List.to_tuple(batch ++ if(opts[:left_side], do: [n, 2], else: [2, n]))
-          b = Gen.random(shape, type, seed: NxCL.Parity.seed() + 6)
-          assert_parity(:triangular_solve, &Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
-          vector = Gen.random(List.to_tuple(batch ++ [n]), type, seed: NxCL.Parity.seed() + 7)
-          assert_parity(:triangular_solve, &Nx.LinAlg.triangular_solve(&1, &2, opts), [a, vector])
+          b = Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 6)
+          assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
+
+          vector =
+            Gen.random(List.to_tuple(batch ++ [n]), type,
+              seed: NxCL.TestSupport.Compare.seed() + 7
+            )
+
+          assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, vector])
         end
       end
     end
@@ -254,7 +259,7 @@ defmodule NxCL.LinalgParityTest do
       bc = Gen.random({3, 2}, {:c, 64})
 
       for {x, y} <- [{a, bi}, {ai, bf}, {a, bc}, {ai, bc}] do
-        assert_parity(:triangular_solve, &Nx.LinAlg.triangular_solve/2, [x, y])
+        assert_same(&Nx.LinAlg.triangular_solve/2, [x, y])
       end
     end
 
@@ -284,25 +289,25 @@ defmodule NxCL.LinalgParityTest do
           # 20 s a row and covers no op the smaller rows miss, so it runs below 257 only.
           eager = [backend: n < 257]
           a = small_or_dense(type, n, nil)
-          vector = Gen.random({n}, type, seed: NxCL.Parity.seed() + 8)
-          matrix = Gen.random({n, 2}, type, seed: NxCL.Parity.seed() + 9)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, vector], eager)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, matrix], eager)
+          vector = Gen.random({n}, type, seed: NxCL.TestSupport.Compare.seed() + 8)
+          matrix = Gen.random({n, 2}, type, seed: NxCL.TestSupport.Compare.seed() + 9)
+          assert_same(&Nx.LinAlg.solve/2, [a, vector], eager)
+          assert_same(&Nx.LinAlg.solve/2, [a, matrix], eager)
 
           # Batched: 3 matrices, or 2 at size 257.
           count = if n >= 257, do: 2, else: 3
           a = small(type, n, count)
-          b = Gen.random({count, n}, type, seed: NxCL.Parity.seed() + 10)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, b], eager)
-          b = Gen.random({count, n, 2}, type, seed: NxCL.Parity.seed() + 11)
-          assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, b], eager)
+          b = Gen.random({count, n}, type, seed: NxCL.TestSupport.Compare.seed() + 10)
+          assert_same(&Nx.LinAlg.solve/2, [a, b], eager)
+          b = Gen.random({count, n, 2}, type, seed: NxCL.TestSupport.Compare.seed() + 11)
+          assert_same(&Nx.LinAlg.solve/2, [a, b], eager)
         end
       end
     end
 
     test "an ill-conditioned matrix matches" do
       a = Nx.tensor([[1.0, 1.0], [1.0, 1.0001]])
-      assert_parity(:block_lin_alg_solve, &Nx.LinAlg.solve/2, [a, Nx.tensor([1.0, 2.0])])
+      assert_same(&Nx.LinAlg.solve/2, [a, Nx.tensor([1.0, 2.0])])
     end
 
     test "a singular matrix gives NaN where the reference raises" do
@@ -327,36 +332,38 @@ defmodule NxCL.LinalgParityTest do
         type = unquote(Macro.escape(type))
 
         for shape <- [{3, 3}, {4, 3}, {3, 5}, {2, 4, 4}] do
-          x = Gen.random(shape, type, seed: NxCL.Parity.seed() + 40)
-          assert_parity(:block_lin_alg_qr, &Nx.LinAlg.qr/1, [x])
-          assert_parity(:block_lin_alg_qr, &Nx.LinAlg.qr(&1, mode: :complete), [x])
+          x = Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 40)
+          assert_same(&Nx.LinAlg.qr/1, [x])
+          assert_same(&Nx.LinAlg.qr(&1, mode: :complete), [x])
           # SVD is not defined on complex input; Nx raises.
-          unless complex?(type), do: assert_parity(:block_lin_alg_svd, &Nx.LinAlg.svd/1, [x])
+          unless complex?(type), do: assert_same(&Nx.LinAlg.svd/1, [x])
         end
 
         for shape <- [{3, 3}, {2, 4, 4}] do
-          x = Gen.random(shape, type, seed: NxCL.Parity.seed() + 41)
-          assert_parity(:block_lin_alg_lu, &Nx.LinAlg.lu/1, [x])
+          x = Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 41)
+          assert_same(&Nx.LinAlg.lu/1, [x])
 
           # Symmetrize here: on the device the sum would round to nearest, in the reference
           # it truncates, and the two inputs to `eigh` would differ.
           sym = Nx.add(x, Nx.transpose(x, axes: transpose_axes(x)))
-          assert_parity(:block_lin_alg_eigh, &Nx.LinAlg.eigh/1, [sym])
+          assert_same(&Nx.LinAlg.eigh/1, [sym])
         end
 
         for n <- [2, 3, 4, 5] do
-          x = Gen.random({n, n}, type, seed: NxCL.Parity.seed() + 42) |> whole(type)
-          assert_parity(:block_lin_alg_determinant, &Nx.LinAlg.determinant/1, [x])
+          x = Gen.random({n, n}, type, seed: NxCL.TestSupport.Compare.seed() + 42) |> whole(type)
+          assert_same(&Nx.LinAlg.determinant/1, [x])
         end
 
-        batch = Gen.random({2, 3, 3}, type, seed: NxCL.Parity.seed() + 43) |> whole(type)
-        assert_parity(:block_lin_alg_determinant, &Nx.LinAlg.determinant/1, [batch])
+        batch =
+          Gen.random({2, 3, 3}, type, seed: NxCL.TestSupport.Compare.seed() + 43) |> whole(type)
+
+        assert_same(&Nx.LinAlg.determinant/1, [batch])
       end
     end
 
     test "lu of a singular matrix matches" do
       a = Nx.tensor([[1.0, 2.0], [2.0, 4.0]])
-      assert_parity(:block_lin_alg_lu, &Nx.LinAlg.lu/1, [a])
+      assert_same(&Nx.LinAlg.lu/1, [a])
     end
   end
 
@@ -366,10 +373,10 @@ defmodule NxCL.LinalgParityTest do
       @tag requires: if(elem(type, 0) in [:s, :u], do: :fp64, else: Map.get(@needs, type))
       test "on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
-        x = Gen.random({4, 5}, type, seed: NxCL.Parity.seed() + 50)
+        x = Gen.random({4, 5}, type, seed: NxCL.TestSupport.Compare.seed() + 50)
         near = Nx.add(x, Nx.tensor(0, type: type))
-        assert_parity(:block_all_close, &Nx.all_close/2, [x, near])
-        assert_parity(:block_all_close, &Nx.all_close(&1, &2, atol: 1.0e-3), [x, Nx.negate(x)])
+        assert_same(&Nx.all_close/2, [x, near])
+        assert_same(&Nx.all_close(&1, &2, atol: 1.0e-3), [x, Nx.negate(x)])
       end
     end
   end
@@ -379,12 +386,12 @@ defmodule NxCL.LinalgParityTest do
       @tag requires: Map.get(@needs, type)
       test "on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
-        x = Gen.random({4, 5}, type, seed: NxCL.Parity.seed() + 50)
+        x = Gen.random({4, 5}, type, seed: NxCL.TestSupport.Compare.seed() + 50)
 
         # Nx rejects `top_k` on complex input.
         unless complex?(type) do
-          assert_parity(:block_top_k, &Nx.top_k(&1, k: 3), [x])
-          assert_parity(:block_top_k, &Nx.top_k(&1, k: 1), [Gen.random({7}, type)])
+          assert_same(&Nx.top_k(&1, k: 3), [x])
+          assert_same(&Nx.top_k(&1, k: 1), [Gen.random({7}, type)])
         end
 
         # One exact operation: the half types round differently on the two sides.
@@ -392,7 +399,7 @@ defmodule NxCL.LinalgParityTest do
           Nx.block(%NxCL.LinalgParityTest.Custom{}, [x], x, fn _struct, t -> Nx.add(t, t) end)
         end
 
-        assert_parity(:block, custom, [x])
+        assert_same(custom, [x])
       end
     end
   end

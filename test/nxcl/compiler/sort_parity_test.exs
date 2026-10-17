@@ -1,6 +1,6 @@
 defmodule NxCL.SortParityTest do
   @moduledoc """
-  Differential rows for `sort` and `argsort` through `NxCL.Parity` against
+  Differential rows for `sort` and `argsort` through `NxCL.TestSupport.Compare` against
   `Nx.BinaryBackend`, on every dtype Nx accepts for them (Nx raises on `c64`
   and `c128`). Lines of up to 9000 elements cover the single-group sort and
   the multi-pass sort, whose local capacity depends on the device. A second
@@ -11,9 +11,9 @@ defmodule NxCL.SortParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 600_000
@@ -50,33 +50,33 @@ defmodule NxCL.SortParityTest do
             axis <- Enum.to_list(0..(tuple_size(shape) - 1)),
             dir <- [:asc, :desc] do
           t = Gen.random(shape, type)
-          assert_parity(:sort, &Nx.sort(&1, axis: axis, direction: dir), [t])
-          assert_parity(:argsort, &Nx.argsort(&1, axis: axis, direction: dir), [t])
+          assert_same(&Nx.sort(&1, axis: axis, direction: dir), [t])
+          assert_same(&Nx.argsort(&1, axis: axis, direction: dir), [t])
         end
 
         # Lines past the local capacity: block sorts, then global and local merge passes.
         for shape <- [{9000}, {3, 9000}, {9000, 2}], axis <- [0, 1], dir <- [:asc, :desc] do
           if axis < tuple_size(shape) do
             t = Gen.random(shape, type)
-            assert_parity(:sort, &Nx.sort(&1, axis: axis, direction: dir), [t])
-            assert_parity(:argsort, &Nx.argsort(&1, axis: axis, direction: dir), [t])
+            assert_same(&Nx.sort(&1, axis: axis, direction: dir), [t])
+            assert_same(&Nx.argsort(&1, axis: axis, direction: dir), [t])
           end
         end
 
         # NaN, infinities, signed zero and the integer extremes.
         for n <- [7, 70, 4097, 9000], dir <- [:asc, :desc] do
           t = with_edges(type, n)
-          assert_parity(:sort, &Nx.sort(&1, direction: dir), [t])
-          assert_parity(:argsort, &Nx.argsort(&1, direction: dir), [t])
+          assert_same(&Nx.sort(&1, direction: dir), [t])
+          assert_same(&Nx.argsort(&1, direction: dir), [t])
         end
 
         # Every element equal: `argsort` must keep the input order in both directions.
         for n <- [65, 4097, 9000], dir <- [:asc, :desc] do
           flat = Nx.broadcast(Nx.tensor(3, type: type), {n})
-          assert_parity(:argsort, &Nx.argsort(&1, direction: dir), [flat])
+          assert_same(&Nx.argsort(&1, direction: dir), [flat])
         end
 
-        assert_parity(:argsort, &Nx.argsort(&1, axis: 1, type: :u16), [Gen.random({3, 70}, type)])
+        assert_same(&Nx.argsort(&1, axis: 1, type: :u16), [Gen.random({3, 70}, type)])
       end
     end
   end

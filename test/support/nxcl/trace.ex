@@ -25,7 +25,7 @@ defmodule NxCL.TestSupport.Trace do
   counts come from the Elixir functions around them. Tracing follows one process:
   the executor must run in the caller (it does), and a test that uses this module
   must be `async: false`. Do not nest `run/1` or use it inside
-  `NxCL.Parity.Tripwire.trace/1`: a process has one tracer.
+  `NxCL.TestSupport.NoFallback.trace/1`: a process has one tracer.
   """
 
   @empty %{
@@ -60,7 +60,7 @@ defmodule NxCL.TestSupport.Trace do
       when mod in [NxCL.Executor, NxCL.Executor.Host] ->
         collect([message | messages])
 
-      # Other patterns (`NxCL.Parity.Tripwire` sets some) can fire; skip them.
+      # Other patterns (`NxCL.TestSupport.NoFallback` sets some) can fire; skip them.
       {:trace, _pid, _kind, _mfa, _caller} ->
         collect(messages)
 
@@ -113,7 +113,7 @@ defmodule NxCL.TestSupport.Trace do
   defp bump(counts, key, n \\ 1), do: Map.update!(counts, key, &(&1 + n))
 
   # Patterns are set once per VM. Each appends the caller to the trace message. The
-  # `Host.run/3` pattern matches the one `NxCL.Parity.Tripwire` sets, because a
+  # `Host.run/3` pattern matches the one `NxCL.TestSupport.NoFallback` sets, because a
   # pattern on a function replaces the earlier one.
   defp install_patterns() do
     if :persistent_term.get({__MODULE__, :installed}, false) == false do

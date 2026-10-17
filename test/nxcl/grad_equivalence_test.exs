@@ -3,7 +3,7 @@ defmodule NxCL.GradEquivalenceTest do
   `Nx.Defn.grad` and `value_and_grad` under `NxCL.Compiler` and under
   `NxCL.Backend` match the evaluator on `Nx.BinaryBackend`, after
   `emlx/test/emlx/grad_equivalence_test.exs`. Each function runs through
-  `NxCL.Parity` (so the no-fallback tripwire watches it too), in `f32`.
+  `NxCL.TestSupport.Compare`, in `f32`.
 
   The functions: polynomials, an elementwise chain, softmax cross-entropy, layer
   norm, a matrix product, a convolution, a pooling window, a reduction and sort,
@@ -12,7 +12,7 @@ defmodule NxCL.GradEquivalenceTest do
   use ExUnit.Case, async: false
 
   import Nx.Defn
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
   @moduletag :opencl
   @moduletag timeout: 600_000
@@ -26,9 +26,9 @@ defmodule NxCL.GradEquivalenceTest do
     |> Nx.reshape(shape)
   end
 
-  defp assert_grad(name, fun, args, opts \\ []) do
-    opts = Keyword.merge([record: false, rtol: 1.0e-4, atol: 1.0e-4], opts)
-    assert_parity(name, fun, args, opts)
+  defp assert_grad(fun, args, opts \\ []) do
+    opts = Keyword.merge([rtol: 1.0e-4, atol: 1.0e-4], opts)
+    assert_same(fun, args, opts)
   end
 
   # -- Smooth elementwise --------------------------------------------------------
@@ -120,28 +120,28 @@ defmodule NxCL.GradEquivalenceTest do
 
   test "polynomial" do
     for shape <- [{}, {4}, {2, 3}],
-        do: assert_grad(:grad_polynomial, &polynomial_grad/1, [data(shape)])
+        do: assert_grad(&polynomial_grad/1, [data(shape)])
   end
 
   test "elementwise chain" do
     for shape <- [{4}, {2, 3}, {2, 2, 3}],
-        do: assert_grad(:grad_chain, &chain_grad/1, [data(shape)])
+        do: assert_grad(&chain_grad/1, [data(shape)])
   end
 
   test "division and sqrt" do
-    assert_grad(:grad_division, &division_grad/2, [data({2, 3}), data({2, 3}, 0.21)])
+    assert_grad(&division_grad/2, [data({2, 3}), data({2, 3}, 0.21)])
   end
 
   test "softmax cross-entropy" do
     labels =
       Nx.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]], backend: Nx.BinaryBackend)
 
-    assert_grad(:grad_softmax_xent, &softmax_xent_grad/2, [data({3, 3}), labels])
-    assert_grad(:grad_softmax_xent, &softmax_xent_grad/2, [data({3, 3}, 1.7), labels])
+    assert_grad(&softmax_xent_grad/2, [data({3, 3}), labels])
+    assert_grad(&softmax_xent_grad/2, [data({3, 3}, 1.7), labels])
   end
 
   test "layer norm" do
-    assert_grad(:grad_layer_norm, &layer_norm_grad/3, [
+    assert_grad(&layer_norm_grad/3, [
       data({3, 5}),
       data({5}, 0.2),
       data({5}, 0.1)
@@ -149,34 +149,34 @@ defmodule NxCL.GradEquivalenceTest do
   end
 
   test "dot" do
-    assert_grad(:grad_dot, &dot_grad/2, [data({3, 4}, 0.1), data({4, 2}, 0.2)])
+    assert_grad(&dot_grad/2, [data({3, 4}, 0.1), data({4, 2}, 0.2)])
   end
 
   test "conv" do
-    assert_grad(:grad_conv, &conv_grad/2, [data({1, 2, 5, 5}, 0.05), data({3, 2, 3, 3}, 0.1)])
+    assert_grad(&conv_grad/2, [data({1, 2, 5, 5}, 0.05), data({3, 2, 3, 3}, 0.1)])
   end
 
   test "window_max and window_sum" do
-    assert_grad(:grad_window_max, &window_grad/1, [data({1, 4, 4})])
-    assert_grad(:grad_window_sum, &window_sum_grad/1, [data({1, 4, 4}, 0.1)])
+    assert_grad(&window_grad/1, [data({1, 4, 4})])
+    assert_grad(&window_sum_grad/1, [data({1, 4, 4}, 0.1)])
   end
 
   test "reduce_max, sort and cumulative_sum" do
-    assert_grad(:grad_reduce, &reduce_grad/1, [data({3, 5})])
+    assert_grad(&reduce_grad/1, [data({3, 5})])
 
-    assert_grad(:grad_sort, &sort_grad/1, [
+    assert_grad(&sort_grad/1, [
       Nx.tensor([[3.0, 1.0, 4.0, 1.5, 9.0]], backend: Nx.BinaryBackend)
     ])
 
-    assert_grad(:grad_cumsum, &cumsum_grad/1, [data({2, 5}, 0.1)])
+    assert_grad(&cumsum_grad/1, [data({2, 5}, 0.1)])
   end
 
   test "cond takes either branch" do
-    assert_grad(:grad_cond, &cond_grad/1, [data({4}, 0.5)])
-    assert_grad(:grad_cond, &cond_grad/1, [Nx.negate(data({4}, 0.5))])
+    assert_grad(&cond_grad/1, [data({4}, 0.5)])
+    assert_grad(&cond_grad/1, [Nx.negate(data({4}, 0.5))])
   end
 
   test "while" do
-    assert_grad(:grad_while, &while_grad/1, [data({4})])
+    assert_grad(&while_grad/1, [data({4})])
   end
 end

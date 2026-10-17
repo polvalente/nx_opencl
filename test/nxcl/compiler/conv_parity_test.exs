@@ -1,12 +1,12 @@
 defmodule NxCL.ConvParityTest do
   @moduledoc """
-  Differential rows for `conv` through `NxCL.Parity` against `Nx.BinaryBackend`.
+  Differential rows for `conv` through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
 
   The option grid runs on `f32`, `f64`, `c64` and `c128` over 1, 2 and 3 spatial
   axes: every option alone (strides, each padding form, input dilation, kernel
   dilation, feature groups, depthwise, batch groups, the three permutations) and
   then combined. `f16` and `bf16` run a shorter grid. Integer inputs run the basic
-  rows; Nx makes their output floating, so those rows close the integer cells.
+  rows; Nx makes their output floating.
 
   Float and complex inputs hold small integers, so every sum is exact. A second
   set of rows uses random floats within a tolerance. `f64` and `c128` rows carry
@@ -14,9 +14,9 @@ defmodule NxCL.ConvParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 900_000
@@ -34,7 +34,7 @@ defmodule NxCL.ConvParityTest do
   end
 
   defp exact({kind, _} = type, shape, seed) do
-    key = Nx.Random.key(NxCL.Parity.seed() + seed)
+    key = Nx.Random.key(NxCL.TestSupport.Compare.seed() + seed)
     lo = if kind == :u, do: 0, else: -2
     {t, _} = Nx.Random.randint(key, lo, 3, shape: shape, type: :s32)
     Nx.as_type(t, type)
@@ -43,7 +43,7 @@ defmodule NxCL.ConvParityTest do
   defp pair(type, xs, ys), do: [exact(type, xs, 1), exact(type, ys, 7)]
 
   defp check(type, xs, ks, opts) do
-    assert_parity(:conv, &Nx.conv(&1, &2, opts), pair(type, xs, ks))
+    assert_same(&Nx.conv(&1, &2, opts), pair(type, xs, ks))
   end
 
   # -- Option grid, per spatial rank ---------------------------------------
@@ -185,8 +185,7 @@ defmodule NxCL.ConvParityTest do
             {{2, 3, 9, 8}, {4, 3, 3, 3}, [padding: :same]},
             {{1, 8, 20, 20}, {8, 8, 3, 3}, [strides: [2, 2]]}
           ] do
-        assert_parity(
-          :conv,
+        assert_same(
           &Nx.conv(&1, &2, opts),
           [Gen.random(xs, {:f, 32}), Gen.random(ks, {:f, 32})],
           rtol: 1.0e-4,
@@ -198,7 +197,7 @@ defmodule NxCL.ConvParityTest do
     test "operands of different types merge as Nx does" do
       x = Gen.random({2, 3, 7, 6}, {:s, 32})
       k = Gen.random({4, 3, 3, 2}, {:f, 32})
-      assert_parity(:conv, &Nx.conv/2, [x, k], record: false)
+      assert_same(&Nx.conv/2, [x, k])
     end
 
     test "a small CNN forward pass matches the reference" do
@@ -212,13 +211,13 @@ defmodule NxCL.ConvParityTest do
         |> Nx.dot(dense)
       end
 
-      key = Nx.Random.key(NxCL.Parity.seed())
+      key = Nx.Random.key(NxCL.TestSupport.Compare.seed())
       {x, key} = Nx.Random.uniform(key, shape: {2, 1, 8, 8})
       {w, key} = Nx.Random.uniform(key, -0.5, 0.5, shape: {4, 1, 3, 3})
       {b, key} = Nx.Random.uniform(key, -0.1, 0.1, shape: {4})
       {dense, _} = Nx.Random.uniform(key, -0.5, 0.5, shape: {64, 10})
 
-      assert_parity(:conv, cnn, [x, w, b, dense], rtol: 1.0e-4, atol: 1.0e-4)
+      assert_same(cnn, [x, w, b, dense], rtol: 1.0e-4, atol: 1.0e-4)
     end
   end
 end

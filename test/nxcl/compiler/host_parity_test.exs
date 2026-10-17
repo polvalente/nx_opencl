@@ -1,6 +1,6 @@
 defmodule NxCL.HostParityTest do
   @moduledoc """
-  Differential rows for `runtime_call` and `io_call` through `NxCL.Parity`
+  Differential rows for `runtime_call` and `io_call` through `NxCL.TestSupport.Compare`
   against `Nx.Defn.Evaluator` on `Nx.BinaryBackend`.
 
   Each dtype gets a `runtime_call` between device ops (before and after, and
@@ -11,9 +11,9 @@ defmodule NxCL.HostParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
 
@@ -48,9 +48,9 @@ defmodule NxCL.HostParityTest do
 
   # The reference runs first, then the compiler, then the eager backend; each should
   # send the same message.
-  defp assert_same_messages(op, fun, args) do
+  defp assert_same_messages(fun, args) do
     flush()
-    assert_parity(op, fun, args)
+    assert_same(fun, args)
     assert [reference, actual, eager] = flush()
     assert reference == actual
     assert reference == eager
@@ -76,8 +76,8 @@ defmodule NxCL.HostParityTest do
         Nx.dot(z, w)
       end
 
-      assert_parity(:runtime_call, before_and_after, [x])
-      assert_parity(:runtime_call, into_dot, [x, w])
+      assert_same(before_and_after, [x])
+      assert_same(into_dot, [x, w])
     end
 
     @tag requires: Map.get(@needs, type)
@@ -92,7 +92,7 @@ defmodule NxCL.HostParityTest do
         Nx.multiply(z, x)
       end
 
-      assert_same_messages(:io_call, fun, [x])
+      assert_same_messages(fun, [x])
     end
   end
 end

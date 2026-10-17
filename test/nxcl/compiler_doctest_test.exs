@@ -5,8 +5,8 @@ defmodule NxCL.CompilerDoctestTest do
   compiles and runs on the device. The eager ops inside run on `NxCL.Backend`.
   The functions left out are in `NxCL.DoctestSkips`. No trace here: the default
   compiler also reaches the inner calls of a host function (`svd`), which run on
-  `Nx.BinaryBackend` by design and make the trace very slow. `NxCL.Parity` rows
-  and the gradient and model tests run the compiler under the tripwire.
+  `Nx.BinaryBackend` by design and make the trace very slow. `NxCL.NoFallbackTest` checks
+  that the compiler runs ops on the device.
   """
   use ExUnit.Case, async: false
 

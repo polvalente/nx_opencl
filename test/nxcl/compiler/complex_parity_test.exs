@@ -1,7 +1,7 @@
 defmodule NxCL.ComplexParityTest do
   @moduledoc """
   Differential rows for `c64` and `c128`: every elementwise op Nx accepts on a
-  complex tensor, through `NxCL.Parity` against `Nx.BinaryBackend`. Rule rows
+  complex tensor, through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`. Rule rows
   state their expected values where `BinaryBackend` is wrong or raises: the sign
   of zero on a branch cut, `sign`, and NaN or infinity parts.
 
@@ -26,9 +26,10 @@ defmodule NxCL.ComplexParityTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
+  import NxCL.TestSupport.Device, only: [capability?: 1]
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
 
@@ -282,7 +283,7 @@ defmodule NxCL.ComplexParityTest do
         test "#{op} #{Nx.Type.to_string(type)}" do
           op = unquote(op)
           type = unquote(Macro.escape(type))
-          assert_parity(op, fn x -> principal(op, x) end, [unary_data(op, type)], tol(op, type))
+          assert_same(fn x -> principal(op, x) end, [unary_data(op, type)], tol(op, type))
         end
       end
     end
@@ -294,7 +295,7 @@ defmodule NxCL.ComplexParityTest do
         type = unquote(Macro.escape(type))
         out = run(&Nx.abs/1, [data(type)])
         assert out.type == part(type)
-        assert_parity(:abs, &Nx.abs/1, [data(type)])
+        assert_same(&Nx.abs/1, [data(type)])
       end
 
       for op <- ~w(real imag)a do
@@ -302,7 +303,7 @@ defmodule NxCL.ComplexParityTest do
 
         test "#{op} #{Nx.Type.to_string(type)}" do
           type = unquote(Macro.escape(type))
-          assert_parity(unquote(op), &apply(Nx, unquote(op), [&1]), [data(type)])
+          assert_same(&apply(Nx, unquote(op), [&1]), [data(type)])
         end
       end
 
@@ -311,7 +312,7 @@ defmodule NxCL.ComplexParityTest do
 
         test "#{op} #{Nx.Type.to_string(type)}" do
           type = unquote(Macro.escape(type))
-          assert_parity(unquote(op), &apply(Nx, unquote(op), [&1]), [data(type)])
+          assert_same(&apply(Nx, unquote(op), [&1]), [data(type)])
         end
       end
 
@@ -319,7 +320,7 @@ defmodule NxCL.ComplexParityTest do
 
       test "logical_not #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
-        assert_parity(:block_logical_not, &Nx.logical_not/1, [data(type)])
+        assert_same(&Nx.logical_not/1, [data(type)])
       end
     end
 
@@ -328,7 +329,7 @@ defmodule NxCL.ComplexParityTest do
 
       test "phase #{Nx.Type.to_string(type)} is the angle of each value" do
         type = unquote(Macro.escape(type))
-        assert_parity(:block_phase, &Nx.phase/1, [data(type)])
+        assert_same(&Nx.phase/1, [data(type)])
       end
     end
 
@@ -336,7 +337,7 @@ defmodule NxCL.ComplexParityTest do
       test "phase of #{Nx.Type.to_string(type)} is 0 or pi" do
         type = unquote(Macro.escape(type))
         x = Nx.concatenate([Gen.random({65}, type), Nx.tensor([0, 1], type: type)])
-        assert_parity(:block_phase, &Nx.phase/1, [x])
+        assert_same(&Nx.phase/1, [x])
       end
     end
 
@@ -348,8 +349,8 @@ defmodule NxCL.ComplexParityTest do
         x = Nx.concatenate([Gen.random({65}, type), Nx.tensor([0, 1], type: type)])
         # `Nx.imag` of a real tensor traces to a zero broadcast, not an `imag` op
         # (stage 06 lowers broadcasts).
-        assert_parity(:real, &Nx.real/1, [x])
-        assert_parity(:conjugate, &Nx.conjugate/1, [x], signed_zero: true)
+        assert_same(&Nx.real/1, [x])
+        assert_same(&Nx.conjugate/1, [x], signed_zero: true)
       end
     end
   end
@@ -367,7 +368,7 @@ defmodule NxCL.ComplexParityTest do
 
         b = right_operand(op, type)
 
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b], tol(op, type))
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b], tol(op, type))
       end
     end
 
@@ -380,7 +381,7 @@ defmodule NxCL.ComplexParityTest do
         a = data(type)
         # Half the pairs are equal, so `equal` sees both outcomes.
         b = Nx.select(Nx.less(Nx.iota(Nx.shape(a)), 40), a, Nx.reverse(a))
-        assert_parity(op, fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
+        assert_same(fn x, y -> apply(Nx, op, [x, y]) end, [a, b])
       end
     end
   end
@@ -396,11 +397,11 @@ defmodule NxCL.ComplexParityTest do
         i = Nx.iota(Nx.shape(z), type: :s32)
 
         for op <- ~w(add subtract multiply)a do
-          assert_parity(op, fn a, b -> apply(Nx, op, [a, b]) end, [z, r])
-          assert_parity(op, fn a, b -> apply(Nx, op, [b, a]) end, [z, i])
+          assert_same(fn a, b -> apply(Nx, op, [a, b]) end, [z, r])
+          assert_same(fn a, b -> apply(Nx, op, [b, a]) end, [z, i])
         end
 
-        assert_parity(:divide, fn a, b -> Nx.divide(a, b) end, [z, Nx.add(r, 5.0)])
+        assert_same(fn a, b -> Nx.divide(a, b) end, [z, Nx.add(r, 5.0)])
       end
 
       if type == {:c, 128}, do: @tag(requires: :fp64)
@@ -410,17 +411,17 @@ defmodule NxCL.ComplexParityTest do
         z = data(type)
         scalar = complex([{1.5, -2.0}], type) |> Nx.squeeze()
 
-        assert_parity(:add, fn x -> Nx.add(x, Complex.new(1.0, 2.0)) end, [z])
-        assert_parity(:multiply, fn x -> Nx.multiply(x, Complex.new(0.0, 1.0)) end, [z])
-        assert_parity(:subtract, fn x -> Nx.subtract(Complex.new(-0.5, 3.0), x) end, [z])
-        assert_parity(:multiply, fn x -> Nx.multiply(x, 2.5) end, [z])
+        assert_same(fn x -> Nx.add(x, Complex.new(1.0, 2.0)) end, [z])
+        assert_same(fn x -> Nx.multiply(x, Complex.new(0.0, 1.0)) end, [z])
+        assert_same(fn x -> Nx.subtract(Complex.new(-0.5, 3.0), x) end, [z])
+        assert_same(fn x -> Nx.multiply(x, 2.5) end, [z])
 
-        assert_parity(:add, fn x, s -> Nx.add(x, s) end, [
+        assert_same(fn x, s -> Nx.add(x, s) end, [
           Nx.reduce_max(Nx.abs(z)),
           Nx.abs(scalar)
         ])
 
-        assert_parity(:multiply, fn x, y -> Nx.multiply(x, y) end, [scalar, scalar])
+        assert_same(fn x, y -> Nx.multiply(x, y) end, [scalar, scalar])
       end
     end
   end
@@ -436,9 +437,9 @@ defmodule NxCL.ComplexParityTest do
         a = data(type)
         b = Nx.reverse(a)
         pred = Nx.less(Nx.iota(Nx.shape(a)), 30)
-        assert_parity(:select, &Nx.select/3, [pred, a, b])
+        assert_same(&Nx.select/3, [pred, a, b])
         # A complex predicate is true when either part is not zero.
-        assert_parity(:select, &Nx.select/3, [a, a, b])
+        assert_same(&Nx.select/3, [a, a, b])
       end
     end
 
@@ -446,7 +447,7 @@ defmodule NxCL.ComplexParityTest do
       test "#{Nx.Type.to_string(from)} to c64 gives a zero imaginary part" do
         from = unquote(Macro.escape(from))
         x = Nx.concatenate([Gen.random({65}, from), Nx.tensor([0, 1], type: from)])
-        assert_parity(:as_type, &Nx.as_type(&1, :c64), [x], signed_zero: true)
+        assert_same(&Nx.as_type(&1, :c64), [x], signed_zero: true)
       end
     end
 
@@ -455,15 +456,15 @@ defmodule NxCL.ComplexParityTest do
       test "c64 to #{Nx.Type.to_string(to)} drops the imaginary part" do
         to = unquote(Macro.escape(to))
         z = data({:c, 64})
-        assert_parity(:as_type, &Nx.as_type(&1, to), [z])
+        assert_same(&Nx.as_type(&1, to), [z])
       end
     end
 
     @tag requires: :fp64
     test "c64 to c128 and back" do
       z = data({:c, 64})
-      assert_parity(:as_type, &Nx.as_type(&1, :c128), [z])
-      assert_parity(:as_type, &Nx.as_type(&1, :c64), [data({:c, 128})])
+      assert_same(&Nx.as_type(&1, :c128), [z])
+      assert_same(&Nx.as_type(&1, :c64), [data({:c, 128})])
       back = run(fn x -> x |> Nx.as_type(:c128) |> Nx.as_type(:c64) end, [z])
       assert back.type == {:c, 64}
       assert Nx.to_binary(back) == Nx.to_binary(z)
@@ -472,9 +473,9 @@ defmodule NxCL.ComplexParityTest do
     @tag requires: :fp64
     test "c128 to real and f64 to c128" do
       z = data({:c, 128})
-      assert_parity(:as_type, &Nx.as_type(&1, :f64), [z])
-      assert_parity(:as_type, &Nx.as_type(&1, :f32), [z])
-      assert_parity(:as_type, &Nx.as_type(&1, :c128), [Gen.random({65}, {:f, 64})])
+      assert_same(&Nx.as_type(&1, :f64), [z])
+      assert_same(&Nx.as_type(&1, :f32), [z])
+      assert_same(&Nx.as_type(&1, :c128), [Gen.random({65}, {:f, 64})])
     end
   end
 
@@ -514,8 +515,8 @@ defmodule NxCL.ComplexParityTest do
         # Erlang floats raise on 1.0e300 * 1.0e300, so `Complex.divide` cannot
         # serve as the reference for `c128` here; the values above are exact.
         if type == {:c, 64} do
-          assert_parity(:divide, &Nx.divide/2, [z, Nx.reverse(z)])
-          assert_parity(:abs, &Nx.abs/1, [z])
+          assert_same(&Nx.divide/2, [z, Nx.reverse(z)])
+          assert_same(&Nx.abs/1, [z])
         end
       end
     end
@@ -679,15 +680,13 @@ defmodule NxCL.ComplexParityTest do
         want = Nx.divide(z, Nx.as_type(Nx.abs(z), type))
         tol = if type == {:c, 64}, do: 1.0e-5, else: 1.0e-12
 
-        for {runner, path} <- [{&run/2, :compiler}, {&eager/2, :backend}] do
+        for runner <- [&run/2, &eager/2] do
           got = runner.(&Nx.sign/1, [z]) |> Nx.backend_copy(Nx.BinaryBackend)
 
           for part <- [&Nx.real/1, &Nx.imag/1] do
             assert Nx.all_close(part.(got), part.(want), rtol: tol, atol: tol) |> Nx.to_number() ==
                      1
           end
-
-          NxCL.Parity.Recorder.record(:sign, type, path)
 
           assert_values(
             :sign,

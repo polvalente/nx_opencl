@@ -1,7 +1,7 @@
 defmodule NxCL.IndexingParityTest do
   @moduledoc """
   Differential rows for `gather`, `take`, `take_along_axis`, `indexed_add` and
-  `indexed_put` through `NxCL.Parity` against `Nx.BinaryBackend`.
+  `indexed_put` through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
 
   ## Reference rules (read from `Nx.BinaryBackend` and the Nx docs, Nx 1.0)
 
@@ -32,15 +32,14 @@ defmodule NxCL.IndexingParityTest do
   `f64`/`c128` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
   `indexed_add` on `s64`, `u64`, `f64` and `c128` needs `cl_khr_int64_base_atomics`;
   on a device without it the rows check the named error instead of a sum.
-  Rows with an index type other than `s32` do not record cells, so a cell for a
-  type closes only through values of that type.
   """
   use ExUnit.Case, async: false
 
   import Bitwise
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
+  import NxCL.TestSupport.Device, only: [capability?: 1]
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 900_000
@@ -113,28 +112,22 @@ defmodule NxCL.IndexingParityTest do
     ]
   end
 
-  defp record?(index_type), do: index_type == {:s, 32}
-
   # -- gather --------------------------------------------------------------
 
   defp gather_rows(type, index_type) do
-    opts = [record: record?(index_type)]
-
     for shape <- @shapes, axes <- subsets(tuple_size(shape)), batch <- [{4}, {2, 3}] do
       t = values(shape, type, {:gather, shape, axes})
       idx = indices(batch, axis_dims(shape, axes), index_type, {:gather_idx, shape, axes, batch})
-      assert_parity(:gather, &Nx.gather(&1, &2, axes: axes), [t, idx], opts)
+      assert_same(&Nx.gather(&1, &2, axes: axes), [t, idx])
     end
 
     # Default axes: the leading ones.
     t = values({5, 4}, type, :default_axes)
     idx = indices({6}, [5, 4], index_type, :default_axes_idx)
-    assert_parity(:gather, &Nx.gather/2, [t, idx], opts)
+    assert_same(&Nx.gather/2, [t, idx])
   end
 
   defp take_rows(type, index_type) do
-    opts = [record: record?(index_type)]
-
     for shape <- @shapes, axis <- 0..(tuple_size(shape) - 1), idx_shape <- [{5}, {2, 3}] do
       t = values(shape, type, {:take, shape, axis})
 
@@ -142,13 +135,11 @@ defmodule NxCL.IndexingParityTest do
         indices(idx_shape, [elem(shape, axis)], index_type, {:take_idx, shape, axis})
         |> Nx.squeeze(axes: [-1])
 
-      assert_parity(:block_take, &Nx.take(&1, &2, axis: axis), [t, idx], opts)
+      assert_same(&Nx.take(&1, &2, axis: axis), [t, idx])
     end
   end
 
   defp take_along_axis_rows(type, index_type) do
-    opts = [record: record?(index_type)]
-
     for shape <- @shapes, axis <- 0..(tuple_size(shape) - 1) do
       out_shape = put_elem(shape, axis, 3)
       t = values(shape, type, {:taa, shape, axis})
@@ -157,11 +148,9 @@ defmodule NxCL.IndexingParityTest do
         indices(out_shape, [elem(shape, axis)], index_type, {:taa_idx, shape, axis})
         |> Nx.squeeze(axes: [-1])
 
-      assert_parity(
-        :block_take_along_axis,
+      assert_same(
         &Nx.take_along_axis(&1, &2, axis: axis),
-        [t, idx],
-        opts
+        [t, idx]
       )
     end
   end
@@ -200,26 +189,22 @@ defmodule NxCL.IndexingParityTest do
   # -- indexed_add and indexed_put -----------------------------------------
 
   defp put_rows(type, index_type) do
-    opts = [record: record?(index_type)]
-
     for shape <- @shapes,
         axes <- subsets(tuple_size(shape)),
         n <- [1, 17, 40],
         reduce <- [false, true] do
       args = indexed_args(shape, axes, n, type, index: index_type, reduce: reduce)
-      assert_parity(:indexed_put, &Nx.indexed_put(&1, &2, &3, axes: axes), args, opts)
+      assert_same(&Nx.indexed_put(&1, &2, &3, axes: axes), args)
     end
   end
 
   defp add_rows(type, index_type) do
-    opts = [record: record?(index_type)]
-
     for shape <- @shapes,
         axes <- subsets(tuple_size(shape)),
         n <- [1, 17, 40],
         reduce <- [false, true] do
       args = indexed_args(shape, axes, n, type, index: index_type, reduce: reduce)
-      assert_parity(:indexed_add, &Nx.indexed_add(&1, &2, &3, axes: axes), args, opts)
+      assert_same(&Nx.indexed_add(&1, &2, &3, axes: axes), args)
     end
   end
 
@@ -249,7 +234,7 @@ defmodule NxCL.IndexingParityTest do
 
     test "a scalar update at one full index" do
       t = Nx.iota({3, 4}, type: :f32)
-      assert_parity(:indexed_put, &Nx.indexed_put(&1, &2, &3), [t, Nx.tensor([1, 2]), 9.5])
+      assert_same(&Nx.indexed_put(&1, &2, &3), [t, Nx.tensor([1, 2]), 9.5])
     end
   end
 
@@ -275,14 +260,14 @@ defmodule NxCL.IndexingParityTest do
 
     test "a scalar update at one full index" do
       t = Nx.iota({3, 4}, type: :f32)
-      assert_parity(:indexed_add, &Nx.indexed_add(&1, &2, &3), [t, Nx.tensor([1, 2]), 9.5])
+      assert_same(&Nx.indexed_add(&1, &2, &3), [t, Nx.tensor([1, 2]), 9.5])
     end
 
     test "target and updates of different types merge to the wider type" do
       for {target, updates} <- [{{:s, 32}, {:f, 32}}, {{:f, 32}, {:s, 32}}, {{:u, 8}, {:s, 16}}] do
         args = indexed_args({5, 4}, [0], 17, target, updates: updates)
-        assert_parity(:indexed_add, &Nx.indexed_add/3, args, record: false)
-        assert_parity(:indexed_put, &Nx.indexed_put/3, args, record: false)
+        assert_same(&Nx.indexed_add/3, args)
+        assert_same(&Nx.indexed_put/3, args)
       end
     end
   end

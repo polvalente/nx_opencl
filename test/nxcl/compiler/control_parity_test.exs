@@ -1,6 +1,6 @@
 defmodule NxCL.ControlParityTest do
   @moduledoc """
-  Differential rows for `cond` and `while` through `NxCL.Parity` against
+  Differential rows for `cond` and `while` through `NxCL.TestSupport.Compare` against
   `Nx.Defn.Evaluator` on `Nx.BinaryBackend`.
 
   `cond` rows cover one, two and three predicates, every predicate dtype, and
@@ -9,16 +9,14 @@ defmodule NxCL.ControlParityTest do
   so the loop is dynamic; a literal bound gives a static loop), nesting depths 1 to
   3, and a loop whose body uses `slice` and `put_slice` at the loop index.
 
-  Rows with a predicate dtype other than the data dtype run with `record: false`,
-  so a cell closes only through values of its own dtype. `f64` and `c128` rows
-  carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
+  `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
   """
   use ExUnit.Case, async: false
 
   import Nx.Defn
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
-  alias NxCL.Parity.Gen
+  alias NxCL.TestSupport.Gen
 
   @moduletag :opencl
   @moduletag timeout: 900_000
@@ -141,12 +139,12 @@ defmodule NxCL.ControlParityTest do
         [yes, no] = [pred({:s, 32}, 1), pred({:s, 32}, 0)]
 
         for p <- [yes, no] do
-          assert_parity(:cond, &cond1/3, [p, x, y])
+          assert_same(&cond1/3, [p, x, y])
 
           for q <- [yes, no] do
-            assert_parity(:cond, &cond2/4, [p, q, x, y])
+            assert_same(&cond2/4, [p, q, x, y])
 
-            for r <- [yes, no], do: assert_parity(:cond, &cond3/5, [p, q, r, x, y])
+            for r <- [yes, no], do: assert_same(&cond3/5, [p, q, r, x, y])
           end
         end
       end
@@ -158,17 +156,17 @@ defmodule NxCL.ControlParityTest do
         y = data(type, {3, 2})
 
         for p <- [pred({:u, 8}, 1), pred({:u, 8}, 0)] do
-          assert_parity(:cond, &cond_tuple/3, [p, x, y])
-          assert_parity(:cond, &cond_map/3, [p, x, y])
+          assert_same(&cond_tuple/3, [p, x, y])
+          assert_same(&cond_map/3, [p, x, y])
 
           for q <- [pred({:u, 8}, 1), pred({:u, 8}, 0)],
-              do: assert_parity(:cond, &cond_nested/4, [p, q, x, y])
+              do: assert_same(&cond_nested/4, [p, q, x, y])
         end
 
         a = data({:f, 32}, {4})
 
         for a <- [a, Nx.negate(Nx.abs(a)) |> Nx.multiply(3), Nx.abs(a) |> Nx.multiply(3)] do
-          assert_parity(:cond, &cond_inner_pred/3, [a, x, y], record: false)
+          assert_same(&cond_inner_pred/3, [a, x, y])
         end
       end
     end
@@ -180,8 +178,8 @@ defmodule NxCL.ControlParityTest do
         y = data({:f, 32}, {4})
 
         for value <- [0, 1, 3] do
-          assert_parity(:cond, &cond2/4, [pred(type, value), pred(type, 1), x, y], record: false)
-          assert_parity(:cond, &cond2/4, [pred(type, 0), pred(type, value), x, y], record: false)
+          assert_same(&cond2/4, [pred(type, value), pred(type, 1), x, y])
+          assert_same(&cond2/4, [pred(type, 0), pred(type, value), x, y])
         end
       end
     end
@@ -191,7 +189,7 @@ defmodule NxCL.ControlParityTest do
       y = data({:f, 32}, {4})
 
       for value <- [0.0, -0.0, :nan, 0.5, :infinity] do
-        assert_parity(:cond, &cond1/3, [Nx.tensor(value, type: :f32), x, y], record: false)
+        assert_same(&cond1/3, [Nx.tensor(value, type: :f32), x, y])
       end
     end
   end
@@ -360,11 +358,11 @@ defmodule NxCL.ControlParityTest do
 
         for trips <- [0, 1, 10] do
           n = pred({:s, 32}, trips)
-          assert_parity(:while, &while_scalar/2, [x, n])
-          assert_parity(:while, &while_scalar/2, [s, n])
-          assert_parity(:while, &while_tuple/3, [x, loop_data(type, {2, 2}), n])
-          assert_parity(:while, &while_map/2, [x, n])
-          assert_parity(:while, &while_nested_carry/2, [x, n])
+          assert_same(&while_scalar/2, [x, n])
+          assert_same(&while_scalar/2, [s, n])
+          assert_same(&while_tuple/3, [x, loop_data(type, {2, 2}), n])
+          assert_same(&while_map/2, [x, n])
+          assert_same(&while_nested_carry/2, [x, n])
         end
       end
 
@@ -373,13 +371,13 @@ defmodule NxCL.ControlParityTest do
         type = unquote(Macro.escape(type))
         x = loop_data(type, {3})
 
-        assert_parity(:while, &while_static/1, [x])
-        assert_parity(:while, &while_range/1, [x])
-        assert_parity(:while, &while_range_step/1, [x])
-        assert_parity(:while, &while_down/1, [x])
+        assert_same(&while_static/1, [x])
+        assert_same(&while_range/1, [x])
+        assert_same(&while_range_step/1, [x])
+        assert_same(&while_down/1, [x])
 
         for trips <- [0, 3, 8] do
-          assert_parity(:while, &fill/2, [loop_data(type, {8}), pred({:s, 32}, trips)])
+          assert_same(&fill/2, [loop_data(type, {8}), pred({:s, 32}, trips)])
         end
       end
 
@@ -390,35 +388,35 @@ defmodule NxCL.ControlParityTest do
 
         for trips <- [0, 1, 4] do
           n = pred({:s, 32}, trips)
-          assert_parity(:while, &while_with_cond/2, [x, n])
-          assert_parity(:while, &nest2/2, [x, n])
-          assert_parity(:cond, &cond_with_while/3, [pred({:u, 8}, 1), x, n])
-          assert_parity(:cond, &cond_with_while/3, [pred({:u, 8}, 0), x, n])
+          assert_same(&while_with_cond/2, [x, n])
+          assert_same(&nest2/2, [x, n])
+          assert_same(&cond_with_while/3, [pred({:u, 8}, 1), x, n])
+          assert_same(&cond_with_while/3, [pred({:u, 8}, 0), x, n])
         end
 
-        assert_parity(:while, &nest3/2, [x, pred({:s, 32}, 3)])
+        assert_same(&nest3/2, [x, pred({:s, 32}, 3)])
       end
     end
 
     test "trip counts 0, 1, 10 and 1000" do
       for type <- [{:s, 32}, {:f, 32}, {:u, 8}], trips <- [0, 1, 10, 1000] do
-        assert_parity(:while, &while_scalar/2, [loop_data(type, {3}), pred({:s, 32}, trips)])
-        assert_parity(:while, &fill/2, [loop_data(type, {8}), pred({:s, 32}, min(trips, 8))])
+        assert_same(&while_scalar/2, [loop_data(type, {3}), pred({:s, 32}, trips)])
+        assert_same(&fill/2, [loop_data(type, {8}), pred({:s, 32}, min(trips, 8))])
       end
     end
 
     test "nesting depths 1, 2 and 3" do
       x = loop_data({:f, 32}, {3})
 
-      assert_parity(:while, &while_scalar/2, [x, pred({:s, 32}, 4)])
-      assert_parity(:while, &nest2/2, [x, pred({:s, 32}, 4)])
-      assert_parity(:while, &nest3/2, [x, pred({:s, 32}, 4)])
-      assert_parity(:while, &nest3/2, [x, pred({:s, 32}, 0)])
+      assert_same(&while_scalar/2, [x, pred({:s, 32}, 4)])
+      assert_same(&nest2/2, [x, pred({:s, 32}, 4)])
+      assert_same(&nest3/2, [x, pred({:s, 32}, 4)])
+      assert_same(&nest3/2, [x, pred({:s, 32}, 0)])
     end
 
     test "a condition that reads the carry" do
       for start <- [0, 3, 30] do
-        assert_parity(:while, &while_data_dependent/1, [Nx.tensor([start, 1], type: :f32)])
+        assert_same(&while_data_dependent/1, [Nx.tensor([start, 1], type: :f32)])
       end
     end
   end

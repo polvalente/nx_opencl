@@ -8,7 +8,7 @@ defmodule NxCL.ReduceOpsTest do
   """
   use ExUnit.Case, async: false
 
-  import NxCL.Parity
+  import NxCL.TestSupport.Compare
 
   alias NxCL.Lower
   alias NxCL.Native
@@ -117,8 +117,8 @@ defmodule NxCL.ReduceOpsTest do
         Nx.divide(e, Nx.sum(e, axes: [1], keep_axes: true))
       end
 
-      x = NxCL.Parity.Gen.random({128, 1000}, @f32)
-      assert_parity(:softmax, softmax, [x], record: false, rtol: 1.0e-4, atol: 1.0e-6)
+      x = NxCL.TestSupport.Gen.random({128, 1000}, @f32)
+      assert_same(softmax, [x], rtol: 1.0e-4, atol: 1.0e-6)
     end
   end
 
