@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pocl:
+    name: Tests and checks on PoCL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Elixir, Erlang and Rust at the versions in mise.toml.
+      - uses: jdx/mise-action@v2
+
+      # PoCL is a CPU OpenCL device. It has cl_khr_fp64 and 64-bit atomics, so it
+      # covers every cell the parity matrix lists.
+      - name: Install PoCL and the ICD loader
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pocl-opencl-icd ocl-icd-libopencl1 ocl-icd-opencl-dev clinfo
+          clinfo --list
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            native/nxcl_nif/target
+          key: ${{ runner.os }}-${{ hashFiles('mix.lock', 'mise.toml', 'native/nxcl_nif/Cargo.lock') }}
+
+      - run: mix deps.get
+
+      - name: Cargo checks
+        working-directory: native/nxcl_nif
+        run: |
+          cargo fmt --check
+          cargo clippy -- -D warnings
+          cargo test
+
+      - name: Tests, recording the parity cells
+        env:
+          MIX_ENV: test
+          NXCL_PARITY_REPORT: "1"
+        run: mix test
+
+      - name: Parity check
+        run: elixir test/support/check_parity.exs --cpu-only
+
+      - name: mix check
+        run: mix check

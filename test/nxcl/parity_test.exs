@@ -120,6 +120,33 @@ defmodule NxCL.ParityTest do
 
       assert Enum.any?(entries, &(&1.status == :pass and &1.op == :parity_probe))
       assert Enum.any?(entries, &(&1.status == :skipped and &1.requires == :fp16))
+
+      assert [%{device_type: type, extensions: ext}] =
+               Enum.filter(entries, &(&1.status == :device))
+
+      assert type in ["GPU", "CPU", "ACCELERATOR", "OTHER"]
+      assert is_binary(ext)
+    end
+
+    test "a function argument records a :fun cell" do
+      args = [Nx.tensor([[1, 2, 3], [4, 5, 6]], type: :s16)]
+
+      Parity.assert_parity(
+        :parity_fun_probe,
+        &Nx.reduce(&1, Nx.tensor(0, type: :s16), [axes: [1]], fn a, b -> Nx.add(a, b) end),
+        args
+      )
+
+      assert {:fun, {:s, 16}, :compiler} in Recorder.recorded()
+
+      # Other rows may have recorded this cell; take it out for the check, then put it back.
+      cell = {:fun, {:f, 32}, :compiler}
+      had? = cell in Recorder.recorded()
+      :ets.delete(Recorder, cell)
+
+      Parity.assert_parity(:parity_no_fun_probe, &Nx.negate/1, [Nx.tensor([1.0], type: :f32)])
+      refute cell in Recorder.recorded()
+      if had?, do: Recorder.record(:fun, {:f, 32}, :compiler)
     end
   end
 

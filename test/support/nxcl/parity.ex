@@ -55,7 +55,10 @@ defmodule NxCL.Parity do
     compiler = Keyword.get(opts, :compiler, NxCL.Compiler)
     compiler_opts = Keyword.get(opts, :compiler_opts, [])
 
-    actual = apply(Nx.Defn.jit(fun, [compiler: compiler] ++ compiler_opts), args)
+    actual =
+      guarded(op, compiler, fn ->
+        apply(Nx.Defn.jit(fun, traced(compiler, compiler_opts)), args)
+      end)
 
     try do
       compare_containers(expected, actual, opts)
@@ -67,6 +70,7 @@ defmodule NxCL.Parity do
 
     if compiler == NxCL.Compiler and Keyword.get(opts, :record, true) do
       for dtype <- cell_dtypes(args, expected), do: Recorder.record(op, dtype, :compiler)
+      for dtype <- fun_dtypes(fun, args), do: Recorder.record(:fun, dtype, :compiler)
     end
 
     if compiler == NxCL.Compiler and Keyword.get(opts, :backend, true) do
@@ -79,9 +83,21 @@ defmodule NxCL.Parity do
   # The eager path: arguments on `NxCL.Backend`, default backend `NxCL.Backend`, the
   # evaluator walks the graph and each op runs as a one-op program.
   defp assert_backend(op, fun, args, expected, opts) do
+    # `NxCL.Backend` stays the default: a literal the row's function builds, and the
+    # evaluator's own `iota` and constants, live on it as they would for a user. The
+    # guard here traces `Nx.BinaryBackend` calls and counts host calls.
     actual =
       Nx.with_default_backend(NxCL.Backend, fn ->
-        apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), Enum.map(args, &to_nxcl_backend/1))
+        NxCL.Parity.Tripwire.guard(
+          op,
+          fn ->
+            apply(
+              Nx.Defn.jit(fun, compiler: NxCL.Parity.Tripwire.Compiler, inner: Nx.Defn.Evaluator),
+              Enum.map(args, &to_nxcl_backend/1)
+            )
+          end,
+          default: false
+        )
       end)
 
     try do
@@ -100,6 +116,18 @@ defmodule NxCL.Parity do
     end
   end
 
+  # Runs the candidate with the tripwire backend as default (see `NxCL.Parity.Tripwire`).
+  # Other compilers (the harness's own tests) run unguarded.
+  defp guarded(op, NxCL.Compiler, fun), do: NxCL.Parity.Tripwire.guard(op, fun)
+  defp guarded(_op, _compiler, fun), do: fun.()
+
+  # The jit options for a candidate: `NxCL.Compiler` runs inside the tripwire compiler,
+  # which pauses the trace while the row's function builds its expression.
+  defp traced(NxCL.Compiler, opts),
+    do: [compiler: NxCL.Parity.Tripwire.Compiler, inner: NxCL.Compiler] ++ opts
+
+  defp traced(compiler, opts), do: [compiler: compiler] ++ opts
+
   @doc "The seed ExUnit runs with; generators derive their keys from it."
   @spec seed() :: non_neg_integer()
   def seed, do: ExUnit.configuration()[:seed] || 0
@@ -112,9 +140,17 @@ defmodule NxCL.Parity do
   end
 
   defp to_binary_backend(%Nx.Tensor{} = t), do: Nx.backend_copy(t, Nx.BinaryBackend)
+
+  defp to_binary_backend(container) when is_map(container) or is_tuple(container),
+    do: Nx.Defn.Composite.traverse(container, &Nx.backend_copy(&1, Nx.BinaryBackend))
+
   defp to_binary_backend(other), do: other
 
   defp to_nxcl_backend(%Nx.Tensor{} = t), do: Nx.backend_copy(t, NxCL.Backend)
+
+  defp to_nxcl_backend(container) when is_map(container) or is_tuple(container),
+    do: Nx.Defn.Composite.traverse(container, &Nx.backend_copy(&1, NxCL.Backend))
+
   defp to_nxcl_backend(other), do: other
 
   # -- Comparison ----------------------------------------------------------
@@ -230,6 +266,33 @@ defmodule NxCL.Parity do
     Enum.uniq(input_types ++ output_types)
   end
 
+  # Types of the function arguments (`reduce`, `window_reduce` bodies) in the traced
+  # expression. Each is a `:fun` cell: the compiler lowered a function argument of
+  # that type and the row passed.
+  defp fun_dtypes(fun, args) do
+    expr = apply(Nx.Defn.debug_expr(fun), args)
+    {_, {_seen, types}} = Nx.Defn.Composite.traverse(expr, {MapSet.new(), []}, &collect_funs/2)
+    Enum.uniq(types)
+  end
+
+  defp collect_funs(%Nx.Tensor{data: %Nx.Defn.Expr{id: id}} = t, {seen, types} = acc) do
+    if MapSet.member?(seen, id) do
+      {t, acc}
+    else
+      acc = {MapSet.put(seen, id), fun_types(t) ++ types}
+      {_, acc} = Nx.Defn.Tree.apply_args(t, :all, acc, &collect_funs/2)
+      {t, acc}
+    end
+  end
+
+  defp collect_funs(t, acc), do: {t, acc}
+
+  defp fun_types(%Nx.Tensor{data: %Nx.Defn.Expr{op: :fun, args: [params, body, _mfa]}}) do
+    for %Nx.Tensor{type: type} <- params ++ Nx.Defn.Composite.flatten_list([body]), do: type
+  end
+
+  defp fun_types(_), do: []
+
   # -- Device capabilities -------------------------------------------------
 
   @doc """
@@ -269,6 +332,25 @@ defmodule NxCL.Parity do
   @doc "Name of device 0, or `\"unknown\"` when no device opens."
   @spec device_name() :: String.t()
   def device_name, do: device_info()["name"] || "unknown"
+
+  @doc """
+  Identity of device 0 for the results file: name, vendor, driver, OpenCL version,
+  device type (`"GPU"`, `"CPU"`, ...) and extensions.
+  """
+  @spec device_identity() :: map()
+  def device_identity do
+    info = device_info()
+
+    %{
+      status: :device,
+      device: device_name(),
+      vendor: info["vendor"],
+      driver_version: info["driver_version"],
+      version: info["version"],
+      device_type: info["device_type"],
+      extensions: info["extensions"] || ""
+    }
+  end
 
   defp device_info do
     case :persistent_term.get({__MODULE__, :device_info}, nil) do

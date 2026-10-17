@@ -1,16 +1,31 @@
 defmodule NxCL.Parity.Recorder do
   @moduledoc """
   Collects passing `{op, dtype, path}` cells and writes them to
-  `.work/parity_results.exs` when `NXCL_PARITY_REPORT=1`.
+  `.work/parity_results.exs` when `NXCL_PARITY_REPORT=1`. The
+  `NXCL_PARITY_RESULTS` variable names another file; with no `.work/`
+  directory (CI) the default is `tmp/parity_results.exs`.
 
   The file is a list of maps: `%{op, dtype, path, device, status: :pass}` for a
-  passing cell and `%{requires, device, status: :skipped}` for a skipped
-  capability. A write replaces the entries of this device and keeps the
-  entries of other devices, so a run on each device adds up.
+  passing cell, `%{requires, device, status: :skipped}` for a skipped
+  capability, and one `%{device, status: :device, vendor, driver_version,
+  version, device_type, extensions}` for the device itself, and one
+  `%{device, status: :host_calls, ops: %{kind => count}}` with the host calls
+  by kind (`NxCL.Parity.Tripwire`). A write replaces
+  the entries of this device and keeps the entries of other devices, so a run
+  on each device adds up.
   """
 
   @table __MODULE__
-  @default_path ".work/parity_results.exs"
+
+  @doc "Where results go: `NXCL_PARITY_RESULTS`, else `.work/` when it exists, else `tmp/`."
+  @spec default_path() :: Path.t()
+  def default_path do
+    cond do
+      path = System.get_env("NXCL_PARITY_RESULTS") -> path
+      File.dir?(".work") -> ".work/parity_results.exs"
+      true -> "tmp/parity_results.exs"
+    end
+  end
 
   @spec start() :: :ok
   def start do
@@ -38,7 +53,7 @@ defmodule NxCL.Parity.Recorder do
   @spec write_if_enabled(String.t() | nil, Path.t(), [atom()]) :: :written | :disabled
   def write_if_enabled(
         env \\ System.get_env("NXCL_PARITY_REPORT"),
-        path \\ @default_path,
+        path \\ default_path(),
         skipped \\ []
       )
 
@@ -59,7 +74,8 @@ defmodule NxCL.Parity.Recorder do
       end
 
     skips = for cap <- skipped, do: %{requires: cap, device: device, status: :skipped}
-    mine = passed ++ skips
+    host = %{status: :host_calls, device: device, ops: NxCL.Parity.Tripwire.host_calls()}
+    mine = [NxCL.Parity.device_identity(), host | passed] ++ skips
 
     others = path |> read_existing() |> Enum.reject(&(&1.device == device))
 
@@ -70,6 +86,7 @@ defmodule NxCL.Parity.Recorder do
         pretty: true
       )
 
+    File.mkdir_p!(Path.dirname(path))
     File.write!(path, body <> "\n")
   end
 

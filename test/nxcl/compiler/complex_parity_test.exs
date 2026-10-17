@@ -273,11 +273,12 @@ defmodule NxCL.ComplexParityTest do
 
   describe "unary" do
     for op <- @unary, type <- @types do
-      if type == {:c, 128}, do: @tag(requires: :fp64)
-
       # `sign` of a complex value is z / |z|; `BinaryBackend` returns 1 for every
-      # value, so the rule rows below state `sign`.
+      # value, so the rule rows below state `sign`. The tag goes inside the `if`: a
+      # tag set with no test after it would land on the next test.
       if op != :sign do
+        if type == {:c, 128}, do: @tag(requires: :fp64)
+
         test "#{op} #{Nx.Type.to_string(type)}" do
           op = unquote(op)
           type = unquote(Macro.escape(type))

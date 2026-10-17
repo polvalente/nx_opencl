@@ -64,15 +64,15 @@ defmodule NxCL.Backend do
     put_in(tensor.data, %__MODULE__{ref: ref, ctx: ctx})
   end
 
-  # `limit` counts elements, as in `Nx.BinaryBackend`.
+  # `limit` counts elements (vectorized axes included), as in `Nx.BinaryBackend`.
   @impl true
   def to_binary(%Nx.Tensor{data: %__MODULE__{ref: ref}, type: {_, bits}} = tensor, limit) do
-    NxCL.Native.buffer_read(ref, div(bits * min(limit, Nx.size(tensor)), 8))
+    NxCL.Native.buffer_read(ref, div(bits * min(limit, Nx.flat_size(tensor)), 8))
   end
 
   @impl true
   def inspect(%Nx.Tensor{} = tensor, opts) do
-    binary = to_binary(tensor, Nx.size(tensor))
+    binary = to_binary(tensor, Nx.flat_size(tensor))
     Nx.Backend.inspect(tensor, binary, opts)
   end
 
@@ -83,7 +83,7 @@ defmodule NxCL.Backend do
 
   @impl true
   def backend_copy(tensor, Nx.BinaryBackend, _opts) do
-    binary = to_binary(tensor, Nx.size(tensor))
+    binary = to_binary(tensor, Nx.flat_size(tensor))
 
     Nx.BinaryBackend.from_binary(
       %{tensor | data: %Nx.BinaryBackend{}},
@@ -93,7 +93,7 @@ defmodule NxCL.Backend do
   end
 
   def backend_copy(tensor, backend, opts) do
-    binary = to_binary(tensor, Nx.size(tensor))
+    binary = to_binary(tensor, Nx.flat_size(tensor))
     backend.from_binary(%{tensor | data: %{__struct__: backend}}, binary, opts)
   end
 
@@ -111,7 +111,7 @@ defmodule NxCL.Backend do
     full = div(elem(tensor.shape, 0), batch_size)
     repeat? = rem(elem(tensor.shape, 0), batch_size) != 0 and opts[:leftover] == :repeat
     range = if repeat?, do: 0..full, else: 0..(full - 1)//1
-    binary = to_binary(tensor, Nx.size(tensor))
+    binary = to_binary(tensor, Nx.flat_size(tensor))
     bytes = Nx.byte_size(out)
 
     Stream.map(range, fn

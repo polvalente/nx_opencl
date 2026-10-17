@@ -2,7 +2,10 @@ use crate::codegen::{Caps, Limits};
 use crate::kernel::{CompiledKernel, KernelKey};
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use opencl3::context::Context;
-use opencl3::device::{get_all_devices, Device, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_GPU};
+use opencl3::device::{
+    get_all_devices, Device, CL_DEVICE_TYPE_ACCELERATOR, CL_DEVICE_TYPE_ALL, CL_DEVICE_TYPE_CPU,
+    CL_DEVICE_TYPE_GPU,
+};
 use opencl3::platform::get_platforms;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -119,6 +122,8 @@ pub struct DeviceInfo {
     pub name: String,
     pub vendor: String,
     pub version: String,
+    pub driver_version: String,
+    pub device_type: String,
     pub max_workgroup_size: usize,
     pub max_compute_units: u32,
     pub local_mem_size: u64,
@@ -133,6 +138,17 @@ impl DeviceCtx {
         let name = self.device.name().map_err(|e| format!("{:?}", e))?;
         let vendor = self.device.vendor().map_err(|e| format!("{:?}", e))?;
         let version = self.device.version().map_err(|e| format!("{:?}", e))?;
+        let driver_version = self
+            .device
+            .driver_version()
+            .map_err(|e| format!("{:?}", e))?;
+        let device_type = match self.device.dev_type().map_err(|e| format!("{:?}", e))? {
+            t if t & CL_DEVICE_TYPE_GPU != 0 => "GPU",
+            t if t & CL_DEVICE_TYPE_CPU != 0 => "CPU",
+            t if t & CL_DEVICE_TYPE_ACCELERATOR != 0 => "ACCELERATOR",
+            _ => "OTHER",
+        }
+        .to_string();
         let max_workgroup_size = self
             .device
             .max_work_group_size()
@@ -156,6 +172,8 @@ impl DeviceCtx {
             name,
             vendor,
             version,
+            driver_version,
+            device_type,
             max_workgroup_size,
             max_compute_units,
             local_mem_size,

@@ -5,13 +5,13 @@ defmodule NxOpencl do
   NxCL targets OpenCL 1.2+ devices for running inference workloads.
   It provides two complementary interfaces:
 
-    * `NxCL.Backend` — an eager `Nx.Backend` that dispatches individual
-      tensor ops to OpenCL kernels. Ops without GPU kernels fall back to
-      `Nx.BinaryBackend` transparently.
+    * `NxCL.Backend` — an eager `Nx.Backend` that runs each tensor op as a
+      one-op program on the device. An op with no lowering raises; nothing
+      runs on `Nx.BinaryBackend` behind your back.
 
     * `NxCL.Compiler` — an `Nx.Defn.Compiler` that traces a `defn`
-      function into a flat op sequence and executes the whole graph on
-      the GPU. This is the path to fusion and buffer reuse.
+      function into a program and runs the whole graph on the device, with
+      elementwise fusion and compile caches.
 
   ## Eager backend
 
@@ -31,7 +31,7 @@ defmodule NxOpencl do
       gpu_tensor = Nx.backend_transfer(cpu_tensor, NxCL.Backend)
       cpu_tensor = Nx.backend_transfer(gpu_tensor, Nx.BinaryBackend)
 
-  See `NxCL.Backend` for the full list of GPU-accelerated operations
-  and `NxCL.Compiler` for compiler-specific details.
+  The README lists every op, with its dtypes and what is out of scope. See
+  `NxCL.Backend` and `NxCL.Compiler` for details of each path.
   """
 end

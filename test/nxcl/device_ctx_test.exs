@@ -25,6 +25,8 @@ defmodule NxCL.DeviceCtxTest do
       assert Map.has_key?(info_map, "name")
       assert Map.has_key?(info_map, "vendor")
       assert Map.has_key?(info_map, "version")
+      assert Map.has_key?(info_map, "driver_version")
+      assert info_map["device_type"] in ["GPU", "CPU", "ACCELERATOR", "OTHER"]
       assert Map.has_key?(info_map, "max_workgroup_size")
       assert Map.has_key?(info_map, "max_compute_units")
       assert Map.has_key?(info_map, "global_mem_size")

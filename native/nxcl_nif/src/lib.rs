@@ -124,6 +124,8 @@ fn device_info(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<Vec<(String, String)
             ("name".to_string(), info.name),
             ("vendor".to_string(), info.vendor),
             ("version".to_string(), info.version),
+            ("driver_version".to_string(), info.driver_version),
+            ("device_type".to_string(), info.device_type),
             (
                 "max_workgroup_size".to_string(),
                 info.max_workgroup_size.to_string(),

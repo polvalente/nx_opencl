@@ -55,8 +55,8 @@ Nx.dot(a, b)
 ### Defn compiler
 
 Use `NxCL.Compiler` with `Nx.Defn.jit/2` to trace a `defn` function
-into a flat op sequence and execute the whole graph on the GPU in one
-pass.
+into a program and run the whole graph on the GPU. Elementwise chains
+fuse into one kernel, and the compiler caches programs and kernels.
 
 ```elixir
 defmodule MyModel do
@@ -82,8 +82,8 @@ cpu_tensor = Nx.backend_transfer(gpu_tensor, Nx.BinaryBackend)
 
 ### With Axon models
 
-Axon models are pure Nx under the hood, so they work with the eager
-backend by transferring params and inputs to the GPU:
+Axon is a test dependency only; add it to your own project to use it. An
+Axon model is plain Nx, so `Nx.Defn.jit/2` compiles its predict function:
 
 ```elixir
 model =
@@ -92,44 +92,198 @@ model =
   |> Axon.dense(10, activation: :softmax)
 
 {init_fn, predict_fn} = Axon.build(model)
-params = init_fn.(Nx.template({1, 784}, :f32), %{})
+params = init_fn.(Nx.template({1, 784}, :f32), Axon.ModelState.empty())
 
-# Transfer params to GPU (walk the ModelState struct)
-gpu_params = %{params |
-  data: Map.new(params.data, fn {layer, layer_params} ->
-    {layer, Map.new(layer_params, fn {k, v} ->
-      {k, Nx.backend_transfer(v, NxCL.Backend)}
-    end)}
-  end)
-}
-
-gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-output = predict_fn.(gpu_params, gpu_input)
+predict = Nx.Defn.jit(predict_fn, compiler: NxCL.Compiler)
+output = predict.(params, input)
 ```
+
+Training steps work the same way: wrap the loss, `Nx.Defn.value_and_grad/2`
+and the parameter update in one function and jit it.
 
 ### Query device info
 
 ```elixir
 ctx = NxCL.Native.device_ctx_create(0)
 NxCL.Native.device_info(ctx)
-# [{"name", "NVIDIA GeForce RTX 3090 Ti"}, {"vendor", "NVIDIA"}, ...]
+# [{"name", "NVIDIA GeForce RTX 3090 Ti"}, {"vendor", "NVIDIA"}, {"device_type", "GPU"}, ...]
 ```
 
 ## Operations
 
-`NxCL.Backend` and `NxCL.Compiler` run every Nx op on the GPU through one
-set of generated kernels, for every Nx dtype except `s2`, `s4`, `u2`, `u4`,
-`f8` and `f8_e4m3fn`. `f64` and `c128` need `cl_khr_fp64`; `f16` needs
-`cl_khr_fp16`.
+`NxCL.Backend` and `NxCL.Compiler` run Nx ops on the GPU through one set of
+generated kernels. The table lists every op the two paths know, and the
+dtypes each runs on. "All" means every in-scope dtype: `u8 u16 u32 u64 s8
+s16 s32 s64 bf16 f32 f64 c64 c128`. `f64` and `c128` need `cl_khr_fp64`.
+`s64` and `u64` `indexed_add` need `cl_khr_int64_base_atomics`. `bf16` is
+stored as 16 bits and computed in `f32`.
+
+The table is generated from the parity matrix, which a test checks against
+every device run (see "Running Tests").
+
+<!-- parity:ops:start -->
+| Op | `NxCL.Compiler` | `NxCL.Backend` | Dtypes |
+| --- | --- | --- | --- |
+| `abs` | device | device | all |
+| `acos` | device | device | all |
+| `acosh` | device | device | all |
+| `add` | device | device | all |
+| `all` | device | device | all |
+| `any` | device | device | all |
+| `argmax` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `argmin` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `argsort` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `as_type` | device | device | all |
+| `asin` | device | device | all |
+| `asinh` | device | device | all |
+| `atan` | device | device | all |
+| `atan2` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `atanh` | device | device | all |
+| `bitcast` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `bitwise_and` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `bitwise_not` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `bitwise_or` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `bitwise_xor` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `block` | device | device | all |
+| `block_all_close` | device | device | all |
+| `block_cumulative_max` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `block_cumulative_min` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `block_cumulative_product` | device | device | all |
+| `block_cumulative_sum` | device | device | all |
+| `block_fft2` | device | device | all |
+| `block_ifft2` | device | device | all |
+| `block_irfft` | device | device | all |
+| `block_lin_alg_cholesky` | device | device | all |
+| `block_lin_alg_determinant` | device | device | all |
+| `block_lin_alg_eigh` | host call | host call | all |
+| `block_lin_alg_lu` | host call | host call | all |
+| `block_lin_alg_qr` | host call | host call | all |
+| `block_lin_alg_solve` | device | device | all |
+| `block_lin_alg_svd` | host call | host call | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `block_logical_not` | device | device | all |
+| `block_phase` | device | device | all |
+| `block_rfft` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `block_take` | device | device | all |
+| `block_take_along_axis` | device | device | all |
+| `block_top_k` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `broadcast` | device | device | all |
+| `cbrt` | device | device | all |
+| `ceil` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `clip` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `concatenate` | device | device | all |
+| `cond` | device | out of scope | all |
+| `conjugate` | device | device | all |
+| `constant` | device | device | all |
+| `conv` | device | device | all |
+| `cos` | device | device | all |
+| `cosh` | device | device | all |
+| `count_leading_zeros` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `divide` | device | device | all |
+| `dot` | device | device | all |
+| `elem` | device | out of scope | all |
+| `equal` | device | device | all |
+| `erf` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `erf_inv` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `erfc` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `exp` | device | device | all |
+| `expm1` | device | device | all |
+| `eye` | device | device | all |
+| `fft` | device | device | all |
+| `floor` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `fun` | device | out of scope | all |
+| `gather` | device | device | all |
+| `greater` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `greater_equal` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `ifft` | device | device | all |
+| `imag` | device | device | all |
+| `indexed_add` | device | device | all |
+| `indexed_put` | device | device | all |
+| `io_call` | device | out of scope | all |
+| `iota` | device | device | all |
+| `is_infinity` | device | device | all |
+| `is_nan` | device | device | all |
+| `left_shift` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `less` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `less_equal` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `log` | device | device | all |
+| `log1p` | device | device | all |
+| `logical_and` | device | device | all |
+| `logical_or` | device | device | all |
+| `logical_xor` | device | device | all |
+| `max` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `metadata` | device | out of scope | all |
+| `min` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `multiply` | device | device | all |
+| `negate` | device | device | all |
+| `not_equal` | device | device | all |
+| `pad` | device | device | all |
+| `parameter` | device | out of scope | all |
+| `population_count` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `pow` | device | device | all |
+| `product` | device | device | all |
+| `put_slice` | device | device | all |
+| `quotient` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `real` | device | device | all |
+| `reduce` | device | device | all |
+| `reduce_max` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `reduce_min` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `remainder` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `reshape` | device | device | all |
+| `reverse` | device | device | all |
+| `right_shift` | device | device | `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `round` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `rsqrt` | device | device | all |
+| `runtime_call` | device | out of scope | all |
+| `select` | device | device | all |
+| `sigmoid` | device | device | all |
+| `sign` | device | device | all |
+| `sin` | device | device | all |
+| `sinh` | device | device | all |
+| `slice` | device | device | all |
+| `sort` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `sqrt` | device | device | all |
+| `squeeze` | device | device | all |
+| `stack` | device | device | all |
+| `subtract` | device | device | all |
+| `sum` | device | device | all |
+| `tan` | device | device | all |
+| `tanh` | device | device | all |
+| `tensor` | device | out of scope | all |
+| `transpose` | device | device | all |
+| `triangular_solve` | device | device | all |
+| `while` | device | out of scope | all |
+| `window_max` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `window_min` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `window_product` | device | device | all |
+| `window_reduce` | device | device | all |
+| `window_scatter_max` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `window_scatter_min` | device | device | `bf16` `f32` `f64` `s8` `s16` `s32` `s64` `u8` `u16` `u32` `u64` |
+| `window_sum` | device | device | all |
+<!-- parity:ops:end -->
 
 Four linear algebra blocks have no device kernel: `qr`, `eigh`, `svd` and
 `lu`. Both paths run them as an explicit host call: the operands are read
-back, `Nx.BinaryBackend` runs the block, and the result goes back up.
+back, `Nx.BinaryBackend` runs the block, and the result goes back up. Ops
+built on them, such as `solve`, use the same host call.
 
 Neither path copies an op to the CPU silently. An op with no lowering raises
-`ArgumentError` ("does not yet lower op ..."). `Nx.from_pointer/3` and
-`Nx.to_pointer/2` raise on the backend: OpenCL has no portable handle to
-export. `Nx.backend_deallocate/1` frees the device buffer at once.
+`ArgumentError` ("does not yet lower op ..."). `Nx.backend_deallocate/1`
+frees the device buffer at once.
+
+### Out of scope
+
+<!-- parity:cuts:start -->
+| Cut | Reason |
+| --- | --- |
+| Expr-only forms (`cond`, `while`, `fun` and the like) on `NxCL.Backend` | Expr-only form; the backend has no callback. |
+| Multi-device sharding, distributed execution | One device per partition is enough for parity. |
+| Ops Nx rejects on a dtype (for example `bitwise_and` on floats, `max` on complex) | Nx raises for that op and dtype, so there is nothing to match. The compiler raises at lowering too. Decided by the user 2026-10-14. |
+| Sub-byte and 8-bit float dtypes (`s2`, `s4`, `u2`, `u4`, `f8`, `f8_e4m3fn`) | No OpenCL C type; packed storage and widening not needed yet. Decided by the user 2026-10-14. |
+| `EMLX.Fast.*` fused attention, rope, norm kernels | Model-specific; elementwise fusion covers the general case. |
+| `f16` on devices without `cl_khr_fp16` | No device in the test set has the extension, so the cells cannot run. The f16 kernels stay in the code and are tested by Rust source tests. Decided by the user 2026-10-16. |
+| `from_pointer` / `to_pointer` | No portable OpenCL handle to export. |
+| `quantized_matmul`, quantization | Needs its own format and kernels; no demand yet. |
+<!-- parity:cuts:end -->
 
 ## Cross-Compilation (Nerves)
 
@@ -268,9 +422,40 @@ clinfo --list
 ## Running Tests
 
 ```bash
-# All tests (requires OpenCL runtime)
+# All tests (requires an OpenCL runtime)
 mix test
 
 # Skip OpenCL tests
 mix test --exclude opencl
 ```
+
+### Parity check
+
+Every `mix test` run records the cells it passed. With
+`NXCL_PARITY_REPORT=1` it writes them, with the device's name, vendor,
+driver, OpenCL version, type and extensions, to `.work/parity_results.exs`
+(or `tmp/parity_results.exs` when there is no `.work` directory, or the file
+in `NXCL_PARITY_RESULTS`). Each device adds its own results to the file.
+`test/support/check_parity.exs` then lists every in-scope cell with no
+passing result:
+
+```bash
+# On a real GPU
+NXCL_PARITY_REPORT=1 mix test
+
+# On PoCL through the ICD loader (covers f64, c128 and 64-bit atomics)
+OPENCL_DYLIB_PATH=/opt/homebrew/opt/opencl-icd-loader/lib/libOpenCL.dylib \
+OCL_ICD_VENDORS=/opt/homebrew/etc/OpenCL/vendors \
+NXCL_PARITY_REPORT=1 mix test
+
+# The check; exits 1 when a cell is open
+elixir test/support/check_parity.exs
+```
+
+The check also fails when no result comes from a GPU device, when a GPU
+missed a cell its extensions allow, or when a host call ran for anything but
+`qr`, `eigh`, `svd`, `lu` or a callback you passed to `Nx.runtime_call/4` or
+`Nx.io_call/2`.
+
+CI runs the suite on PoCL (`.github/workflows/ci.yml`). Real-GPU runs stay
+manual; use the commands above.
