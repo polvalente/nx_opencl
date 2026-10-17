@@ -129,7 +129,7 @@ defmodule NxCL.Executor do
   end
 
   defp cached(%{ctx: ctx}, key, wire) do
-    ProgramCache.fetch_or_build(:structural, key, fn ->
+    ProgramCache.fetch_or_build(key, fn ->
       case NxCL.Native.compile_program(ctx, wire.()) do
         {:ok, native} -> native
         {:error, reason} -> raise NxCL.CompilerError, message: "invalid program: #{reason}"
@@ -141,7 +141,7 @@ defmodule NxCL.Executor do
   # sub-program. Each segment of the plan compiles the first time it runs.
   defp plan_for(dev, program) do
     if Plan.control?(program) do
-      ProgramCache.fetch_or_build(:plan, {:plan, Program.signature(program)}, fn ->
+      ProgramCache.fetch_or_build({:plan, Program.signature(program)}, fn ->
         Plan.build(program)
       end)
     else

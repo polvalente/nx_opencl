@@ -1,7 +1,6 @@
 use crate::device_ctx::DeviceCtx;
 use opencl3::kernel::Kernel;
 use opencl3::program::Program;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// Cache key: source text, entry name, build options. One cache per device context.
@@ -57,7 +56,6 @@ pub fn cached(
         .map_err(|e| format!("Lock error: {:?}", e))?;
 
     if let Some(kernel) = cache.get(&key) {
-        ctx.stats.hits.fetch_add(1, Ordering::Relaxed);
         return Ok(kernel.clone());
     }
 
@@ -67,7 +65,6 @@ pub fn cached(
         entry_point,
         build_opts,
     )?);
-    ctx.stats.builds.fetch_add(1, Ordering::Relaxed);
     cache.insert(key, kernel.clone());
     Ok(kernel)
 }

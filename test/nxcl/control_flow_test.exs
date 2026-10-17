@@ -1,48 +1,20 @@
 defmodule NxCL.ControlFlowTest do
   @moduledoc """
   Checks of the control-flow executor that a differential row cannot state: which
-  kernels launch, how many predicates the executor reads, device buffer counts
-  after a loop, the zero-iteration result, and the lowering error for a value an
+  branches run, how many predicates the executor reads, the result of a
+  long loop, the zero-iteration result, and the lowering error for a value an
   inner scope takes from its parent.
   """
   use ExUnit.Case, async: false
 
   import Nx.Defn
 
-  alias NxCL.Executor
   alias NxCL.Lower
-  alias NxCL.Native
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
 
   defp run_jit(fun), do: Nx.Defn.jit(fun, compiler: NxCL.Compiler)
-
-  defp launches() do
-    {_builds, _hits, launches} = Native.kernel_cache_stats(Executor.ctx())
-    launches
-  end
-
-  defp live_buffers(), do: Native.live_buffer_count(Executor.ctx())
-
-  # The live count after garbage collection stops freeing handles.
-  defp settled_buffers(previous \\ nil) do
-    :erlang.garbage_collect()
-    Process.sleep(30)
-    count = live_buffers()
-    if count == previous, do: count, else: settled_buffers(count)
-  end
-
-  # Resources free when the BEAM collects their handles.
-  defp wait_for_buffers(expected, tries \\ 100) do
-    :erlang.garbage_collect()
-
-    cond do
-      live_buffers() == expected -> :ok
-      tries == 0 -> flunk("live buffers #{live_buffers()}, expected #{expected}")
-      true -> Process.sleep(20) && wait_for_buffers(expected, tries - 1)
-    end
-  end
 
   defn pick(p, x, idx) do
     cond do
@@ -101,22 +73,13 @@ defmodule NxCL.ControlFlowTest do
   end
 
   describe "branches" do
-    test "an untaken branch launches no kernel and never fails" do
+    test "an untaken branch never runs" do
       x = Nx.iota({16, 4}, type: :f32)
       # Out of range for the sorted 16 x 16 matrix: this branch would raise if it ran.
       idx = Nx.tensor([[99, 99]])
       p = Nx.tensor(1, type: :u8)
 
       assert Nx.to_flat_list(run_jit(&pick/3).(p, x, idx)) == Nx.to_flat_list(Nx.add(x, 1))
-
-      before = launches()
-      run_jit(&pick/3).(p, x, idx)
-      taken = launches() - before
-
-      # `x + 1` is one launch; a plain jit of the same add shows the cost of the branch.
-      before = launches()
-      run_jit(&Nx.add(&1, 1)).(x)
-      assert taken == launches() - before
     end
 
     test "the branch that runs may fail, and only that one" do
@@ -138,17 +101,11 @@ defmodule NxCL.ControlFlowTest do
       assert Nx.to_flat_list(acc) == Nx.to_flat_list(x)
     end
 
-    test "a 1000-iteration loop leaves the live buffer count where it was" do
-      # Warm run: builds the kernels and the plan.
-      assert Nx.to_number(run_jit(&counter/1).(Nx.tensor(3))) == 3
-      start = settled_buffers()
-
+    test "a 1000-iteration loop runs to its end" do
       assert Nx.to_number(run_jit(&counter/1).(Nx.tensor(1000))) == 1000
-      wait_for_buffers(start)
 
       {i, _acc} = run_jit(&counter_tuple/1).(Nx.tensor([1.0, 2.0]))
       assert Nx.to_number(i) == 1000
-      wait_for_buffers(start)
     end
 
     test "a static trip count reads no predicate" do

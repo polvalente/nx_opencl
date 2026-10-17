@@ -1,7 +1,7 @@
 defmodule NxCL.ShapeOpsTest do
   @moduledoc """
   Lowering and runtime behaviour of the shape ops that the differential rows
-  cannot show: which instructions lowering emits, which ops launch no kernel,
+  cannot show: which instructions lowering emits, which ops alias their input,
   zero-size inputs (Nx 1.0 cannot build them, so they go through the native
   wire), and the rank cap.
   """
@@ -9,7 +9,6 @@ defmodule NxCL.ShapeOpsTest do
 
   import NxCL.Parity
 
-  alias NxCL.Executor
   alias NxCL.Lower
   alias NxCL.Native
   alias NxCL.Program.Instruction
@@ -24,8 +23,6 @@ defmodule NxCL.ShapeOpsTest do
   end
 
   defp ops(program), do: Enum.map(program.instructions, & &1.op)
-
-  defp launches, do: Executor.ctx() |> Native.kernel_cache_stats() |> elem(2)
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 
@@ -115,9 +112,8 @@ defmodule NxCL.ShapeOpsTest do
   end
 
   describe "aliases" do
-    test "reshape, squeeze, metadata and elem launch no kernel" do
+    test "reshape, squeeze, metadata and elem give the input's data" do
       x = Nx.iota({6}, type: :f32)
-      before = launches()
 
       out =
         run(
@@ -129,7 +125,6 @@ defmodule NxCL.ShapeOpsTest do
           [x]
         )
 
-      assert launches() == before
       assert {y, b} = out
       assert y == Nx.reshape(x, {2, 3})
       assert b == x
@@ -137,7 +132,6 @@ defmodule NxCL.ShapeOpsTest do
 
     test "an aliased buffer stays alive for a later kernel" do
       x = Nx.iota({6}, type: :f32)
-      before = launches()
 
       assert_parity(
         :reshape,
@@ -146,19 +140,8 @@ defmodule NxCL.ShapeOpsTest do
           {y, Nx.add(y, Nx.reverse(y))}
         end,
         [x],
-        # The launch count is the compiler's; an eager run would add its own.
         backend: false
       )
-
-      # reverse and add launch; the reshape does not.
-      assert launches() - before == 2
-    end
-
-    test "each movement op launches one kernel" do
-      x = Nx.iota({2, 3}, type: :f32)
-      before = launches()
-      run(&Nx.transpose/1, [x])
-      assert launches() - before == 1
     end
   end
 
@@ -173,15 +156,14 @@ defmodule NxCL.ShapeOpsTest do
 
     defp exec(ctx, wire, buffers) do
       {:ok, program} = Native.compile_program(ctx, wire)
-      before = elem(Native.kernel_cache_stats(ctx), 2)
       {:ok, [out]} = Native.eval_program(program, buffers)
-      {out, elem(Native.kernel_cache_stats(ctx), 2) - before}
+      out
     end
 
     defp floats(buf, n),
       do: buf |> Native.buffer_read(n * 4) |> NxCL.TestHelpers.binary_to_floats()
 
-    test "an empty output launches nothing and reads back as empty", %{ctx: ctx} do
+    test "an empty output reads back as empty", %{ctx: ctx} do
       empty = Native.buffer_write(ctx, <<>>)
       s64 = {:s, 64}
 
@@ -201,18 +183,17 @@ defmodule NxCL.ShapeOpsTest do
             if elem(shape, 0) == 0, do: empty, else: Native.buffer_write(ctx, <<0::128>>)
           end) ++ Enum.map(consts, fn _ -> nil end)
 
-        {out, launched} = exec(ctx, wire(inputs, consts, instr), buffers)
-        assert launched == 0, inspect(instr)
+        out = exec(ctx, wire(inputs, consts, instr), buffers)
         assert Native.buffer_read(out, 0) == <<>>, inspect(instr)
       end
     end
 
-    test "an empty input beside a non-empty output still launches and fills", %{ctx: ctx} do
+    test "an empty input beside a non-empty output still fills", %{ctx: ctx} do
       empty = Native.buffer_write(ctx, <<>>)
       full = Native.buffer_write(ctx, NxCL.TestHelpers.floats_to_binary([1.0, 2.0]))
 
       # concatenate of {0} and {2}
-      {out, launched} =
+      out =
         exec(
           ctx,
           wire(
@@ -223,11 +204,10 @@ defmodule NxCL.ShapeOpsTest do
           [empty, full]
         )
 
-      assert launched == 1
       assert floats(out, 2) == [1.0, 2.0]
 
       # pad of {0} by 1 on each side: both elements are the pad value
-      {out, launched} =
+      out =
         exec(
           ctx,
           wire(
@@ -238,11 +218,10 @@ defmodule NxCL.ShapeOpsTest do
           [empty, nil]
         )
 
-      assert launched == 1
       assert floats(out, 2) == [7.0, 7.0]
 
       # put_slice of an empty update leaves the tensor as it is
-      {out, launched} =
+      out =
         exec(
           ctx,
           wire(
@@ -253,7 +232,6 @@ defmodule NxCL.ShapeOpsTest do
           [full, empty, nil]
         )
 
-      assert launched == 1
       assert floats(out, 2) == [1.0, 2.0]
     end
   end

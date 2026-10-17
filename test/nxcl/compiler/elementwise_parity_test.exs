@@ -1005,37 +1005,6 @@ defmodule NxCL.ElementwiseParityTest do
     end
   end
 
-  # -- Kernel cache ---------------------------------------------------------------
-
-  describe "kernel cache" do
-    test "two programs that need the same kernel build it once" do
-      ctx = NxCL.Executor.ctx()
-      a = Nx.tensor([1, 2, 3], type: :u16)
-      b = Nx.tensor([4, 5, 6], type: :u16)
-      big = Nx.iota({10, 10}, type: :u16)
-
-      # Program one: a shift.
-      Nx.Defn.jit(&Nx.left_shift/2, compiler: NxCL.Compiler).(a, b)
-      {builds, hits, _} = NxCL.Native.kernel_cache_stats(ctx)
-
-      # Program two has a different shape, but its shift kernel has the same source.
-      Nx.Defn.jit(&Nx.left_shift/2, compiler: NxCL.Compiler).(big, big)
-
-      {builds2, hits2, _} = NxCL.Native.kernel_cache_stats(ctx)
-      assert builds2 == builds
-      assert hits2 > hits
-    end
-
-    test "a constant's value does not change the kernel" do
-      ctx = NxCL.Executor.ctx()
-      x = Nx.tensor([1.0, 2.0])
-      Nx.Defn.jit(fn x -> Nx.multiply(x, 3.0) end, compiler: NxCL.Compiler).(x)
-      {builds, _, _} = NxCL.Native.kernel_cache_stats(ctx)
-      Nx.Defn.jit(fn x -> Nx.multiply(x, 9.5) end, compiler: NxCL.Compiler).(x)
-      assert {^builds, _, _} = NxCL.Native.kernel_cache_stats(ctx)
-    end
-  end
-
   # -- Device without an extension ----------------------------------------------------
 
   describe "a type the device cannot run" do

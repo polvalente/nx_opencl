@@ -20,8 +20,6 @@ defmodule NxCL.ProgramCache do
 
   use GenServer
 
-  alias NxCL.CacheStats
-
   @default_max 1024
 
   @doc false
@@ -33,23 +31,20 @@ defmodule NxCL.ProgramCache do
     opts = [:named_table, :public, :set, read_concurrency: true, write_concurrency: true]
     :ets.new(__MODULE__, opts)
     :ets.insert(__MODULE__, {:__index__, 0})
-    :ets.new(CacheStats.table(), opts)
     {:ok, nil}
   end
 
   @doc """
   The value under `key` (a hit), or what `build` returns (a miss), stored first
-  come first kept. `kind` is `:structural` or `:plan`; it picks the counters.
+  come first kept.
   """
-  @spec fetch_or_build(:structural | :plan, term(), (-> term())) :: term()
-  def fetch_or_build(kind, key, build) do
+  @spec fetch_or_build(term(), (-> term())) :: term()
+  def fetch_or_build(key, build) do
     case :ets.lookup(__MODULE__, key) do
       [{^key, value, _index}] ->
-        CacheStats.bump(stat(kind, :hit))
         value
 
       [] ->
-        CacheStats.bump(stat(kind, :miss))
         store(key, build.())
     end
   end
@@ -100,9 +95,4 @@ defmodule NxCL.ProgramCache do
                 "integer, got: #{inspect(other)}"
     end
   end
-
-  defp stat(:structural, :hit), do: :structural_hit
-  defp stat(:structural, :miss), do: :structural_miss
-  defp stat(:plan, :hit), do: :plan_hit
-  defp stat(:plan, :miss), do: :plan_miss
 end

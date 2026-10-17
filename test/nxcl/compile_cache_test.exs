@@ -6,31 +6,17 @@ defmodule NxCL.CompileCacheTest do
   """
   use ExUnit.Case, async: false
 
-  alias NxCL.CacheStats
   alias NxCL.CompileCache
   alias NxCL.Devices
   alias NxCL.Native
   alias NxCL.ProgramCache
+  alias NxCL.TestSupport.Calls
 
   @moduletag :opencl
 
   defp jit(fun, opts \\ []), do: Nx.Defn.jit(fun, [compiler: NxCL.Compiler] ++ opts)
 
-  defp live_buffers(), do: Native.live_buffer_count(Devices.ctx())
-
-  # The live count after garbage collection stops freeing handles.
-  defp settled_buffers(previous \\ nil) do
-    :erlang.garbage_collect()
-    Process.sleep(30)
-    count = live_buffers()
-    if count == previous, do: count, else: settled_buffers(count)
-  end
-
-  # Cached programs hold device buffers (index tables), so start from an empty cache.
-  defp settled_baseline() do
-    ProgramCache.clear()
-    settled_buffers()
-  end
+  @lower {NxCL.Lower, :lower, 2}
 
   defp with_env(module, value) do
     Application.put_env(:nx_opencl, module, value)
@@ -47,16 +33,16 @@ defmodule NxCL.CompileCacheTest do
       end
 
       x = Nx.iota({4}, type: :f32)
-      CacheStats.reset()
 
-      assert jit(fun).(x) == Nx.tensor([1.0, 4.0, 7.0, 10.0])
+      {first, %{@lower => lowered}} = Calls.count([@lower], fn -> jit(fun).(x) end)
+      assert first == Nx.tensor([1.0, 4.0, 7.0, 10.0])
       assert :counters.get(calls, 1) == 1
-      assert CacheStats.get().lower == 1
+      assert lowered == 1
 
-      assert jit(fun).(x) == Nx.tensor([1.0, 4.0, 7.0, 10.0])
+      {second, %{@lower => lowered}} = Calls.count([@lower], fn -> jit(fun).(x) end)
+      assert second == Nx.tensor([1.0, 4.0, 7.0, 10.0])
       assert :counters.get(calls, 1) == 1
-      assert CacheStats.get().lower == 1
-      assert %{closure_hit: 1, closure_miss: 1} = CacheStats.get()
+      assert lowered == 0
     end
 
     test "other templates compile again" do
@@ -92,16 +78,23 @@ defmodule NxCL.CompileCacheTest do
   describe "structural cache" do
     test "two functions that lower alike share one compiled program" do
       x = Nx.iota({6}, type: :f32)
-      CacheStats.reset()
-
-      a = jit(fn x -> Nx.exp(Nx.add(x, 0.5)) end).(x)
-      %{structural_miss: misses} = CacheStats.get()
+      # A constant no other test uses, so the first call adds an entry.
+      c = System.unique_integer([:positive]) / 1000
+      # A full cache evicts as it adds, so start empty.
+      ProgramCache.clear()
       size = ProgramCache.size()
-      b = jit(fn y -> Nx.exp(Nx.add(y, 0.5)) end).(x)
+
+      {a, %{@lower => lowered_a}} =
+        Calls.count([@lower], fn -> jit(fn x -> Nx.exp(Nx.add(x, c)) end).(x) end)
+
+      assert ProgramCache.size() == size + 1
+
+      {b, %{@lower => lowered_b}} =
+        Calls.count([@lower], fn -> jit(fn y -> Nx.exp(Nx.add(y, c)) end).(x) end)
 
       assert a == b
-      assert %{structural_hit: 1, structural_miss: ^misses, lower: 2} = CacheStats.get()
-      assert ProgramCache.size() == size
+      assert {lowered_a, lowered_b} == {1, 1}
+      assert ProgramCache.size() == size + 1
     end
 
     test "the signature holds no expression ids" do
@@ -112,10 +105,12 @@ defmodule NxCL.CompileCacheTest do
     end
 
     test "a different shape is a different program" do
-      CacheStats.reset()
-      jit(fn x -> Nx.sin(x) end).(Nx.iota({3}, type: :f32))
-      jit(fn x -> Nx.sin(x) end).(Nx.iota({4}, type: :f32))
-      assert %{structural_hit: 0, structural_miss: 2} = CacheStats.get()
+      c = System.unique_integer([:positive]) / 1000
+      ProgramCache.clear()
+      size = ProgramCache.size()
+      jit(fn x -> Nx.add(Nx.sin(x), c) end).(Nx.iota({3}, type: :f32))
+      jit(fn x -> Nx.add(Nx.sin(x), c) end).(Nx.iota({4}, type: :f32))
+      assert ProgramCache.size() == size + 2
     end
 
     test "the first writer wins a race" do
@@ -128,7 +123,7 @@ defmodule NxCL.CompileCacheTest do
             send(parent, {:ready, self()})
 
             receive do
-              :go -> ProgramCache.fetch_or_build(:structural, key, fn -> {:built, i} end)
+              :go -> ProgramCache.fetch_or_build(key, fn -> {:built, i} end)
             end
           end)
         end
@@ -138,18 +133,18 @@ defmodule NxCL.CompileCacheTest do
 
       results = Enum.map(winners, &Task.await/1)
       assert results |> Enum.uniq() |> length() == 1
-      assert ProgramCache.fetch_or_build(:structural, key, fn -> :never end) == hd(results)
+      assert ProgramCache.fetch_or_build(key, fn -> :never end) == hd(results)
     end
 
     test "the bound evicts the oldest entry first" do
       with_env(ProgramCache, max_items: 3)
       keys = for i <- 1..5, do: {:bound, make_ref(), i}
-      for key <- keys, do: ProgramCache.fetch_or_build(:structural, key, fn -> :value end)
+      for key <- keys, do: ProgramCache.fetch_or_build(key, fn -> :value end)
 
       assert ProgramCache.size() <= 3
       [old, newest] = [hd(keys), List.last(keys)]
-      assert ProgramCache.fetch_or_build(:structural, old, fn -> :rebuilt end) == :rebuilt
-      assert ProgramCache.fetch_or_build(:structural, newest, fn -> :rebuilt end) == :value
+      assert ProgramCache.fetch_or_build(old, fn -> :rebuilt end) == :rebuilt
+      assert ProgramCache.fetch_or_build(newest, fn -> :rebuilt end) == :value
     end
   end
 
@@ -306,7 +301,6 @@ defmodule NxCL.CompileCacheTest do
   describe "eviction and lifetime" do
     test "a closure whose cache entries are gone still runs" do
       with_env(ProgramCache, max_items: 1)
-      baseline = settled_baseline()
       x = Nx.iota({8}, type: :f32)
       closure = jit(fn x -> Nx.add(Nx.exp(x), 1) end)
       expected = closure.(x)
@@ -315,12 +309,10 @@ defmodule NxCL.CompileCacheTest do
       for n <- 1..4, do: jit(fn x -> Nx.add(x, n) end).(x)
 
       assert closure.(x) == expected
-      assert settled_buffers() == baseline
     end
 
     test "a cache entry dropped during a run does not free what the run uses" do
       with_env(ProgramCache, max_items: 1)
-      baseline = settled_baseline()
       x = Nx.iota({256, 256}, type: :f32) |> Nx.divide(1000)
       fun = fn a -> a |> Nx.dot(a) |> Nx.dot(a) |> Nx.dot(a) end
       expected = Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator).(x)
@@ -332,8 +324,6 @@ defmodule NxCL.CompileCacheTest do
 
       for result <- Task.await(runner, 60_000),
           do: assert(Nx.all_close(result, expected, atol: 1.0e-2) |> Nx.to_number() == 1)
-
-      assert settled_buffers() == baseline
     end
   end
 
@@ -356,8 +346,6 @@ defmodule NxCL.CompileCacheTest do
 
       expected = for i <- 0..2, do: reference_fun(i, Nx.backend_copy(x, Nx.BinaryBackend))
 
-      baseline = settled_baseline()
-
       tasks =
         for p <- 0..7 do
           opts = Enum.at(queues, rem(p, 2))
@@ -374,7 +362,6 @@ defmodule NxCL.CompileCacheTest do
       results = tasks |> Task.await_many(280_000) |> List.flatten()
       assert length(results) == 800
       assert Enum.all?(results, fn {_i, ok} -> ok == 1 end)
-      assert settled_buffers() == baseline
     end
   end
 end

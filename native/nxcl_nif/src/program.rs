@@ -18,7 +18,6 @@ use opencl3::kernel::ExecuteKernel;
 use opencl3::memory::ClMem;
 use rustler::types::tuple::get_tuple;
 use rustler::{Binary, Term};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::buffer::DeviceBuffer;
@@ -475,7 +474,6 @@ impl Program {
                                 exec.enqueue_nd_range(&queue)
                                     .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
                             }
-                            ctx.stats.launches.fetch_add(1, Ordering::Relaxed);
                         }
                         slots[*out] = Some(out_buf);
                     }

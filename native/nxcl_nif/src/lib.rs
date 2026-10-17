@@ -9,7 +9,6 @@ use device_ctx::DeviceCtx;
 use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
 use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc, Term};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 struct DeviceCtxInner {
@@ -303,23 +302,6 @@ fn wrap_outputs(
         .into_iter()
         .map(|buffer| ResourceArc::new(NifDeviceBuffer::new(buffer, ctx.clone())))
         .collect()
-}
-
-// ── Counters ────────────────────────────────────────────
-
-#[rustler::nif]
-fn kernel_cache_stats(ctx: ResourceArc<NifDeviceCtx>) -> (u64, u64, u64) {
-    let stats = &ctx.inner.ctx.stats;
-    (
-        stats.builds.load(Ordering::Relaxed),
-        stats.hits.load(Ordering::Relaxed),
-        stats.launches.load(Ordering::Relaxed),
-    )
-}
-
-#[rustler::nif]
-fn live_buffer_count(ctx: ResourceArc<NifDeviceCtx>) -> usize {
-    ctx.inner.ctx.live_buffers.load(Ordering::Relaxed)
 }
 
 extern "C" {

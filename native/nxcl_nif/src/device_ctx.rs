@@ -8,7 +8,6 @@ use opencl3::device::{
 };
 use opencl3::platform::get_platforms;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 pub struct DeviceCtx {
@@ -21,16 +20,6 @@ pub struct DeviceCtx {
     /// Workgroup and local-memory limits codegen sizes cooperative kernels from.
     pub limits: Limits,
     pub kernels: Mutex<HashMap<KernelKey, Arc<CompiledKernel>>>,
-    pub stats: KernelStats,
-    pub live_buffers: Arc<AtomicUsize>,
-}
-
-/// Counters the tests read through `kernel_cache_stats/1`.
-#[derive(Default)]
-pub struct KernelStats {
-    pub builds: AtomicU64,
-    pub hits: AtomicU64,
-    pub launches: AtomicU64,
 }
 
 unsafe impl Send for DeviceCtx {}
@@ -106,8 +95,6 @@ impl DeviceCtx {
             caps,
             limits,
             kernels: Mutex::new(HashMap::new()),
-            stats: KernelStats::default(),
-            live_buffers: Arc::new(AtomicUsize::new(0)),
         })
     }
 }

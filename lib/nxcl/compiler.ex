@@ -62,7 +62,6 @@ defmodule NxCL.Compiler do
   @behaviour Nx.Defn.Compiler
 
   alias Nx.Defn.Composite
-  alias NxCL.CacheStats
   alias NxCL.CompileCache
   alias NxCL.Compiler.Options
   alias NxCL.Devices
@@ -85,11 +84,9 @@ defmodule NxCL.Compiler do
 
     case CompileCache.fetch(cache_key) do
       {:ok, closure} ->
-        CacheStats.bump(:closure_hit)
         closure
 
       {:error, :cache_miss} ->
-        CacheStats.bump(:closure_miss)
         CompileCache.put(cache_key, build_closure(vars, fun, run_opts))
     end
   end

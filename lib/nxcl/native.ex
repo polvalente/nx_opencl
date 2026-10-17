@@ -107,13 +107,4 @@ defmodule NxCL.Native do
   @spec eval_program_on(reference(), [reference() | nil], reference()) ::
           {:ok, [reference()]} | {:error, String.t()}
   def eval_program_on(_program, _buffers, _queue), do: :erlang.nif_error(:nif_not_loaded)
-
-  @doc "Kernel cache counters of a device context: `{builds, hits, launches}`."
-  @spec kernel_cache_stats(reference()) ::
-          {non_neg_integer(), non_neg_integer(), non_neg_integer()}
-  def kernel_cache_stats(_ctx), do: :erlang.nif_error(:nif_not_loaded)
-
-  @doc "Number of device buffers alive on a device context."
-  @spec live_buffer_count(reference()) :: non_neg_integer()
-  def live_buffer_count(_ctx), do: :erlang.nif_error(:nif_not_loaded)
 end

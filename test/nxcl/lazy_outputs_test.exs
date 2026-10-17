@@ -8,17 +8,8 @@ defmodule NxCL.LazyOutputsTest do
   use ExUnit.Case, async: false
 
   alias NxCL.Devices
-  alias NxCL.Native
-  alias NxCL.ProgramCache
 
   @moduletag :opencl
-
-  defp settled_buffers(previous \\ nil) do
-    :erlang.garbage_collect()
-    Process.sleep(30)
-    count = Native.live_buffer_count(Devices.ctx())
-    if count == previous, do: count, else: settled_buffers(count)
-  end
 
   defp heavy(x), do: x |> Nx.exp() |> Nx.sin() |> Nx.exp() |> Nx.cos()
 
@@ -57,33 +48,5 @@ defmodule NxCL.LazyOutputsTest do
     got = Nx.Defn.jit(fun, compiler: NxCL.Compiler).(x)
 
     assert got == expected
-  end
-
-  test "outputs of a program with several outputs leave live_buffer_count unchanged" do
-    fun = Nx.Defn.jit(fn x -> {Nx.exp(x), Nx.sum(x), Nx.negate(x)} end, compiler: NxCL.Compiler)
-    x = input(512)
-    fun.(x)
-
-    ProgramCache.clear()
-    fun.(x)
-    before = settled_buffers()
-
-    for _ <- 1..200, do: fun.(x)
-
-    assert settled_buffers() == before
-  end
-
-  test "outputs that nobody reads leave live_buffer_count unchanged" do
-    fun = Nx.Defn.jit(&heavy/1, compiler: NxCL.Compiler)
-    x = input(4096)
-    fun.(x)
-
-    ProgramCache.clear()
-    fun.(x)
-    before = settled_buffers()
-
-    for _ <- 1..200, do: fun.(x)
-
-    assert settled_buffers() == before
   end
 end

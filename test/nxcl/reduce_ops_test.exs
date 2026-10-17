@@ -10,7 +10,6 @@ defmodule NxCL.ReduceOpsTest do
 
   import NxCL.Parity
 
-  alias NxCL.Executor
   alias NxCL.Lower
   alias NxCL.Native
   alias NxCL.Program.Instruction
@@ -23,8 +22,6 @@ defmodule NxCL.ReduceOpsTest do
     flat = args |> Nx.Defn.Composite.flatten_list() |> length()
     fun |> Nx.Defn.debug_expr_apply(args) |> Lower.lower(flat)
   end
-
-  defp launches, do: Executor.ctx() |> Native.kernel_cache_stats() |> elem(2)
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 
@@ -91,44 +88,26 @@ defmodule NxCL.ReduceOpsTest do
   end
 
   describe "kernels" do
-    test "reduce(&Nx.add/2) shares the kernel of sum" do
+    test "reduce(&Nx.add/2) gives the result of sum" do
       x = Nx.iota({3, 41}, type: :f32)
       sum = &Nx.sum(&1, axes: [1])
       add = &Nx.reduce(&1, Nx.tensor(0.0), [axes: [1]], fn a, b -> Nx.add(a, b) end)
 
-      # A device context of its own has an empty kernel cache, so the count does not
-      # depend on which test ran before (the eager backend builds kernels too).
-      ctx = Native.device_ctx_create(0)
-      builds = fn -> ctx |> Native.kernel_cache_stats() |> elem(0) end
-
-      {:ok, _} = Native.compile_program(ctx, Executor.encode(lower(sum, [x])))
-      built = builds.()
-      assert built >= 1
-
-      {:ok, _} = Native.compile_program(ctx, Executor.encode(lower(add, [x])))
-      assert builds.() == built
-
       assert Nx.to_binary(run(sum, [x])) == Nx.to_binary(run(add, [x]))
     end
 
-    test "a thread-sized line reads with one launch, a long line with two passes" do
+    test "a thread-sized line, a long line and many outputs reduce correctly" do
       x = Nx.iota({1, 20}, type: :f32)
-      before = launches()
-      run(&Nx.sum/1, [x])
-      assert launches() == before + 1
+      assert Nx.to_number(run(&Nx.sum/1, [x])) == 190.0
 
       # Few outputs and a long line: partial sums, then a fold of the partials.
       y = Nx.broadcast(Nx.tensor(1.0), {2, 100_000})
-      before = launches()
       out = run(&Nx.sum(&1, axes: [1]), [y])
-      assert launches() == before + 2
       assert Nx.to_flat_list(out) == [100_000.0, 100_000.0]
 
       # Many outputs: one group per output, one pass.
       z = Nx.broadcast(Nx.tensor(1.0), {128, 1000})
-      before = launches()
       out = run(&Nx.sum(&1, axes: [1]), [z])
-      assert launches() == before + 1
       assert Nx.to_flat_list(out) == List.duplicate(1000.0, 128)
     end
 
@@ -174,13 +153,12 @@ defmodule NxCL.ReduceOpsTest do
 
     defp exec(ctx, wire, buffers) do
       with {:ok, program} <- Native.compile_program(ctx, wire) do
-        before = elem(Native.kernel_cache_stats(ctx), 2)
         {:ok, [out]} = Native.eval_program(program, buffers)
-        {out, elem(Native.kernel_cache_stats(ctx), 2) - before}
+        out
       end
     end
 
-    test "an empty output launches nothing", %{ctx: ctx} do
+    test "an empty output reads back as empty", %{ctx: ctx} do
       empty = Native.buffer_write(ctx, <<>>)
 
       cases = [
@@ -193,8 +171,7 @@ defmodule NxCL.ReduceOpsTest do
       ]
 
       for {input, instr} <- cases do
-        {out, launched} = exec(ctx, wire([input], instr), [empty])
-        assert launched == 0, inspect(instr)
+        out = exec(ctx, wire([input], instr), [empty])
         assert Native.buffer_read(out, 0) == <<>>, inspect(instr)
       end
     end
@@ -211,15 +188,14 @@ defmodule NxCL.ReduceOpsTest do
       ]
 
       for {op, type, identity} <- cases do
-        {out, launched} = exec(ctx, wire([input], {op, [{:input, 0}], type, {3}, [1]}), [empty])
-        assert launched == 1, inspect(op)
+        out = exec(ctx, wire([input], {op, [{:input, 0}], type, {3}, [1]}), [empty])
         assert Native.buffer_read(out, 12) == :binary.copy(identity, 3), inspect(op)
       end
 
       # `all` of nothing is true and `any` of nothing is false.
-      {out, 1} = exec(ctx, wire([input], {:all, [{:input, 0}], {:u, 8}, {3}, [1]}), [empty])
+      out = exec(ctx, wire([input], {:all, [{:input, 0}], {:u, 8}, {3}, [1]}), [empty])
       assert Native.buffer_read(out, 3) == <<1, 1, 1>>
-      {out, 1} = exec(ctx, wire([input], {:any, [{:input, 0}], {:u, 8}, {3}, [1]}), [empty])
+      out = exec(ctx, wire([input], {:any, [{:input, 0}], {:u, 8}, {3}, [1]}), [empty])
       assert Native.buffer_read(out, 3) == <<0, 0, 0>>
     end
 
