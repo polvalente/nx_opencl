@@ -85,7 +85,7 @@ defmodule NxCL.Native do
 
   @doc """
   Decodes and validates a program wire term and builds its kernels. See
-  `NxCL.Executor` for the term layout.
+  `NxCL.Compiler.Executor` for the term layout.
   """
   @spec compile_program(reference(), tuple()) :: {:ok, reference()} | {:error, String.t()}
   def compile_program(_ctx, _wire), do: :erlang.nif_error(:nif_not_loaded)

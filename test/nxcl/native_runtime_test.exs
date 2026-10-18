@@ -5,8 +5,8 @@ defmodule NxCL.NativeRuntimeTest do
   """
   use ExUnit.Case, async: false
 
+  alias NxCL.Compiler.Ops
   alias NxCL.Native
-  alias NxCL.Program.Builder
 
   @moduletag :opencl
 
@@ -85,7 +85,7 @@ defmodule NxCL.NativeRuntimeTest do
       x = upload(ctx, [1.0, 2.0, 3.0])
 
       launch =
-        Builder.launch([{:input, 0}], @f32, {3}, @add_one, "add_one",
+        Ops.launch([{:input, 0}], @f32, {3}, @add_one, "add_one",
           global: [64],
           local: [64],
           scalars: [3]
@@ -167,12 +167,12 @@ defmodule NxCL.NativeRuntimeTest do
       x = Nx.tensor([0.5, 1.0, 1.5])
 
       first = jitted.(x)
-      NxCL.ProgramCache.clear()
+      NxCL.Compiler.ProgramCache.clear()
       jitted.(x)
-      size = NxCL.ProgramCache.size()
+      size = NxCL.Compiler.ProgramCache.size()
 
       for _ <- 1..99, do: assert(jitted.(x) == first)
-      assert NxCL.ProgramCache.size() == size
+      assert NxCL.Compiler.ProgramCache.size() == size
     end
   end
 

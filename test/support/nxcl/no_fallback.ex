@@ -13,7 +13,7 @@ defmodule NxCL.TestSupport.NoFallback do
 
   The one allowed crossing is a host call. A callback that `Nx.runtime_call/4` or
   `Nx.io_call/2` runs computes on the host by design, so a compute callback that
-  runs inside `NxCL.Executor.Host` goes to `Nx.BinaryBackend` instead of raising.
+  runs inside `NxCL.Compiler.Executor.Host` goes to `Nx.BinaryBackend` instead of raising.
 
   `guard/1` also traces calls into `Nx.BinaryBackend` made by the running process
   (an op that names `Nx.BinaryBackend` itself, bypassing the default). Such a
@@ -110,8 +110,8 @@ defmodule NxCL.TestSupport.NoFallback do
   # Trace patterns are global and slow to set, so set them once per VM.
   defp install_patterns do
     if :persistent_term.get(@collector, nil) == nil do
-      Code.ensure_loaded!(NxCL.Executor)
-      Code.ensure_loaded!(NxCL.Executor.Host)
+      Code.ensure_loaded!(NxCL.Compiler.Executor)
+      Code.ensure_loaded!(NxCL.Compiler.Executor.Host)
       :erlang.system_flag(:backtrace_depth, 100)
 
       for {name, arity} <- Nx.Backend.behaviour_info(:callbacks),
@@ -128,17 +128,21 @@ defmodule NxCL.TestSupport.NoFallback do
       # calls. Note it at `run/3`, then go silent once `read/2` has run (the callback
       # follows) until `put_results/3`, which the executor calls next.
       :erlang.trace_pattern(
-        {NxCL.Executor.Host, :run, 3},
+        {NxCL.Compiler.Executor.Host, :run, 3},
         [{:_, [], [{:message, {:caller}}]}],
         [:local]
       )
 
-      :erlang.trace_pattern({NxCL.Executor.Host, :read, 2}, [{:_, [], [{:silent, true}]}], [
-        :local
-      ])
+      :erlang.trace_pattern(
+        {NxCL.Compiler.Executor.Host, :read, 2},
+        [{:_, [], [{:silent, true}]}],
+        [
+          :local
+        ]
+      )
 
       :erlang.trace_pattern(
-        {NxCL.Executor, :put_results, 3},
+        {NxCL.Compiler.Executor, :put_results, 3},
         [{:_, [], [{:silent, false}]}],
         [:local]
       )
@@ -180,7 +184,7 @@ defmodule NxCL.TestSupport.NoFallback do
       {:trace, _pid, :call, {Nx.BinaryBackend, name, args}, caller} ->
         collect(Map.update!(seen, :binary, &MapSet.put(&1, {name, length(args), caller})))
 
-      {:trace, _pid, :call, {NxCL.Executor.Host, :run, [entry, _ctx, _buffers]}, _caller} ->
+      {:trace, _pid, :call, {NxCL.Compiler.Executor.Host, :run, [entry, _ctx, _buffers]}, _caller} ->
         collect(
           if ran_function?(entry), do: Map.update!(seen, :host_calls, &(&1 + 1)), else: seen
         )
@@ -253,10 +257,10 @@ defmodule NxCL.TestSupport.NoFallback do
     end
   end
 
-  # A callback of `Nx.runtime_call/4` or `Nx.io_call/2` runs in `NxCL.Executor.Host`.
+  # A callback of `Nx.runtime_call/4` or `Nx.io_call/2` runs in `NxCL.Compiler.Executor.Host`.
   defp in_host_call? do
     {:current_stacktrace, frames} = Process.info(self(), :current_stacktrace)
-    Enum.any?(frames, &match?({NxCL.Executor.Host, _, _, _}, &1))
+    Enum.any?(frames, &match?({NxCL.Compiler.Executor.Host, _, _, _}, &1))
   end
 
   defp to_binary_data(%Nx.Tensor{data: %__MODULE__{binary: binary}} = tensor),

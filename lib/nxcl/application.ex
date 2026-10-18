@@ -6,7 +6,7 @@ defmodule NxCL.Application do
 
   @impl true
   def start(_type, _args) do
-    children = [NxCL.Devices, NxCL.ProgramCache, NxCL.CompileCache]
+    children = [NxCL.Devices, NxCL.Compiler.ProgramCache, NxCL.Compiler.CompileCache]
     Supervisor.start_link(children, strategy: :one_for_one, name: NxCL.Supervisor)
   end
 end

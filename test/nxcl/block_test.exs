@@ -6,13 +6,13 @@ end
 
 defmodule NxCL.BlockTest do
   @moduledoc """
-  The block hook (`NxCL.Lower.Block`): every `Nx.Block.*` struct has a decision,
+  The block hook (`NxCL.Compiler.Lower.Block`): every `Nx.Block.*` struct has a decision,
   each decision shows in the lowered program, and no block lowers to a `:host_call`.
   """
   use ExUnit.Case, async: false
 
-  alias NxCL.Lower
-  alias NxCL.Lower.Block
+  alias NxCL.Compiler.Lower
+  alias NxCL.Compiler.Lower.Block
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
@@ -96,7 +96,7 @@ defmodule NxCL.BlockTest do
     assert Enum.sort(Map.keys(cases())) == block_structs()
 
     for {mod, {fun, args}} <- cases() do
-      assert %NxCL.Program{} = lower(fun, args), "#{inspect(mod)} did not lower"
+      assert %NxCL.Compiler.Program{} = lower(fun, args), "#{inspect(mod)} did not lower"
     end
   end
 

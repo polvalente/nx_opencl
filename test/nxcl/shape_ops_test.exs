@@ -9,9 +9,9 @@ defmodule NxCL.ShapeOpsTest do
 
   import NxCL.TestSupport.Compare
 
-  alias NxCL.Lower
+  alias NxCL.Compiler.Instruction
+  alias NxCL.Compiler.Lower
   alias NxCL.Native
-  alias NxCL.Program.Instruction
 
   @moduletag :opencl
 

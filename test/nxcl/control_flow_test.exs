@@ -9,7 +9,7 @@ defmodule NxCL.ControlFlowTest do
 
   import Nx.Defn
 
-  alias NxCL.Lower
+  alias NxCL.Compiler.Lower
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl

@@ -5,7 +5,7 @@
 `NxCL.Compiler` is a full `Nx.Defn.Compiler` for OpenCL, and `NxCL.Backend`
 runs on the same programs and kernels.
 
-- `NxCL.Compiler` lowers a `defn` expression to a typed program (`NxCL.Program`),
+- `NxCL.Compiler` lowers a `defn` expression to a typed program (`NxCL.Compiler.Program`),
   runs it through a native executor, and caches programs and kernels. Rust
   generates the OpenCL C.
 - Every Nx dtype runs except `s2`, `s4`, `u2`, `u4`, `f8`, `f8_e4m3fn` and `f16`

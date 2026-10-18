@@ -1,0 +1,801 @@
+defmodule NxCL.Compiler.Lower do
+  @moduledoc """
+  Lowers an `Nx.Defn.Expr` graph to an `NxCL.Compiler.Program`.
+
+  The pass walks the graph in post-order (`NxCL.Compiler.Tree`) and emits one
+  instruction per op node. `parameter`, scalar `constant` and `tensor` nodes emit
+  no instruction; they become `{:input, i}`, `{:const, i}` and `{:capture, i}`
+  refs. `metadata` nodes pass their operand's ref through, and `elem` picks a
+  ref out of a tuple. A constant of a shape emits one `broadcast`. An operand
+  that lacks the output shape of an elementwise op gets a `broadcast` too.
+
+  A `cond` or `while` node becomes one instruction that holds its bodies as
+  nested instruction lists (`NxCL.Compiler.Lower.Control`). `lower_scope/4`
+  lowers each body. An `io_call`
+  or `runtime_call` node becomes one `:host_call` instruction
+  (`NxCL.Compiler.Lower.HostCall`); its function sits in the program's `:host_calls`.
+
+  An op the pass cannot lower raises `ArgumentError` with the prefix
+  `"does not yet lower op"`. It never falls back to another path.
+  """
+
+  alias Nx.Defn.Composite
+  alias Nx.Tensor, as: T
+  alias NxCL.Compiler.Lower.Block
+  alias NxCL.Compiler.Lower.Contract
+  alias NxCL.Compiler.Lower.Control
+  alias NxCL.Compiler.Lower.HostCall
+  alias NxCL.Compiler.Ops
+  alias NxCL.Compiler.Program
+  alias NxCL.Compiler.Tree
+
+  @reduce_ops [:sum, :product, :reduce_max, :reduce_min, :all, :any]
+  @arg_ops [:argmax, :argmin]
+  @window_ops [:window_sum, :window_product, :window_max, :window_min]
+  @scatter_ops [:window_scatter_max, :window_scatter_min]
+  @scan_blocks %{
+    Nx.Block.CumulativeSum => :cumulative_sum,
+    Nx.Block.CumulativeProduct => :cumulative_product,
+    Nx.Block.CumulativeMin => :cumulative_min,
+    Nx.Block.CumulativeMax => :cumulative_max
+  }
+
+  @doc false
+  @spec scan_blocks() :: %{module() => atom()}
+  def scan_blocks(), do: @scan_blocks
+
+  # Binary ops a `reduce` body may hold: the result has the operand type.
+  @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
+               bitwise_or bitwise_xor left_shift right_shift)a
+
+  @doc false
+  @spec step_ops() :: [atom()]
+  def step_ops(), do: @step_ops
+
+  @unary_ops Ops.unary_ops()
+  @binary_ops Ops.binary_ops()
+
+  # Ops Nx rejects on complex tensors (probed against Nx 1.0 on `c64`). Nx raises
+  # while tracing, so these raise here only for a graph built another way.
+  @complex_rejected ~w(atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
+                       count_leading_zeros erf erf_inv erfc floor greater greater_equal
+                       left_shift less less_equal max min population_count quotient remainder
+                       right_shift round)a
+
+  @doc """
+  Lowers `output`, the result of tracing a function with `num_inputs`
+  flattened arguments.
+
+  The input list always has `num_inputs` entries, so a function that ignores
+  an argument keeps the positions of the others.
+  """
+  @spec lower(Nx.Container.t(), non_neg_integer() | nil) :: Program.t()
+  def lower(output, num_inputs \\ nil) do
+    state = %{
+      inputs: %{},
+      captures: [],
+      constants: [],
+      instrs: [],
+      host_calls: [],
+      refs: %{},
+      avail: Nx.Defn.Tree.scope_ids(output),
+      outer: %{},
+      depth: 0,
+      scope: :root
+    }
+
+    ordered = Tree.post_order(output, &Control.scope_deps(&1, state))
+    state = Enum.reduce(ordered, state, &expand/2)
+
+    max_pos = state.inputs |> Map.keys() |> Enum.max(fn -> -1 end)
+    arity = max(num_inputs || 0, max_pos + 1)
+    inputs = for pos <- 0..(arity - 1)//1, do: Map.get(state.inputs, pos)
+
+    outputs =
+      [output]
+      |> Composite.flatten_list()
+      |> Enum.map(&Map.fetch!(state.refs, &1.data.id))
+
+    instructions = Enum.reverse(state.instrs)
+
+    %Program{
+      inputs: inputs,
+      captures: Enum.reverse(state.captures),
+      constants: Enum.reverse(state.constants),
+      instructions: instructions,
+      host_calls: Enum.reverse(state.host_calls),
+      outputs: outputs,
+      output_template: Composite.traverse(output, &Nx.to_template/1),
+      ref_counts: ref_counts(instructions, outputs)
+    }
+  end
+
+  # `while` and `cond` bodies nest; a deeper graph raises instead of exhausting the stack.
+  @max_depth 64
+
+  @doc false
+  # Lowers `roots` as a body of `parent`: `{instructions, outputs}`. `seeds` maps
+  # node ids to the refs (`{:carry, i}`) the scope starts with. Captures and
+  # constants stay shared with the parent. A `:while` scope reads nothing else
+  # from the parent; a `:cond` scope reads the parent through its seeds only, so
+  # both get the same check.
+  @spec lower_scope(map(), [map()], map(), :while | :cond) ::
+          {NxCL.Compiler.Instruction.body(), map()}
+  def lower_scope(parent, roots, seeds, kind) do
+    if parent.depth >= @max_depth do
+      raise ArgumentError, "cond and while nest more than #{@max_depth} levels deep"
+    end
+
+    tuple = List.to_tuple(roots)
+    owner = Nx.Defn.Tree.scope_ids(tuple)
+
+    inner = %{
+      parent
+      | instrs: [],
+        refs: seeds,
+        avail: Map.merge(owner, seeds),
+        outer: if(kind == :while, do: parent.avail, else: %{}),
+        depth: parent.depth + 1,
+        scope: :sub
+    }
+
+    ordered = Tree.post_order(tuple, &Control.scope_deps(&1, inner))
+
+    inner =
+      Enum.reduce(ordered, inner, fn %T{data: %Nx.Defn.Expr{id: id}} = node, state ->
+        cond do
+          is_map_key(state.refs, id) -> state
+          reads_outer?(state, node) -> raise_outer(node)
+          true -> expand(node, state)
+        end
+      end)
+
+    outputs = Enum.map(roots, &Map.fetch!(inner.refs, &1.data.id))
+    body = {Enum.reverse(inner.instrs), outputs}
+
+    {body,
+     %{
+       parent
+       | captures: inner.captures,
+         constants: inner.constants,
+         host_calls: inner.host_calls
+     }}
+  end
+
+  # A literal tensor or constant may sit in both scopes; any other node of the
+  # parent is a value the body cannot reach.
+  defp reads_outer?(%{outer: outer}, %T{data: %Nx.Defn.Expr{id: id, op: op}}),
+    do: op not in [:constant, :tensor] and is_map_key(outer, id)
+
+  defp raise_outer(%T{data: %Nx.Defn.Expr{op: op}}) do
+    raise ArgumentError,
+          "an inner scope reads #{inspect(op)} from its parent scope; " <>
+            "pass the value in as an argument of the while or cond"
+  end
+
+  @doc false
+  @spec ref_counts([NxCL.Compiler.Instruction.t()], [NxCL.Compiler.Instruction.ref()]) ::
+          %{NxCL.Compiler.Instruction.ref() => non_neg_integer()}
+  def ref_counts(instructions, outputs) do
+    instructions
+    |> Enum.flat_map(& &1.operands)
+    |> Enum.concat(outputs)
+    |> Enum.frequencies()
+  end
+
+  # -- Leaves -------------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :parameter}}, %{scope: :sub}) do
+    raise ArgumentError,
+          "an inner scope reads a parameter of its parent scope; " <>
+            "pass the value in as an argument of the while or cond"
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :parameter, args: [pos]}} = node, state) do
+    state = %{state | inputs: Map.put(state.inputs, pos, {node.type, node.shape})}
+    put_ref(state, id, {:input, pos})
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :constant, args: [value]}} = node, state) do
+    {state, ref} = put_const(state, value, node.type)
+
+    if node.shape == {} do
+      put_ref(state, id, ref)
+    else
+      # A constant of a shape is a scalar constant filling that shape.
+      emit(state, node, Ops.broadcast(ref, node.type, node.shape, []))
+    end
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :tensor, args: [tensor]}}, state) do
+    ref = {:capture, length(state.captures)}
+    put_ref(%{state | captures: [tensor | state.captures]}, id, ref)
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :metadata, args: [inner, _meta]}}, state) do
+    if is_tuple(inner) do
+      refs = inner |> Tuple.to_list() |> Enum.map(&ref(state, &1))
+      put_ref(state, id, {:tuple, refs})
+    else
+      put_ref(state, id, ref(state, inner))
+    end
+  end
+
+  # A `fun` node holds the body of a `reduce`; the node that owns it reads the body.
+  defp expand(%T{data: %Nx.Defn.Expr{op: :fun}}, state), do: state
+
+  # `elem` picks one ref out of a tuple node; it emits no instruction.
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :elem, args: [tuple, pos]}}, state) do
+    case Map.fetch!(state.refs, tuple.data.id) do
+      {:tuple, refs} -> put_ref(state, id, Enum.at(refs, pos))
+      _other -> unsupported(:elem, "(operand is not a tuple)")
+    end
+  end
+
+  # -- Ops ----------------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x]}} = node, state)
+       when op in @unary_ops do
+    check_complex(op, node, [x])
+    {state, [rx]} = conform(state, node, [x])
+    emit(state, node, Ops.unary(op, rx, node.type, node.shape))
+  end
+
+  # `Nx.logical_not/1` is a block; the elementwise kernel does the same job.
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :block, args: [%Nx.Block.LogicalNot{}, [x], _default, _fun]}} =
+           node,
+         state
+       ) do
+    {state, [rx]} = conform(state, node, [x])
+    emit(state, node, Ops.unary(:logical_not, rx, node.type, node.shape))
+  end
+
+  # `Nx.phase/1` is a block whose default is `atan2(imag, real)`; one kernel does it.
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :block, args: [%Nx.Block.Phase{}, [x], _default, _fun]}} =
+           node,
+         state
+       ) do
+    {state, [rx]} = conform(state, node, [x])
+    emit(state, node, Ops.unary(:phase, rx, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [l, r]}} = node, state)
+       when op in @binary_ops do
+    check_complex(op, node, [l, r])
+    {state, [rl, rr]} = conform(state, node, [l, r])
+    emit(state, node, Ops.binary(op, rl, rr, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :as_type, args: [x]}} = node, state) do
+    {state, [rx]} = conform(state, node, [x])
+    emit(state, node, Ops.as_type(rx, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :bitcast, args: [x]}} = node, state) do
+    check_complex(:bitcast, node, [x])
+    {state, [rx]} = conform(state, node, [x])
+    emit(state, node, Ops.bitcast(rx, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :select, args: [p, t, f]}} = node, state) do
+    {state, [rp, rt, rf]} = conform(state, node, [p, t, f])
+    emit(state, node, Ops.select(rp, rt, rf, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :clip, args: [x, lo, hi]}} = node, state) do
+    check_complex(:clip, node, [x, lo, hi])
+    {state, [rx, rlo, rhi]} = conform(state, node, [x, lo, hi])
+    emit(state, node, Ops.clip(rx, rlo, rhi, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :dot, args: args}} = node, state) do
+    [l, contract_l, batch_l, r, contract_r, batch_r] = args
+    {state, rl} = cast(state, l, node.type)
+    {state, rr} = cast(state, r, node.type)
+
+    sides = {{l.shape, contract_l, batch_l}, {r.shape, contract_r, batch_r}}
+    {state, ref} = Contract.dot(state, &push/2, node, {rl, rr}, sides)
+    put_ref(state, id, ref)
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :conv, args: [x, w, opts]}} = node, state) do
+    {state, rx} = cast(state, x, node.type)
+    {state, rw} = cast(state, w, node.type)
+    {state, ref} = Contract.conv(state, &push/2, node, {{rx, x.shape}, {rw, w.shape}}, opts)
+    put_ref(state, id, ref)
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :reshape, args: [x]}} = node, state) do
+    emit(state, node, Ops.alias_op(:reshape, ref(state, x), node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :squeeze, args: [x, _axes]}} = node, state) do
+    emit(state, node, Ops.alias_op(:squeeze, ref(state, x), node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :broadcast, args: [x, _shape, axes]}} = node, state) do
+    emit(state, node, Ops.broadcast(ref(state, x), node.type, node.shape, axes))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :transpose, args: [x, axes]}} = node, state) do
+    emit(state, node, Ops.transpose(ref(state, x), node.type, node.shape, axes))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :reverse, args: [x, axes]}} = node, state) do
+    emit(state, node, Ops.reverse(ref(state, x), node.type, node.shape, axes))
+  end
+
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :slice, args: [x, starts, lengths, strides]}} = node,
+         state
+       ) do
+    {state, starts} = start_refs(state, starts)
+
+    emit(
+      state,
+      node,
+      Ops.slice(ref(state, x), starts, node.type, node.shape, lengths, strides)
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :put_slice, args: [x, starts, slice]}} = node, state) do
+    {state, rx} = cast(state, x, node.type)
+    {state, rs} = cast(state, slice, node.type)
+    {state, starts} = start_refs(state, starts)
+    emit(state, node, Ops.put_slice(rx, rs, starts, node.type, node.shape))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :pad, args: [x, value, config]}} = node, state) do
+    {state, rx} = cast(state, x, node.type)
+    {state, rv} = cast(state, value, node.type)
+    emit(state, node, Ops.pad(rx, rv, node.type, node.shape, config))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [tensors, axis]}} = node, state)
+       when op in [:concatenate, :stack] do
+    {state, refs} = cast_all(state, tensors, node.type)
+    emit(state, node, Ops.join(op, refs, node.type, node.shape, axis))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :iota, args: [axis]}} = node, state) do
+    emit(state, node, Ops.iota(node.type, node.shape, axis))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :eye}} = node, state) do
+    emit(state, node, Ops.eye(node.type, node.shape))
+  end
+
+  # -- Reductions, scans, windows, sort ------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in @reduce_ops do
+    emit(
+      state,
+      node,
+      Ops.reduce(op, ref(state, x), node.type, node.shape, axes(x, opts[:axes]))
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in @arg_ops do
+    axes = axes(x, opts[:axis] && [opts[:axis]])
+
+    emit(
+      state,
+      node,
+      Ops.arg_reduce(op, ref(state, x), node.type, node.shape, opts[:tie_break], axes)
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :reduce, args: [x, init, opts, fun]}} = node, state) do
+    steps = reduce_steps(fun, node.type, :reduce)
+    axes = axes(x, opts[:axes])
+
+    cond do
+      not monoid?(steps) ->
+        # Any other body folds in order, starting from the initial accumulator.
+        instr =
+          Ops.reduce_steps(
+            [ref(state, x), ref(state, init)],
+            node.type,
+            node.shape,
+            steps,
+            axes
+          )
+
+        emit(state, node, instr)
+
+      identity_init?(steps, init) ->
+        emit(
+          state,
+          node,
+          Ops.reduce_steps([ref(state, x)], node.type, node.shape, steps, axes)
+        )
+
+      true ->
+        # Fold the initial accumulator in: the result is `fun(total, init)`.
+        {state, total} =
+          push(state, Ops.reduce_steps([ref(state, x)], node.type, node.shape, steps, axes))
+
+        {state, init_ref} = broadcast_to(state, init, node.shape)
+        fold_steps(state, node, steps, total, init_ref)
+    end
+  end
+
+  defp expand(
+         %T{
+           data: %Nx.Defn.Expr{
+             op: :block,
+             args: [%{__struct__: mod, axis: axis, reverse: reverse}, [x], _default, _fun]
+           }
+         } = node,
+         state
+       )
+       when is_map_key(@scan_blocks, mod) do
+    op = Map.fetch!(@scan_blocks, mod)
+    emit(state, node, Ops.scan(op, ref(state, x), node.type, node.shape, axis, reverse))
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, dims, opts]}} = node, state)
+       when op in @window_ops do
+    emit(
+      state,
+      node,
+      Ops.window(
+        op,
+        ref(state, x),
+        node.type,
+        node.shape,
+        dims,
+        opts[:strides],
+        opts[:window_dilations],
+        opts[:padding]
+      )
+    )
+  end
+
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :window_reduce, args: [x, init, dims, opts, fun]}} = node,
+         state
+       ) do
+    steps = reduce_steps(fun, node.type, :window_reduce)
+
+    emit(
+      state,
+      node,
+      Ops.window_reduce(
+        ref(state, x),
+        ref(state, init),
+        node.type,
+        node.shape,
+        steps,
+        {dims, opts[:strides], opts[:window_dilations], opts[:padding]}
+      )
+    )
+  end
+
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: op, args: [x, source, init, dims, opts]}} = node,
+         state
+       )
+       when op in @scatter_ops do
+    emit(
+      state,
+      node,
+      Ops.window_scatter(
+        op,
+        ref(state, x),
+        ref(state, source),
+        ref(state, init),
+        node.type,
+        node.shape,
+        {dims, opts[:strides], opts[:padding]}
+      )
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in [:sort, :argsort] do
+    emit(
+      state,
+      node,
+      Ops.sort(op, ref(state, x), node.type, node.shape, opts[:axis] || 0, opts[:direction])
+    )
+  end
+
+  # -- Indexing -----------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :gather, args: [x, indices, opts]}} = node, state) do
+    emit(
+      state,
+      node,
+      Ops.gather(ref(state, x), ref(state, indices), node.type, node.shape, opts[:axes])
+    )
+  end
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, indices, updates, opts]}} = node, state)
+       when op in [:indexed_add, :indexed_put] do
+    {state, rx} = cast(state, x, node.type)
+    {state, ru} = cast(state, updates, node.type)
+    refs = {rx, ref(state, indices), ru}
+    emit(state, node, Ops.indexed(op, refs, node.type, node.shape, opts[:axes]))
+  end
+
+  # -- Linear algebra -----------------------------------------------------
+
+  defp expand(
+         %T{data: %Nx.Defn.Expr{op: :triangular_solve, args: [a, b, opts]}} = node,
+         state
+       ) do
+    {state, ra} = cast(state, a, node.type)
+    {state, rb} = cast(state, b, node.type)
+    emit(state, node, Ops.triangular_solve(ra, rb, node.type, node.shape, opts))
+  end
+
+  defp expand(
+         %T{
+           data: %Nx.Defn.Expr{
+             op: :block,
+             args: [%Nx.Block.LinAlg.Cholesky{}, [x], _default, _fun]
+           }
+         } = node,
+         state
+       ) do
+    {state, rx} = cast(state, x, node.type)
+    emit(state, node, Ops.cholesky(rx, node.type, node.shape))
+  end
+
+  # Nx pads or crops the axis to `:length`; so do we, then one transform.
+  defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
+       when op in [:fft, :ifft] do
+    {state, rx} = cast(state, x, node.type)
+    axis = opts[:axis]
+    {state, rx} = fit_axis(state, rx, x.shape, node.type, node.shape, axis)
+    emit(state, node, Ops.fft(op, rx, node.type, node.shape, axis))
+  end
+
+  # -- Blocks -------------------------------------------------------------
+
+  # A block with no native clause above: lower its default or run it on the host.
+  defp expand(%T{data: %Nx.Defn.Expr{op: :block}} = node, state),
+    do: Block.lower(state, node, &expand/2)
+
+  # -- Control flow -------------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :cond}} = node, state),
+    do: Control.cond_node(state, node)
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: :while}} = node, state),
+    do: Control.while_node(state, node)
+
+  # -- Host callbacks -----------------------------------------------------
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op}} = node, state) when op in [:io_call, :runtime_call],
+    do: HostCall.node(state, node)
+
+  defp expand(%T{data: %Nx.Defn.Expr{op: op}}, _state), do: unsupported(op, nil)
+
+  # -- Helpers ------------------------------------------------------------
+
+  defp emit(state, %T{data: %Nx.Defn.Expr{id: id}}, instruction) do
+    {state, ref} = push(state, instruction)
+    put_ref(state, id, ref)
+  end
+
+  # Adds an instruction that no node owns, such as a broadcast or a cast.
+  @doc false
+  @spec push(map(), NxCL.Compiler.Instruction.t()) :: {map(), NxCL.Compiler.Instruction.ref()}
+  def push(state, instruction) do
+    ref = {:result, length(state.instrs)}
+    {%{state | instrs: [instruction | state.instrs]}, ref}
+  end
+
+  @doc false
+  @spec put_const(map(), term(), Nx.Type.t()) :: {map(), NxCL.Compiler.Instruction.ref()}
+  def put_const(state, value, type) do
+    ref = {:const, length(state.constants)}
+    {%{state | constants: [{value, type} | state.constants]}, ref}
+  end
+
+  defp put_ref(state, id, ref), do: %{state | refs: Map.put(state.refs, id, ref)}
+
+  defp ref(state, %T{data: %Nx.Defn.Expr{id: id}}), do: Map.fetch!(state.refs, id)
+
+  @doc false
+  @spec check_complex(atom(), map(), [map()]) :: nil
+  def check_complex(op, node, operands) do
+    if op in @complex_rejected and Enum.any?([node | operands], &Nx.Type.complex?(&1.type)) do
+      raise ArgumentError, "#{inspect(op)} does not support complex tensors"
+    end
+  end
+
+  # Every operand of an elementwise op has the output shape, except a scalar
+  # constant, which the kernel takes by value. Any other operand gets a
+  # broadcast instruction, aligned to the trailing axes as `Nx.broadcast` does.
+  defp conform(state, %T{shape: shape}, operands) do
+    {state, refs} =
+      Enum.reduce(operands, {state, []}, fn x, {state, refs} ->
+        {state, ref} = broadcast_to(state, x, shape)
+        {state, [ref | refs]}
+      end)
+
+    {state, Enum.reverse(refs)}
+  end
+
+  defp broadcast_to(state, %T{shape: shape} = x, shape), do: {state, ref(state, x)}
+
+  defp broadcast_to(state, %T{} = x, shape) do
+    if scalar_const?(state, x) do
+      {state, ref(state, x)}
+    else
+      rank = tuple_size(shape)
+      axes = Enum.to_list((rank - tuple_size(x.shape))..(rank - 1)//1)
+      push(state, Ops.broadcast(ref(state, x), x.type, shape, axes))
+    end
+  end
+
+  # Casts an operand to the output type with an `as_type` instruction.
+  defp cast(state, %T{type: type} = x, type), do: {state, ref(state, x)}
+
+  defp cast(state, %T{} = x, type),
+    do: push(state, Ops.as_type(ref(state, x), type, x.shape))
+
+  defp cast_all(state, tensors, type) do
+    {state, refs} =
+      Enum.reduce(tensors, {state, []}, fn x, {state, refs} ->
+        {state, ref} = cast(state, x, type)
+        {state, [ref | refs]}
+      end)
+
+    {state, Enum.reverse(refs)}
+  end
+
+  # A start index is a scalar tensor or an integer; an integer becomes an `s64`
+  # constant. The device clamps every start.
+  defp start_refs(state, starts) do
+    {state, refs} =
+      Enum.reduce(starts, {state, []}, fn
+        start, {state, refs} when is_integer(start) ->
+          {state, ref} = put_const(state, start, {:s, 64})
+          {state, [ref | refs]}
+
+        %T{} = start, {state, refs} ->
+          {state, [ref(state, start) | refs]}
+      end)
+
+    {state, Enum.reverse(refs)}
+  end
+
+  # Crops or zero-pads `axis` of the operand `ref` (shape `shape`, type `type`)
+  # to the length of `out` on that axis.
+  @doc false
+  @spec fit_axis(
+          map(),
+          NxCL.Compiler.Instruction.ref(),
+          tuple(),
+          Nx.Type.t(),
+          tuple(),
+          non_neg_integer()
+        ) ::
+          {map(), NxCL.Compiler.Instruction.ref()}
+  def fit_axis(state, ref, shape, type, out, axis) do
+    have = elem(shape, axis)
+    want = elem(out, axis)
+    fitted = put_elem(shape, axis, want)
+
+    cond do
+      have == want -> {state, ref}
+      have > want -> crop_axis(state, ref, type, fitted)
+      true -> pad_axis(state, ref, type, {shape, fitted, axis})
+    end
+  end
+
+  defp crop_axis(state, ref, type, fitted) do
+    rank = tuple_size(fitted)
+    {state, starts} = start_refs(state, List.duplicate(0, rank))
+    strides = List.duplicate(1, rank)
+    push(state, Ops.slice(ref, starts, type, fitted, Tuple.to_list(fitted), strides))
+  end
+
+  defp pad_axis(state, ref, type, {shape, fitted, axis}) do
+    {state, zero} = put_const(state, 0, type)
+    extra = elem(fitted, axis) - elem(shape, axis)
+    config = for a <- 0..(tuple_size(shape) - 1), do: {0, if(a == axis, do: extra, else: 0), 0}
+    push(state, Ops.pad(ref, zero, type, fitted, config))
+  end
+
+  defp scalar_const?(state, %T{shape: {}} = operand),
+    do: match?({:const, _}, ref(state, operand))
+
+  defp scalar_const?(_state, _operand), do: false
+
+  # The reduced axes, sorted; `nil` means every axis.
+  @doc false
+  @spec axes(map(), [non_neg_integer()] | nil) :: [non_neg_integer()]
+  def axes(%T{shape: shape}, nil), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
+  def axes(_x, axes), do: Enum.sort(axes)
+
+  # Lowers the body of a `reduce` or `window_reduce` function to steps over
+  # two variables (the parameters) and the result of each earlier step. A body
+  # with any other node raises.
+  defp reduce_steps(%T{data: %Nx.Defn.Expr{op: :fun, args: [params, body, _mfa]}}, type, what) do
+    if length(params) != 2 do
+      unsupported(what, "(the function must take two arguments)")
+    end
+
+    {vars, steps} =
+      body
+      |> Tree.post_order()
+      |> Enum.reduce({%{}, []}, fn
+        %T{data: %Nx.Defn.Expr{id: id, op: :parameter, args: [pos]}}, {vars, steps} ->
+          {Map.put(vars, id, pos), steps}
+
+        %T{data: %Nx.Defn.Expr{id: id, op: op, args: [l, r]}} = node, {vars, steps}
+        when op in @step_ops ->
+          if Enum.any?([node, l, r], &(&1.type != type)) do
+            unsupported(op, "(mixed types in a #{what} body)")
+          end
+
+          a = Map.get(vars, l.data.id) || unsupported(op, "(an operand of a #{what} body)")
+          b = Map.get(vars, r.data.id) || unsupported(op, "(an operand of a #{what} body)")
+          {Map.put(vars, id, 2 + length(steps)), [{op, a, b} | steps]}
+
+        %T{data: %Nx.Defn.Expr{op: op}}, _acc ->
+          unsupported(op, "(in a #{what} body)")
+      end)
+
+    steps = Enum.reverse(steps)
+
+    if steps == [] or Map.fetch!(vars, body.data.id) != 1 + length(steps) do
+      unsupported(what, "(the body must end in a binary op)")
+    end
+
+    steps
+  end
+
+  # A body of one `add`, `multiply`, `max` or `min` over the two parameters is
+  # associative and commutative, so the device may fold it in a tree.
+  @doc false
+  @spec monoid?(list()) :: boolean()
+  def monoid?([{op, a, b}]) when op in [:add, :multiply, :max, :min],
+    do: {a, b} in [{0, 1}, {1, 0}]
+
+  def monoid?(_steps), do: false
+
+  # A body that is one `add` or `multiply` with its identity as the initial
+  # accumulator is `sum` or `product`; nothing is left to fold in.
+  defp identity_init?([{op, a, b}], %T{data: %Nx.Defn.Expr{op: :constant, args: [v]}})
+       when {a, b} in [{0, 1}, {1, 0}] do
+    (op == :add and v == 0) or (op == :multiply and v == 1)
+  end
+
+  defp identity_init?(_steps, _init), do: false
+
+  # Emits `fun(total, init)` as elementwise instructions; the last one is the node's.
+  defp fold_steps(state, node, steps, total, init) do
+    last = length(steps) - 1
+
+    {state, _refs} =
+      steps
+      |> Enum.with_index()
+      |> Enum.reduce({state, [total, init]}, fn {{op, a, b}, k}, {state, refs} ->
+        instr = Ops.binary(op, Enum.at(refs, a), Enum.at(refs, b), node.type, node.shape)
+
+        if k == last do
+          {emit(state, node, instr), refs}
+        else
+          {state, ref} = push(state, instr)
+          {state, refs ++ [ref]}
+        end
+      end)
+
+    state
+  end
+
+  defp unsupported(op, detail) do
+    suffix = if detail, do: " " <> detail, else: ""
+    raise ArgumentError, "does not yet lower op #{inspect(op)}#{suffix}"
+  end
+end

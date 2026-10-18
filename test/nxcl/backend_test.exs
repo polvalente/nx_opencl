@@ -279,13 +279,13 @@ defmodule NxCL.BackendTest do
       a = Nx.iota({n}, type: :f32, backend: NxCL.Backend)
       b = Nx.iota({n}, type: :f32, backend: NxCL.Backend)
       # A full cache evicts as it adds, so start empty.
-      NxCL.ProgramCache.clear()
-      size = NxCL.ProgramCache.size()
+      NxCL.Compiler.ProgramCache.clear()
+      size = NxCL.Compiler.ProgramCache.size()
 
       Nx.add(a, b)
-      assert NxCL.ProgramCache.size() == size + 1
+      assert NxCL.Compiler.ProgramCache.size() == size + 1
       Nx.add(a, b)
-      assert NxCL.ProgramCache.size() == size + 1
+      assert NxCL.Compiler.ProgramCache.size() == size + 1
     end
   end
 

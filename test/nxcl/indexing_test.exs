@@ -1,6 +1,6 @@
 defmodule NxCL.IndexingTest do
   @moduledoc """
-  What the differential rows in `compiler/indexing_parity_test.exs` cannot show:
+  What the differential rows in `compiler/gather_scatter_test.exs` cannot show:
   the instructions lowering emits, out-of-bounds indices (the reference raises,
   so the device must), the `indexed_put` duplicate rule with stated values, the
   100 000-update `indexed_add` against an `f64` sum, the embedding lookup, the
@@ -12,9 +12,9 @@ defmodule NxCL.IndexingTest do
   import NxCL.TestSupport.Compare
   import NxCL.TestSupport.Device, only: [capability?: 1]
 
-  alias NxCL.Lower
+  alias NxCL.Compiler.Instruction
+  alias NxCL.Compiler.Lower
   alias NxCL.Native
-  alias NxCL.Program.Instruction
 
   @moduletag :opencl
   @moduletag timeout: 600_000

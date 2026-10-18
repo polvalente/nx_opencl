@@ -5,16 +5,16 @@ defmodule NxCL.TestSupport.Trace do
 
   `run/1` runs a function in the calling process and returns `{result, counts}`:
 
-    * `:predicate_reads` - calls of `NxCL.Executor.truthy?/3`, each of which reads
+    * `:predicate_reads` - calls of `NxCL.Compiler.Executor.truthy?/3`, each of which reads
       one scalar predicate back from the device (a `cond` clause or a dynamic
       `while` condition).
-    * `:segment_runs` - calls of `NxCL.Executor.eval!/3`, each of which runs one
+    * `:segment_runs` - calls of `NxCL.Compiler.Executor.eval!/3`, each of which runs one
       straight-line segment natively.
-    * `:scope_runs` - calls of `NxCL.Executor.run_sub/3`: every `while` body run,
+    * `:scope_runs` - calls of `NxCL.Compiler.Executor.run_sub/3`: every `while` body run,
       predicate scope and `cond` branch. A dynamic loop's body runs are
       `scope_runs - predicate_reads`; with no `cond` and a static trip count they
       are `scope_runs`.
-    * `:host_calls` - calls of `NxCL.Executor.Host.run/3` that run a function (an
+    * `:host_calls` - calls of `NxCL.Compiler.Executor.Host.run/3` that run a function (an
       `:io_call` with no function runs nothing).
     * `:host_reads` and `:host_read_bytes` - the tensors `Host.run/3` reads back
       for a function: one per leaf of the entry's `in_template`, and their bytes.
@@ -57,7 +57,7 @@ defmodule NxCL.TestSupport.Trace do
   defp collect(messages) do
     receive do
       {:trace, _pid, :call, {mod, _fun, _args}, _caller} = message
-      when mod in [NxCL.Executor, NxCL.Executor.Host] ->
+      when mod in [NxCL.Compiler.Executor, NxCL.Compiler.Executor.Host] ->
         collect([message | messages])
 
       # Other patterns (`NxCL.TestSupport.NoFallback` sets some) can fire; skip them.
@@ -81,17 +81,20 @@ defmodule NxCL.TestSupport.Trace do
     end
   end
 
-  defp count(counts, {:trace, _pid, :call, {NxCL.Executor, :truthy?, _args}, _caller}),
+  defp count(counts, {:trace, _pid, :call, {NxCL.Compiler.Executor, :truthy?, _args}, _caller}),
     do: bump(counts, :predicate_reads)
 
-  defp count(counts, {:trace, _pid, :call, {NxCL.Executor, :eval!, _args}, _caller}),
+  defp count(counts, {:trace, _pid, :call, {NxCL.Compiler.Executor, :eval!, _args}, _caller}),
     do: bump(counts, :segment_runs)
 
-  defp count(counts, {:trace, _pid, :call, {NxCL.Executor, :run_sub, _args}, _caller}),
+  defp count(counts, {:trace, _pid, :call, {NxCL.Compiler.Executor, :run_sub, _args}, _caller}),
     do: bump(counts, :scope_runs)
 
-  defp count(counts, {:trace, _pid, :call, {NxCL.Executor.Host, :run, [entry | _]}, _caller}),
-    do: host_run(counts, entry)
+  defp count(
+         counts,
+         {:trace, _pid, :call, {NxCL.Compiler.Executor.Host, :run, [entry | _]}, _caller}
+       ),
+       do: host_run(counts, entry)
 
   defp count(counts, _other), do: counts
 
@@ -117,15 +120,15 @@ defmodule NxCL.TestSupport.Trace do
   # pattern on a function replaces the earlier one.
   defp install_patterns() do
     if :persistent_term.get({__MODULE__, :installed}, false) == false do
-      Code.ensure_loaded!(NxCL.Executor)
-      Code.ensure_loaded!(NxCL.Executor.Host)
+      Code.ensure_loaded!(NxCL.Compiler.Executor)
+      Code.ensure_loaded!(NxCL.Compiler.Executor.Host)
       spec = [{:_, [], [{:message, {:caller}}]}]
 
       for {mod, fun, arity} <- [
-            {NxCL.Executor, :truthy?, 3},
-            {NxCL.Executor, :eval!, 3},
-            {NxCL.Executor, :run_sub, 3},
-            {NxCL.Executor.Host, :run, 3}
+            {NxCL.Compiler.Executor, :truthy?, 3},
+            {NxCL.Compiler.Executor, :eval!, 3},
+            {NxCL.Compiler.Executor, :run_sub, 3},
+            {NxCL.Compiler.Executor.Host, :run, 3}
           ] do
         :erlang.trace_pattern({mod, fun, arity}, spec, [:local])
       end

@@ -1,6 +1,6 @@
 //! Straight-line program executor.
 //!
-//! `Program::decode` turns the wire term built by `NxCL.Executor` into steps and
+//! `Program::decode` turns the wire term built by `NxCL.Compiler.Executor` into steps and
 //! builds every kernel through the device cache. `Program::eval` enqueues the
 //! steps in order on the one in-order queue. On the context's own queue it returns
 //! after a flush, and a read of an output waits; on any other queue, or when a

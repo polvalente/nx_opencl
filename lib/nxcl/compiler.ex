@@ -2,8 +2,8 @@ defmodule NxCL.Compiler do
   @moduledoc """
   `Nx.Defn.Compiler` implementation for OpenCL.
 
-  Receives a computation graph from `defn`, lowers it to an `NxCL.Program`
-  (`NxCL.Lower`), and runs the program on the GPU.
+  Receives a computation graph from `defn`, lowers it to an `NxCL.Compiler.Program`
+  (`NxCL.Compiler.Lower`), and runs the program on the GPU.
 
   Unlike the eager backend (`NxCL.Backend`) which dispatches one op at
   a time, the compiler sees the entire computation graph up front. This
@@ -38,7 +38,7 @@ defmodule NxCL.Compiler do
 
   ## Unsupported operations
 
-  The compiler never falls back to the CPU. An op that `NxCL.Lower` cannot
+  The compiler never falls back to the CPU. An op that `NxCL.Compiler.Lower` cannot
   lower raises `ArgumentError` ("does not yet lower op ...") when the function
   is compiled. A dtype the device cannot run (`f64` without `cl_khr_fp64`, or a type
   with no OpenCL mapping yet) raises `NxCL.CompilerError` when the function runs.
@@ -51,9 +51,9 @@ defmodule NxCL.Compiler do
 
   ## Caches
 
-  `NxCL.CompileCache` keeps the compiled closure of each function, keyed by the
+  `NxCL.Compiler.CompileCache` keeps the compiled closure of each function, keyed by the
   function, its input templates and the device. A repeat call does not trace or
-  lower. `NxCL.ProgramCache` keeps compiled programs by structure, so two
+  lower. `NxCL.Compiler.ProgramCache` keeps compiled programs by structure, so two
   functions that lower alike share one.
 
   An unknown option raises `ArgumentError` naming the key.
@@ -62,12 +62,12 @@ defmodule NxCL.Compiler do
   @behaviour Nx.Defn.Compiler
 
   alias Nx.Defn.Composite
-  alias NxCL.CompileCache
+  alias NxCL.Compiler.CompileCache
+  alias NxCL.Compiler.Executor
+  alias NxCL.Compiler.Lower
   alias NxCL.Compiler.Options
+  alias NxCL.Compiler.Program
   alias NxCL.Devices
-  alias NxCL.Executor
-  alias NxCL.Lower
-  alias NxCL.Program
 
   @impl true
   def __jit__(key, vars, fun, args_list, opts) do
@@ -127,8 +127,4 @@ defmodule NxCL.Compiler do
   def __to_backend__(opts) do
     {NxCL.Backend, Keyword.take(opts, [:device])}
   end
-end
-
-defmodule NxCL.CompilerError do
-  defexception [:message]
 end

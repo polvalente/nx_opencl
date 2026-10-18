@@ -3,8 +3,8 @@ defmodule NxCL.Backend do
   Nx backend for OpenCL GPUs.
 
   Tensor data lives on the GPU as opaque NIF resource references. Each compute
-  callback builds a one-op `NxCL.Program` and runs it through `NxCL.Executor`,
-  the same executor and kernels that `NxCL.Compiler` uses (`NxCL.Eager`). The
+  callback builds a one-op `NxCL.Compiler.Program` and runs it through `NxCL.Compiler.Executor`,
+  the same executor and kernels that `NxCL.Compiler` uses (`NxCL.Compiler.Evaluator`). The
   executor caches the program by op, operand types, shapes and attributes, so a
   repeat call builds no kernel.
 
@@ -41,8 +41,8 @@ defmodule NxCL.Backend do
 
   @behaviour Nx.Backend
 
-  alias NxCL.Eager
-  alias NxCL.Program.Builder
+  alias NxCL.Compiler.Evaluator
+  alias NxCL.Compiler.Ops
 
   defstruct [:ref, :ctx]
 
@@ -127,143 +127,143 @@ defmodule NxCL.Backend do
   # ── Creation ───────────────────────────────────────
 
   @impl true
-  def constant(%Nx.Tensor{} = out, number, _backend_opts), do: Eager.constant(out, number)
+  def constant(%Nx.Tensor{} = out, number, _backend_opts), do: Evaluator.constant(out, number)
 
   @impl true
-  def eye(%Nx.Tensor{} = out, _backend_opts), do: Eager.eye(out)
+  def eye(%Nx.Tensor{} = out, _backend_opts), do: Evaluator.eye(out)
 
   @impl true
-  def iota(%Nx.Tensor{} = out, axis, _backend_opts), do: Eager.iota(out, axis)
+  def iota(%Nx.Tensor{} = out, axis, _backend_opts), do: Evaluator.iota(out, axis)
 
   # ── Elementwise ────────────────────────────────────
 
   # `logical_not` and `phase` reach the backend as blocks, not callbacks.
-  for op <- Builder.unary_ops() -- [:logical_not, :phase] do
+  for op <- Ops.unary_ops() -- [:logical_not, :phase] do
     @impl true
-    def unquote(op)(out, tensor), do: Eager.unary(unquote(op), out, tensor)
+    def unquote(op)(out, tensor), do: Evaluator.unary(unquote(op), out, tensor)
   end
 
-  for op <- Builder.binary_ops() do
+  for op <- Ops.binary_ops() do
     @impl true
-    def unquote(op)(out, left, right), do: Eager.binary(unquote(op), out, left, right)
+    def unquote(op)(out, left, right), do: Evaluator.binary(unquote(op), out, left, right)
   end
 
   @impl true
-  def as_type(out, tensor), do: Eager.as_type(out, tensor)
+  def as_type(out, tensor), do: Evaluator.as_type(out, tensor)
 
   @impl true
-  def bitcast(out, tensor), do: Eager.bitcast(out, tensor)
+  def bitcast(out, tensor), do: Evaluator.bitcast(out, tensor)
 
   @impl true
-  def select(out, pred, on_true, on_false), do: Eager.select(out, pred, on_true, on_false)
+  def select(out, pred, on_true, on_false), do: Evaluator.select(out, pred, on_true, on_false)
 
   @impl true
-  def clip(out, tensor, min, max), do: Eager.clip(out, tensor, min, max)
+  def clip(out, tensor, min, max), do: Evaluator.clip(out, tensor, min, max)
 
   # ── Dot / Conv ─────────────────────────────────────
 
   @impl true
   def dot(out, left, left_contract, left_batch, right, right_contract, right_batch) do
-    Eager.dot(out, left, left_contract, left_batch, right, right_contract, right_batch)
+    Evaluator.dot(out, left, left_contract, left_batch, right, right_contract, right_batch)
   end
 
   @impl true
-  def conv(out, tensor, kernel, opts), do: Eager.conv(out, tensor, kernel, opts)
+  def conv(out, tensor, kernel, opts), do: Evaluator.conv(out, tensor, kernel, opts)
 
   # ── Shape ──────────────────────────────────────────
 
   @impl true
-  def reshape(out, tensor), do: Eager.alias_op(:reshape, out, tensor)
+  def reshape(out, tensor), do: Evaluator.alias_op(:reshape, out, tensor)
 
   @impl true
-  def squeeze(out, tensor, _axes), do: Eager.alias_op(:squeeze, out, tensor)
+  def squeeze(out, tensor, _axes), do: Evaluator.alias_op(:squeeze, out, tensor)
 
   @impl true
-  def broadcast(out, tensor, _shape, axes), do: Eager.broadcast(out, tensor, axes)
+  def broadcast(out, tensor, _shape, axes), do: Evaluator.broadcast(out, tensor, axes)
 
   @impl true
-  def transpose(out, tensor, axes), do: Eager.transpose(out, tensor, axes)
+  def transpose(out, tensor, axes), do: Evaluator.transpose(out, tensor, axes)
 
   @impl true
-  def reverse(out, tensor, axes), do: Eager.reverse(out, tensor, axes)
+  def reverse(out, tensor, axes), do: Evaluator.reverse(out, tensor, axes)
 
   @impl true
   def pad(out, tensor, pad_value, padding_config),
-    do: Eager.pad(out, tensor, pad_value, padding_config)
+    do: Evaluator.pad(out, tensor, pad_value, padding_config)
 
   @impl true
   def slice(out, tensor, starts, lengths, strides),
-    do: Eager.slice(out, tensor, starts, lengths, strides)
+    do: Evaluator.slice(out, tensor, starts, lengths, strides)
 
   @impl true
-  def put_slice(out, tensor, starts, slice), do: Eager.put_slice(out, tensor, starts, slice)
+  def put_slice(out, tensor, starts, slice), do: Evaluator.put_slice(out, tensor, starts, slice)
 
   @impl true
-  def concatenate(out, tensors, axis), do: Eager.join(:concatenate, out, tensors, axis)
+  def concatenate(out, tensors, axis), do: Evaluator.join(:concatenate, out, tensors, axis)
 
   @impl true
-  def stack(out, tensors, axis), do: Eager.join(:stack, out, tensors, axis)
+  def stack(out, tensors, axis), do: Evaluator.join(:stack, out, tensors, axis)
 
   # ── Reductions, windows, sort ──────────────────────
 
   for op <- [:sum, :product, :reduce_max, :reduce_min, :all, :any] do
     @impl true
-    def unquote(op)(out, tensor, opts), do: Eager.reduce(unquote(op), out, tensor, opts)
+    def unquote(op)(out, tensor, opts), do: Evaluator.reduce(unquote(op), out, tensor, opts)
   end
 
   for op <- [:argmax, :argmin] do
     @impl true
-    def unquote(op)(out, tensor, opts), do: Eager.arg_reduce(unquote(op), out, tensor, opts)
+    def unquote(op)(out, tensor, opts), do: Evaluator.arg_reduce(unquote(op), out, tensor, opts)
   end
 
   @impl true
-  def reduce(out, tensor, acc, opts, fun), do: Eager.reduce_fun(out, tensor, acc, opts, fun)
+  def reduce(out, tensor, acc, opts, fun), do: Evaluator.reduce_fun(out, tensor, acc, opts, fun)
 
   for op <- [:window_sum, :window_product, :window_max, :window_min] do
     @impl true
     def unquote(op)(out, tensor, shape, opts),
-      do: Eager.window(unquote(op), out, tensor, shape, opts)
+      do: Evaluator.window(unquote(op), out, tensor, shape, opts)
   end
 
   @impl true
   def window_reduce(out, tensor, acc, shape, opts, fun),
-    do: Eager.window_reduce(out, tensor, acc, shape, opts, fun)
+    do: Evaluator.window_reduce(out, tensor, acc, shape, opts, fun)
 
   for op <- [:window_scatter_max, :window_scatter_min] do
     @impl true
     def unquote(op)(out, tensor, source, init, shape, opts),
-      do: Eager.window_scatter(unquote(op), out, tensor, source, init, shape, opts)
+      do: Evaluator.window_scatter(unquote(op), out, tensor, source, init, shape, opts)
   end
 
   for op <- [:sort, :argsort] do
     @impl true
-    def unquote(op)(out, tensor, opts), do: Eager.sort(unquote(op), out, tensor, opts)
+    def unquote(op)(out, tensor, opts), do: Evaluator.sort(unquote(op), out, tensor, opts)
   end
 
   # ── Indexing ───────────────────────────────────────
 
   @impl true
-  def gather(out, input, indices, opts), do: Eager.gather(out, input, indices, opts)
+  def gather(out, input, indices, opts), do: Evaluator.gather(out, input, indices, opts)
 
   for op <- [:indexed_add, :indexed_put] do
     @impl true
     def unquote(op)(out, tensor, indices, updates, opts),
-      do: Eager.indexed(unquote(op), out, tensor, indices, updates, opts)
+      do: Evaluator.indexed(unquote(op), out, tensor, indices, updates, opts)
   end
 
   # ── Linear algebra, FFT, blocks ────────────────────
 
   @impl true
-  def triangular_solve(out, a, b, opts), do: Eager.triangular_solve(out, a, b, opts)
+  def triangular_solve(out, a, b, opts), do: Evaluator.triangular_solve(out, a, b, opts)
 
   @impl true
-  def fft(out, tensor, opts), do: Eager.fft(:fft, out, tensor, opts)
+  def fft(out, tensor, opts), do: Evaluator.fft(:fft, out, tensor, opts)
 
   @impl true
-  def ifft(out, tensor, opts), do: Eager.fft(:ifft, out, tensor, opts)
+  def ifft(out, tensor, opts), do: Evaluator.fft(:ifft, out, tensor, opts)
 
   @impl true
-  def block(struct, out, args, fun), do: Eager.block(struct, out, args, fun)
+  def block(struct, out, args, fun), do: Evaluator.block(struct, out, args, fun)
 
   # ── Pointers ───────────────────────────────────────
 

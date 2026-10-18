@@ -34,7 +34,7 @@ defmodule NxCL.HostCallTest do
   import Nx.Defn
   import NxCL.TestSupport.Compare
 
-  alias NxCL.Lower
+  alias NxCL.Compiler.Lower
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
@@ -424,12 +424,19 @@ defmodule NxCL.HostCallTest do
       assert is_function(f, 2)
     end
 
-    test "a callback in a branch lowers into the sub-program" do
+    test "a callback in a branch lowers into a nested body" do
       expr = Nx.Defn.debug_expr_apply(&branches/2, [Nx.tensor(1), Nx.tensor([1.0])])
       program = Lower.lower(expr, 2)
 
-      assert [_pred, %{op: :cond, subprograms: subs}] = program.instructions
-      assert Enum.any?(subs, fn sub -> Enum.any?(sub.instructions, &(&1.op == :host_call)) end)
+      assert [_pred, %{op: :cond, attrs: attrs}] = program.instructions
+
+      bodies =
+        Enum.flat_map(attrs[:clauses], fn {pred, body} -> [pred, body] end) ++ [attrs[:else]]
+
+      assert Enum.any?(bodies, fn {instructions, _outs} ->
+               Enum.any?(instructions, &(&1.op == :host_call))
+             end)
+
       assert length(program.host_calls) == 2
     end
   end
