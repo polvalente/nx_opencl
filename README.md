@@ -126,8 +126,12 @@ generated kernels.
   and batch axes.
 - **Indexing:** `gather`, `take`, `take_along_axis`, `indexed_add`, `indexed_put`.
 - **Control flow:** `cond` and `while`, nested.
-- **Linear algebra and FFT:** Cholesky, triangular solve, determinant,
-  `fft` and `ifft`.
+- **Linear algebra and FFT:** Cholesky, triangular solve, determinant, `solve`,
+  `qr`, `eigh`, `svd`, `lu`, `fft` and `ifft`. `qr`, `eigh`, `svd` and `lu` lower
+  through Nx's own default implementation, so they run on the device as `while`
+  loops over device kernels. They give the same factors as `Nx.BinaryBackend` up
+  to sign and order, and they are slower per matrix than a native kernel (about 2 s
+  for a 64 x 64 `svd`).
 - **Host callbacks:** `Nx.runtime_call/4` and `Nx.io_call/2` read back the tensors the
   callback takes, run it on the host and upload the result.
 - **Compiler options:** `:device`, `:command_queue`, `:max_concurrency`.
@@ -148,9 +152,6 @@ the device buffer at once.
   `cl_khr_int64_base_atomics`. Without it the op raises a named error.
 - **Ops Nx rejects on a dtype**, for example `bitwise_and` on floats, or `max`,
   `argmax` and `sort` on complex. Nx raises for these, and so does the compiler.
-- **`qr`, `eigh`, `svd` and `lu`:** run as an explicit host call. The operands are
-  read back, `Nx.BinaryBackend` runs the block, and the result goes back up. Ops
-  built on them, such as `solve`, use the same call.
 - **`quantized_matmul`** and quantization.
 - **Fused attention, rope and norm kernels** such as `EMLX.Fast.*`.
 - **Multi-device sharding** and distributed execution. One device runs a partition.

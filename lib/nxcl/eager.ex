@@ -13,8 +13,7 @@ defmodule NxCL.Eager do
   # build.
   #
   # An op the lowering cannot take raises `ArgumentError` ("does not yet lower op
-  # ..."). Nothing runs on `Nx.BinaryBackend`; the four linalg blocks with no
-  # device kernel run as an explicit `:host_call` (`NxCL.Lower.HostCall`).
+  # ..."). Nothing runs on `Nx.BinaryBackend`.
 
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
@@ -23,7 +22,6 @@ defmodule NxCL.Eager do
   alias NxCL.Lower
   alias NxCL.Lower.Block
   alias NxCL.Lower.Contract
-  alias NxCL.Lower.HostCall
   alias NxCL.Program
   alias NxCL.Program.Builder
   alias NxCL.Program.Builder.Linalg
@@ -445,16 +443,19 @@ defmodule NxCL.Eager do
 
   @doc """
   Runs an `Nx.Block`. The decision table of `NxCL.Lower.Block` picks the way: a
-  native instruction, the block's default (every op in it lowers), or a host call.
+  native instruction or the block's default.
   """
   @spec block(struct(), Nx.Container.t(), [T.t()], function()) :: Nx.Container.t()
   def block(struct, out, args, fun) do
     case Block.decision(struct) do
       :native -> native_block(struct, out, args)
-      :default -> apply(fun, [struct | args])
-      {:host, _reason} -> host_block(struct, out, args, fun)
+      :default -> with_device_default(fn -> apply(fun, [struct | args]) end)
     end
   end
+
+  # The default may build constants and loop state (a `while` init, an `iota`). They
+  # must live on the device with the arguments, not on the caller's default backend.
+  defp with_device_default(fun), do: Nx.with_default_backend(NxCL.Backend, fun)
 
   defp native_block(%Nx.Block.LogicalNot{}, out, [x]), do: unary_block(:logical_not, out, x)
   defp native_block(%Nx.Block.Phase{}, out, [x]), do: unary_block(:phase, out, x)
@@ -477,18 +478,6 @@ defmodule NxCL.Eager do
     run(out, [x], fn st, [x] ->
       {st, [rx]} = conform_all(st, [x], out.shape)
       Lower.push(st, Builder.unary(op, rx, out.type, out.shape))
-    end)
-  end
-
-  # One `:host_call`, built with the same entry and instruction as the lowering.
-  defp host_block(struct, out, args, fun) do
-    tensors = Enum.filter(args, &match?(%T{}, &1))
-    template = Composite.traverse(out, &Nx.to_template/1)
-    entry = Block.host_entry(struct, tensors, template, fun)
-
-    run(out, tensors, fn st, operands ->
-      {instr, out_refs} = HostCall.instruction(entry, refs(operands), 0, length(st.instrs))
-      {%{st | instrs: [instr | st.instrs], host_calls: [entry | st.host_calls]}, out_refs}
     end)
   end
 end

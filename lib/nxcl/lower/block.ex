@@ -8,20 +8,14 @@ defmodule NxCL.Lower.Block do
       struct itself.
     * `:default` - the block's `default_expr` lowers inline, in the parent
       program. Its parameters map to the refs of the block's arguments.
-    * `{:host, reason}` - the block runs on the host as one `:host_call`
-      instruction, with `Nx.BinaryBackend` as the executor (gate G5).
 
   A struct outside the table (a user block) lowers through its `default_expr`.
   `NxCL.Lower.BlockTest` fails when a struct of `Nx.Block.*` has no entry.
   """
 
-  alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
   alias NxCL.Defn.Tree
   alias NxCL.Lower.Control
-  alias NxCL.Lower.HostCall
-
-  @host_reason "No device kernel; runs through host_call on Nx.BinaryBackend (G5)."
 
   @decisions %{
     Nx.Block.LogicalNot => :native,
@@ -32,6 +26,10 @@ defmodule NxCL.Lower.Block do
     Nx.Block.CumulativeMax => :native,
     Nx.Block.LinAlg.Cholesky => :native,
     Nx.Block.LinAlg.Solve => :default,
+    Nx.Block.LinAlg.QR => :default,
+    Nx.Block.LinAlg.Eigh => :default,
+    Nx.Block.LinAlg.SVD => :default,
+    Nx.Block.LinAlg.LU => :default,
     Nx.Block.LinAlg.Determinant => :default,
     Nx.Block.AllClose => :default,
     Nx.Block.Take => :default,
@@ -40,19 +38,15 @@ defmodule NxCL.Lower.Block do
     Nx.Block.FFT2 => :default,
     Nx.Block.IFFT2 => :default,
     Nx.Block.RFFT => :default,
-    Nx.Block.IRFFT => :default,
-    Nx.Block.LinAlg.QR => {:host, @host_reason},
-    Nx.Block.LinAlg.Eigh => {:host, @host_reason},
-    Nx.Block.LinAlg.SVD => {:host, @host_reason},
-    Nx.Block.LinAlg.LU => {:host, @host_reason}
+    Nx.Block.IRFFT => :default
   }
 
   @doc "The decision table, keyed by block struct module."
-  @spec decisions() :: %{module() => :native | :default | {:host, String.t()}}
+  @spec decisions() :: %{module() => :native | :default}
   def decisions(), do: @decisions
 
   @doc "The decision for a block struct. A struct with no entry lowers its default."
-  @spec decision(struct()) :: :native | :default | {:host, String.t()}
+  @spec decision(struct()) :: :native | :default
   def decision(%{__struct__: mod}), do: Map.get(@decisions, mod, :default)
 
   @doc """
@@ -60,13 +54,10 @@ defmodule NxCL.Lower.Block do
   `(node, state) -> state` for one graph node.
   """
   @spec lower(map(), map(), (map(), map() -> map())) :: map()
-  def lower(state, %T{data: %Nx.Defn.Expr{args: [struct, args, default, fun]}} = node, expand) do
+  def lower(state, %T{data: %Nx.Defn.Expr{args: [struct, args, default, _fun]}} = node, expand) do
     case decision(struct) do
       :default ->
         inline(state, node, {args, default}, expand)
-
-      {:host, _reason} ->
-        host(state, node, {struct, args, default, fun})
 
       :native ->
         raise ArgumentError,
@@ -106,40 +97,4 @@ defmodule NxCL.Lower.Block do
 
   defp result_ref(state, tuple) when is_tuple(tuple),
     do: {:tuple, tuple |> Tuple.to_list() |> Enum.map(&result_ref(state, &1))}
-
-  # One `:host_call`: the block's own function runs on `Nx.BinaryBackend` tensors.
-  defp host(state, node, {struct, args, default, fun}) do
-    tensors = Enum.filter(args, &match?(%T{}, &1))
-    entry = host_entry(struct, tensors, Composite.traverse(default, &Nx.to_template/1), fun)
-    HostCall.emit(state, node, List.to_tuple(tensors), entry)
-  end
-
-  @doc """
-  The `:host_calls` entry for a host block: `tensors` are the block's tensor
-  arguments, `out_template` the output container, `fun` the block's default.
-  """
-  @spec host_entry(struct(), [T.t()], Nx.Container.t(), function()) :: map()
-  def host_entry(struct, tensors, out_template, fun) do
-    %{
-      kind: :runtime_call,
-      fun: fn input, _opts -> run_on_host(fun, struct, input) end,
-      opts: [],
-      in_template: List.to_tuple(Enum.map(tensors, &Nx.to_template/1)),
-      out_template: out_template
-    }
-  end
-
-  # Runs the default expression under the evaluator on `Nx.BinaryBackend`, whatever
-  # the caller's default compiler or backend is, so the host copy never re-enters
-  # this compiler or the device backend.
-  defp run_on_host(fun, struct, input) do
-    args = input |> Tuple.to_list() |> Enum.map(&Nx.backend_copy(&1, Nx.BinaryBackend))
-
-    Nx.with_default_backend(Nx.BinaryBackend, fn ->
-      Nx.Defn.jit(
-        fn args -> apply(fun, [struct | Tuple.to_list(args)]) end,
-        compiler: Nx.Defn.Evaluator
-      ).(List.to_tuple(args))
-    end)
-  end
 end

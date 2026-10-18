@@ -6,8 +6,10 @@ end
 defmodule NxCL.LinalgParityTest do
   @moduledoc """
   Differential rows for `cholesky`, `triangular_solve`, `solve`, `determinant`,
-  the host blocks (`qr`, `eigh`, `svd`, `lu`), `all_close`, `top_k` and a user
-  block through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
+  `qr`, `eigh`, `svd`, `lu`, `all_close`, `top_k` and a user block. Rows use
+  `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`, except `qr`, `eigh`, `svd`
+  and `lu`, whose factors may differ from the reference in sign and order; those
+  rows use the invariant checks of `NxCL.TestSupport.Factors`.
 
   Inputs are well conditioned: a Cholesky input is `L L^H` for a lower factor `L`
   with a diagonal of about 2 and small off-diagonal entries; a triangular solve
@@ -32,6 +34,7 @@ defmodule NxCL.LinalgParityTest do
   use ExUnit.Case, async: false
 
   import NxCL.TestSupport.Compare
+  import NxCL.TestSupport.Factors
 
   alias NxCL.TestSupport.Gen
 
@@ -97,6 +100,9 @@ defmodule NxCL.LinalgParityTest do
   # keep every product and sum exact, so those rows test the lowering, not rounding.
   defp whole(x, {kind, 16}) when kind in [:f, :bf], do: Nx.round(x)
   defp whole(x, _type), do: x
+
+  defp triangular_from_4(x, n, {kind, 16}) when n > 3 and kind in [:f, :bf], do: Nx.triu(x)
+  defp triangular_from_4(x, _n, _type), do: x
 
   defp stack_of(count, fun), do: Nx.stack(for i <- 1..count, do: fun.(i))
 
@@ -323,7 +329,7 @@ defmodule NxCL.LinalgParityTest do
     end
   end
 
-  # -- Host blocks, determinant, all_close, top_k, a user block ---------------
+  # -- qr, eigh, svd, lu, determinant, all_close, top_k, a user block -------------
 
   describe "qr, eigh, svd, lu, determinant" do
     for type <- @types do
@@ -333,24 +339,30 @@ defmodule NxCL.LinalgParityTest do
 
         for shape <- [{3, 3}, {4, 3}, {3, 5}, {2, 4, 4}] do
           x = Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 40)
-          assert_same(&Nx.LinAlg.qr/1, [x])
-          assert_same(&Nx.LinAlg.qr(&1, mode: :complete), [x])
+          assert_factors(:qr, &Nx.LinAlg.qr/1, x)
+          assert_factors(:qr, &Nx.LinAlg.qr(&1, mode: :complete), x)
           # SVD is not defined on complex input; Nx raises.
-          unless complex?(type), do: assert_same(&Nx.LinAlg.svd/1, [x])
+          unless complex?(type), do: assert_factors(:svd, &Nx.LinAlg.svd/1, x)
         end
 
         for shape <- [{3, 3}, {2, 4, 4}] do
           x = Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 41)
-          assert_same(&Nx.LinAlg.lu/1, [x])
+          assert_factors(:lu, &Nx.LinAlg.lu/1, x)
 
-          # Symmetrize here: on the device the sum would round to nearest, in the reference
-          # it truncates, and the two inputs to `eigh` would differ.
-          sym = Nx.add(x, Nx.transpose(x, axes: transpose_axes(x)))
-          assert_same(&Nx.LinAlg.eigh/1, [sym])
+          # Make it Hermitian here: on the device the sum would round to nearest, in the
+          # reference it truncates, and the two inputs to `eigh` would differ.
+          xt = Nx.transpose(x, axes: transpose_axes(x))
+          sym = Nx.add(x, if(complex?(type), do: Nx.conjugate(xt), else: xt))
+          assert_factors(:eigh, &Nx.LinAlg.eigh/1, sym)
         end
 
         for n <- [2, 3, 4, 5] do
           x = Gen.random({n, n}, type, seed: NxCL.TestSupport.Compare.seed() + 42) |> whole(type)
+          # From 4 on, `determinant` runs `lu`, which divides. On a half type the reference
+          # truncates and the device rounds to nearest, so general values differ by more
+          # than the tolerance (both are off from the exact value). An upper triangular
+          # matrix has no row swap and no division, so those rows stay exact.
+          x = triangular_from_4(x, n, type)
           assert_same(&Nx.LinAlg.determinant/1, [x])
         end
 
@@ -361,9 +373,30 @@ defmodule NxCL.LinalgParityTest do
       end
     end
 
+    # Larger inputs: the defaults loop with `while`, so size shows in the time, not in
+    # the lowering. A 64 x 64 `svd` takes about 2 s on the device.
+    for type <- [{:f, 32}, {:c, 64}] do
+      test "qr, eigh, svd and lu at 32 x 32, batched by 2, on #{Nx.Type.to_string(type)}" do
+        type = unquote(Macro.escape(type))
+        x = Gen.random({2, 32, 32}, type, seed: NxCL.TestSupport.Compare.seed() + 44)
+        xt = Nx.transpose(x, axes: [0, 2, 1])
+
+        assert_factors(:qr, &Nx.LinAlg.qr/1, x)
+        assert_factors(:lu, &Nx.LinAlg.lu/1, x)
+
+        assert_factors(
+          :eigh,
+          &Nx.LinAlg.eigh/1,
+          Nx.add(x, if(complex?(type), do: Nx.conjugate(xt), else: xt))
+        )
+
+        unless complex?(type), do: assert_factors(:svd, &Nx.LinAlg.svd/1, x)
+      end
+    end
+
     test "lu of a singular matrix matches" do
       a = Nx.tensor([[1.0, 2.0], [2.0, 4.0]])
-      assert_same(&Nx.LinAlg.lu/1, [a])
+      assert_factors(:lu, &Nx.LinAlg.lu/1, a)
     end
   end
 

@@ -11,10 +11,8 @@ defmodule NxCL.Backend do
   ## No CPU copy
 
   The backend never runs an op on `Nx.BinaryBackend`. An op with no lowering
-  raises `ArgumentError` ("does not yet lower op ..."). A block with no device
-  kernel (`qr`, `eigh`, `svd`, `lu`) runs as an explicit host call, the same one
-  the compiler emits. Each `Nx.Block` runs as a native instruction, as its
-  default expression (every op in it lowers), or as that host call.
+  raises `ArgumentError` ("does not yet lower op ..."). Each `Nx.Block` runs as a
+  native instruction or as its default expression (every op in it lowers).
 
   `from_pointer/5` and `to_pointer/2` raise: OpenCL has no portable handle to
   import or export.

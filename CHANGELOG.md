@@ -14,8 +14,9 @@ runs on the same programs and kernels.
 - Ops: elementwise, shape, reductions, scans, windows, sort, general `dot` and
   `conv`, gather, take, indexed add and put, `cond`, `while`, `runtime_call`,
   `io_call`, hooks, Cholesky, triangular solve, FFT and the `Nx.Block` ops.
-- `qr`, `eigh`, `svd` and `lu` run as an explicit host call on
-  `Nx.BinaryBackend`. Ops built on them, such as `solve`, use the same call.
+- `qr`, `eigh`, `svd` and `lu` lower through their default implementation and run
+  on the device, with no host call. `solve` runs fully on the device.
+  `runtime_call` and `io_call` are the only ops that call back into the host.
 - `NxCL.Backend` no longer copies an op to the CPU. An op with no lowering
   raises `ArgumentError`.
 - `NxCL.Backend.to_binary/2` returns every element of a vectorized tensor.

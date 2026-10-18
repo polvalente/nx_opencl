@@ -7,8 +7,7 @@ end
 defmodule NxCL.BlockTest do
   @moduledoc """
   The block hook (`NxCL.Lower.Block`): every `Nx.Block.*` struct has a decision,
-  each decision shows in the lowered program, and no linear algebra op runs on
-  `Nx.BinaryBackend` except through a visible `:host_call` instruction.
+  each decision shows in the lowered program, and no block lowers to a `:host_call`.
   """
   use ExUnit.Case, async: false
 
@@ -48,28 +47,28 @@ defmodule NxCL.BlockTest do
     a4 = Nx.add(spd(4), Nx.iota({4, 4}, type: :f32))
 
     %{
-      Nx.Block.LogicalNot => {&Nx.logical_not/1, [x], []},
-      Nx.Block.Phase => {&Nx.phase/1, [z], []},
-      Nx.Block.CumulativeSum => {&Nx.cumulative_sum/1, [x], []},
-      Nx.Block.CumulativeProduct => {&Nx.cumulative_product/1, [x], []},
-      Nx.Block.CumulativeMin => {&Nx.cumulative_min/1, [x], []},
-      Nx.Block.CumulativeMax => {&Nx.cumulative_max/1, [x], []},
-      Nx.Block.LinAlg.Cholesky => {&Nx.LinAlg.cholesky/1, [spd(3)], []},
-      Nx.Block.LinAlg.Solve => {&Nx.LinAlg.solve/2, [spd(3), Nx.iota({3})], [:lu]},
-      Nx.Block.LinAlg.Determinant => {&Nx.LinAlg.determinant/1, [a4], [:lu]},
-      Nx.Block.AllClose => {&Nx.all_close/2, [x, x], []},
-      Nx.Block.Take => {&Nx.take(&1, &2, axis: 1), [x, idx], []},
+      Nx.Block.LogicalNot => {&Nx.logical_not/1, [x]},
+      Nx.Block.Phase => {&Nx.phase/1, [z]},
+      Nx.Block.CumulativeSum => {&Nx.cumulative_sum/1, [x]},
+      Nx.Block.CumulativeProduct => {&Nx.cumulative_product/1, [x]},
+      Nx.Block.CumulativeMin => {&Nx.cumulative_min/1, [x]},
+      Nx.Block.CumulativeMax => {&Nx.cumulative_max/1, [x]},
+      Nx.Block.LinAlg.Cholesky => {&Nx.LinAlg.cholesky/1, [spd(3)]},
+      Nx.Block.LinAlg.Solve => {&Nx.LinAlg.solve/2, [spd(3), Nx.iota({3})]},
+      Nx.Block.LinAlg.Determinant => {&Nx.LinAlg.determinant/1, [a4]},
+      Nx.Block.AllClose => {&Nx.all_close/2, [x, x]},
+      Nx.Block.Take => {&Nx.take(&1, &2, axis: 1), [x, idx]},
       Nx.Block.TakeAlongAxis =>
-        {&Nx.take_along_axis(&1, &2, axis: 1), [x, Nx.tensor([[0, 1, 2], [2, 1, 0]])], []},
-      Nx.Block.TopK => {&Nx.top_k(&1, k: 2), [x], []},
-      Nx.Block.FFT2 => {&Nx.fft2/1, [x], []},
-      Nx.Block.IFFT2 => {&Nx.ifft2/1, [z], []},
-      Nx.Block.RFFT => {&Nx.rfft/1, [x], []},
-      Nx.Block.IRFFT => {&Nx.irfft/1, [z], []},
-      Nx.Block.LinAlg.QR => {&Nx.LinAlg.qr/1, [spd(3)], [:host]},
-      Nx.Block.LinAlg.Eigh => {&Nx.LinAlg.eigh/1, [sym(3)], [:host]},
-      Nx.Block.LinAlg.SVD => {&Nx.LinAlg.svd/1, [spd(3)], [:host]},
-      Nx.Block.LinAlg.LU => {&Nx.LinAlg.lu/1, [spd(3)], [:host]}
+        {&Nx.take_along_axis(&1, &2, axis: 1), [x, Nx.tensor([[0, 1, 2], [2, 1, 0]])]},
+      Nx.Block.TopK => {&Nx.top_k(&1, k: 2), [x]},
+      Nx.Block.FFT2 => {&Nx.fft2/1, [x]},
+      Nx.Block.IFFT2 => {&Nx.ifft2/1, [z]},
+      Nx.Block.RFFT => {&Nx.rfft/1, [x]},
+      Nx.Block.IRFFT => {&Nx.irfft/1, [z]},
+      Nx.Block.LinAlg.QR => {&Nx.LinAlg.qr/1, [spd(3)]},
+      Nx.Block.LinAlg.Eigh => {&Nx.LinAlg.eigh/1, [sym(3)]},
+      Nx.Block.LinAlg.SVD => {&Nx.LinAlg.svd/1, [spd(3)]},
+      Nx.Block.LinAlg.LU => {&Nx.LinAlg.lu/1, [spd(3)]}
     }
   end
 
@@ -84,36 +83,28 @@ defmodule NxCL.BlockTest do
     assert extra == [], "decision for a struct Nx no longer defines: #{inspect(extra)}"
 
     for {mod, decision} <- Block.decisions() do
-      assert decision in [:native, :default] or
-               match?({:host, reason} when is_binary(reason), decision),
+      assert decision in [:native, :default],
              "bad decision for #{inspect(mod)}: #{inspect(decision)}"
+    end
+
+    for mod <- [Nx.Block.LinAlg.QR, Nx.Block.LinAlg.Eigh, Nx.Block.LinAlg.SVD, Nx.Block.LinAlg.LU] do
+      assert Block.decisions()[mod] == :default
     end
   end
 
   test "every struct has a case, and every case lowers" do
     assert Enum.sort(Map.keys(cases())) == block_structs()
 
-    for {mod, {fun, args, _host}} <- cases() do
+    for {mod, {fun, args}} <- cases() do
       assert %NxCL.Program{} = lower(fun, args), "#{inspect(mod)} did not lower"
     end
   end
 
-  test "a native block emits no host call; a host block emits exactly one" do
-    for {mod, {fun, args, host}} <- cases() do
+  test "no block lowers to a host call" do
+    for {mod, {fun, args}} <- cases() do
       program = lower(fun, args)
-      host_calls = Enum.count(ops(program), &(&1 == :host_call))
-
-      case Block.decisions()[mod] do
-        {:host, _} ->
-          assert host == [:host]
-          assert host_calls == 1, "#{inspect(mod)}: #{host_calls} host calls"
-          assert [%{kind: :runtime_call}] = program.host_calls
-
-        _ ->
-          # `solve` and a general `determinant` reach `lu`, a visible host block.
-          assert host_calls == length(host) and length(program.host_calls) == length(host),
-                 "#{inspect(mod)}: #{host_calls} host calls"
-      end
+      refute :host_call in ops(program), "#{inspect(mod)} has a host call"
+      assert program.host_calls == [], "#{inspect(mod)} has a host call entry"
     end
   end
 
@@ -132,7 +123,7 @@ defmodule NxCL.BlockTest do
              Enum.sort(for {mod, :native} <- Block.decisions(), do: mod)
 
     for {mod, op} <- native do
-      {fun, args, _} = Map.fetch!(cases(), mod)
+      {fun, args} = Map.fetch!(cases(), mod)
       assert ops(lower(fun, args)) == [op], inspect(mod)
     end
   end
@@ -148,8 +139,7 @@ defmodule NxCL.BlockTest do
     assert Block.decision(%NxCL.BlockTest.Custom{}) == :default
   end
 
-  describe "linear algebra reaches Nx.BinaryBackend only through a host_call" do
-    # `host_calls` is the number of `:host_call` instructions the program holds.
+  describe "linear algebra runs on the device" do
     defp run_counted(fun, args) do
       {result, counts} =
         Trace.run(fn -> apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args) end)
@@ -175,33 +165,32 @@ defmodule NxCL.BlockTest do
       end
     end
 
-    test "solve runs triangular_solve on the device and lu through one host call" do
+    test "solve runs on the device: two triangular_solve instructions, no host call" do
       args = [spd(4), Nx.iota({4, 2})]
       program = lower(&Nx.LinAlg.solve/2, args)
       assert Enum.count(ops(program), &(&1 == :triangular_solve)) == 2
-      assert Enum.count(ops(program), &(&1 == :host_call)) == 1
-      assert {_, 1} = run_counted(&Nx.LinAlg.solve/2, args)
+      refute :host_call in ops(program)
+      assert {_, 0} = run_counted(&Nx.LinAlg.solve/2, args)
     end
 
-    test "qr, eigh, svd and lu each run as one host call and match the evaluator" do
-      for {fun, arg} <- [
-            {&Nx.LinAlg.qr/1, spd(4)},
-            {&Nx.LinAlg.eigh/1, sym(4)},
-            {&Nx.LinAlg.svd/1, spd(4)},
-            {&Nx.LinAlg.lu/1, spd(4)}
+    test "qr, eigh, svd and lu run with no host call and satisfy their identities" do
+      for {kind, fun, arg} <- [
+            {:qr, &Nx.LinAlg.qr/1, spd(4)},
+            {:eigh, &Nx.LinAlg.eigh/1, sym(4)},
+            {:svd, &Nx.LinAlg.svd/1, spd(4)},
+            {:lu, &Nx.LinAlg.lu/1, spd(4)}
           ] do
-        {actual, calls} = run_counted(fun, [arg])
-        assert calls == 1
-        expected = apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), [arg])
-        assert actual == expected
+        refute :host_call in ops(lower(fun, [arg])), "#{kind}"
+        assert {_, 0} = run_counted(fun, [arg])
+        NxCL.TestSupport.Factors.assert_factors(kind, fun, arg)
       end
     end
 
-    test "the host call does not re-enter this compiler when it is the default" do
+    test "with this compiler as the default, qr still runs on the device" do
       Nx.Defn.default_options(compiler: NxCL.Compiler)
 
       try do
-        {q, r} = Nx.Defn.jit(&Nx.LinAlg.qr/1, compiler: NxCL.Compiler).(spd(3))
+        {{q, r}, 0} = run_counted(&Nx.LinAlg.qr/1, [spd(3)])
         assert Nx.all_close(Nx.dot(q, r), spd(3), atol: 1.0e-5) |> Nx.to_number() == 1
       after
         Nx.Defn.default_options(compiler: Nx.Defn.Evaluator)

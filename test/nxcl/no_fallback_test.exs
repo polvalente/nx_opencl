@@ -3,8 +3,8 @@ defmodule NxCL.NoFallbackTest do
   Ops run on the device, not on the host CPU: a backend that raises on every
   compute callback is the default while a program runs, and calls into
   `Nx.BinaryBackend` are traced (`NxCL.TestSupport.NoFallback`). Only a host call
-  (`Nx.runtime_call/4`, `Nx.io_call/2`, and for now `qr`, `eigh`, `svd` and `lu`)
-  may compute on the host.
+  (`Nx.runtime_call/4` and `Nx.io_call/2`) may compute on the host; `qr`, `eigh`,
+  `svd` and `lu` run on the device.
   """
   use ExUnit.Case, async: false
 
@@ -14,7 +14,7 @@ defmodule NxCL.NoFallbackTest do
 
   # Representative ops by family, built at run time so each test owns its tensors.
   @op_names ~w(add exp sum cumulative_sum dot transpose sort top_k take select fft cholesky
-               triangular_solve determinant)a
+               triangular_solve determinant qr eigh svd lu solve)a
 
   defp spd, do: Nx.tensor([[4.0, 1.0, 0.0], [1.0, 3.0, 0.0], [0.0, 0.0, 2.0]])
   defp vec, do: Nx.tensor([1.0, 2.0, 3.0])
@@ -33,6 +33,11 @@ defmodule NxCL.NoFallbackTest do
   defp op(:cholesky), do: {&Nx.LinAlg.cholesky/1, [spd()]}
   defp op(:triangular_solve), do: {&Nx.LinAlg.triangular_solve/2, [spd(), vec()]}
   defp op(:determinant), do: {&Nx.LinAlg.determinant/1, [spd()]}
+  defp op(:qr), do: {&Nx.LinAlg.qr/1, [spd()]}
+  defp op(:eigh), do: {&Nx.LinAlg.eigh/1, [spd()]}
+  defp op(:svd), do: {&Nx.LinAlg.svd/1, [spd()]}
+  defp op(:lu), do: {&Nx.LinAlg.lu/1, [spd()]}
+  defp op(:solve), do: {&Nx.LinAlg.solve/2, [spd(), vec()]}
 
   describe "the backend" do
     test "moves data and raises on compute" do
@@ -74,12 +79,6 @@ defmodule NxCL.NoFallbackTest do
 
         NoFallback.guard(fn -> apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args) end)
       end
-    end
-
-    test "qr runs as a host call, which may compute on the host" do
-      NoFallback.guard(fn ->
-        Nx.Defn.jit_apply(&Nx.LinAlg.qr/1, [spd()], compiler: NxCL.Compiler)
-      end)
     end
 
     test "a runtime callback may compute on the host" do

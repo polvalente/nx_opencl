@@ -185,7 +185,7 @@ defmodule NxCL.BackendTest do
       assert missing == []
     end
 
-    test "qr, eigh, svd and lu run as a visible host call" do
+    test "qr, eigh, svd and lu run on the device with no host call" do
       m = Nx.tensor([[4.0, 1.0, 0.0], [1.0, 3.0, 0.0], [0.0, 0.0, 2.0]])
       gpu = Nx.backend_transfer(m, NxCL.Backend)
 
@@ -196,11 +196,13 @@ defmodule NxCL.BackendTest do
             lu: &Nx.LinAlg.lu/1
           ] do
         {result, counts} = NxCL.TestSupport.Trace.run(fn -> fun.(gpu) end)
-        assert %{host_calls: 1, host_reads: 1} = counts, "#{name}"
+        assert %{host_calls: 0, host_reads: 0} = counts, "#{name}"
 
         for leaf <- Nx.Defn.Composite.flatten_list([result]) do
           assert %NxCL.Backend{} = leaf.data
         end
+
+        NxCL.TestSupport.Factors.assert_factors(name, fun, m)
       end
     end
   end

@@ -91,11 +91,6 @@ defmodule NxCL.E2E.LinAlgTest do
   end
 
   describe "SVD decomposition" do
-    # SVD uses complex defn while-loops internally. Our fallback approach
-    # doesn't handle mixed-backend state within defn control flow yet.
-    # These tests validate correctness once that's resolved.
-
-    @tag :skip
     test "U * S * V^T reconstructs original matrix" do
       a = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
 
@@ -113,7 +108,6 @@ defmodule NxCL.E2E.LinAlgTest do
       assert_tensors_close(reconstructed, a, 1.0e-3)
     end
 
-    @tag :skip
     test "singular values are non-negative and sorted descending" do
       key = Nx.Random.key(42)
       {a, _key} = Nx.Random.uniform(key, shape: {3, 3}, type: :f32)
@@ -133,7 +127,6 @@ defmodule NxCL.E2E.LinAlgTest do
       assert s_list == Enum.sort(s_list, :desc)
     end
 
-    @tag :skip
     test "U is orthogonal" do
       a = Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
 
@@ -148,7 +141,6 @@ defmodule NxCL.E2E.LinAlgTest do
       assert_tensors_close(utu, eye, 1.0e-2)
     end
 
-    @tag :skip
     test "SVD matches CPU backend" do
       key = Nx.Random.key(99)
       {a, _key} = Nx.Random.uniform(key, shape: {3, 3}, type: :f32)

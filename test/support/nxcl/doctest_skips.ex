@@ -54,6 +54,7 @@ defmodule NxCL.DoctestSkips do
       {{:least_squares, 3}, @f32_digit},
       {{:lu, 1}, @f32_digit},
       {{:matrix_power, 2}, @f32_digit},
+      {{:pinv, 2}, @f32_digit},
       {{:solve, 2}, @f32_digit},
       {{:triangular_solve, 3}, @f32_digit}
     ],
