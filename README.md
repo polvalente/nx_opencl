@@ -17,7 +17,21 @@ clinfo --list
 ```
 
 NVIDIA, AMD, and Intel GPU drivers typically include OpenCL support.
-Rust toolchain is required for building the NIF.
+A Rust toolchain is required for building the NIF. The library needs Elixir 1.19
+or newer and `{:nx, "~> 1.0"}`.
+
+The library loads `libOpenCL` when it first opens a device. To load a library
+other than the system default, set `OPENCL_DYLIB_PATH` to its path.
+
+Some dtypes and ops need a device extension. `clinfo` shows which the device has.
+
+| Extension | Needed for |
+|---|---|
+| `cl_khr_fp64` | `f64` and `c128` |
+| `cl_khr_int64_base_atomics` | `indexed_add` on `s64`, `u64`, `f64` and `c128` |
+| `cl_khr_fp16` | `f16` (not tested on any device) |
+
+A program that needs a missing extension raises `NxCL.CompilerError`.
 
 ## Installation
 
@@ -73,7 +87,7 @@ jitted = Nx.Defn.jit(&MyModel.predict/5, compiler: NxCL.Compiler)
 result = jitted.(input, w1, b1, w2, b2)
 ```
 
-### Transfer tensors to/from GPU
+### Transfer tensors to and from the device
 
 ```elixir
 gpu_tensor = Nx.backend_transfer(cpu_tensor, NxCL.Backend)
@@ -101,13 +115,30 @@ output = predict.(params, input)
 Training steps work the same way: wrap the loss, `Nx.Defn.value_and_grad/2`
 and the parameter update in one function and jit it.
 
-### Query device info
+### Pick a device
+
+`clinfo --list` lists the devices. `device:` takes an index into that list, or a
+`{platform, index}` pair (see "Compiler options").
 
 ```elixir
-ctx = NxCL.Native.device_ctx_create(0)
-NxCL.Native.device_info(ctx)
-# [{"name", "NVIDIA GeForce RTX 3090 Ti"}, {"vendor", "NVIDIA"}, {"device_type", "GPU"}, ...]
+jitted = Nx.Defn.jit(&MyModel.predict/5, compiler: NxCL.Compiler, device: 1)
 ```
+
+### Compiler options
+
+`NxCL.Compiler` takes these options through `Nx.Defn.jit/2`. An unknown key raises
+`ArgumentError`.
+
+- `device:` the device to run on. An index counted over all devices (default `0`), or
+  `{platform, index}` counted inside one platform.
+- `command_queue:` a queue from `NxCL.Devices.new_queue/1`. The default is the
+  device's own queue.
+- `max_concurrency:` how many partitions Nx may run at once. Each partition gets its
+  own queue.
+- `hooks:` accepted only when empty. A non-empty value raises `ArgumentError`. An
+  `io_call` runs its own callback.
+
+The `fusion` and `census` options do not exist.
 
 ## What works
 
@@ -129,21 +160,26 @@ generated kernels.
 - **Linear algebra and FFT:** Cholesky, triangular solve, determinant, `solve`,
   `qr`, `eigh`, `svd`, `lu`, `fft` and `ifft`. `qr`, `eigh`, `svd` and `lu` lower
   through Nx's own default implementation, so they run on the device as `while`
-  loops over device kernels. They give the same factors as `Nx.BinaryBackend` up
-  to sign and order, and they are slower per matrix than a native kernel (about 2 s
-  for a 64 x 64 `svd`).
+  loops over device kernels. Their factors may differ from `Nx.BinaryBackend`'s in
+  sign and order, so the tests check the defining identities (for `qr`, `Q R == A`
+  and `Q` orthonormal) and not the values. They are slow (about 2 s for a 64 x 64
+  `svd`). On `f16` and `bf16`, the `determinant` tests with n >= 4 use triangular
+  inputs, because the reference truncates and the device rounds to nearest.
 - **Host callbacks:** `Nx.runtime_call/4` and `Nx.io_call/2` read back the tensors the
   callback takes, run it on the host and upload the result.
-- **Compiler options:** `:device`, `:command_queue`, `:max_concurrency`.
+- **Compiler options:** `:device`, `:command_queue`, `:max_concurrency` (see above).
 
-Neither path copies an op to the CPU silently. An op with no lowering raises
-`ArgumentError` ("does not yet lower op ..."). `Nx.backend_deallocate/1` frees
-the device buffer at once.
+Neither path copies an op to the CPU. An op with no lowering raises
+`ArgumentError` ("does not yet lower op ..."). A check in the test suite covers
+this for about 120 representative ops, each through `NxCL.Compiler` and through
+`NxCL.Backend` under a backend that raises on any compute call, and for Nx's
+own doctests. It does not cover every op. `Nx.backend_deallocate/1` frees the
+device buffer at once.
 
 ## What is not supported
 
 - **Small dtypes:** `s2`, `s4`, `u2`, `u4`, `f8` and `f8_e4m3fn`. OpenCL C has no
-  type for them.
+  type for them; a program that uses one raises `NxCL.CompilerError`.
 - **`f16`:** needs `cl_khr_fp16`. No device we tested has it, so the `f16` kernels
   run only in Rust source tests.
 - **`f64` and `c128`:** need `cl_khr_fp64`. A device without it raises
@@ -168,10 +204,22 @@ so **no OpenCL library is needed at compile time**. The Rust target
 and cross-linker are derived automatically from the Nerves environment
 variables (`TARGET_ARCH`, `TARGET_OS`, `TARGET_ABI`, `CC`).
 
+### Prerequisites
+
+- The Rust target of the board: `rustup target add aarch64-unknown-linux-gnu` (or the
+  triple of your board).
+- A cross C compiler that Nerves puts in `CC`. The build passes it to Cargo as the
+  linker.
+- No OpenCL library at compile time; it loads on the device.
+
+If you build outside Nerves, set `RUSTLER_TARGET` to the triple and install the
+linker that `native/nxcl_nif/.cargo/config.toml` names for it
+(`aarch64-linux-gnu-gcc` for `aarch64-unknown-linux-gnu`; the file lists the
+others).
+
 ### Build
 
-No extra environment variables are needed. Just build your Nerves
-firmware as usual:
+Build your Nerves firmware as usual:
 
 ```bash
 export MIX_TARGET=my_custom_target
@@ -184,7 +232,7 @@ NxCL reads the Nerves toolchain variables at compile time to:
   from `TARGET_ARCH` + `TARGET_OS` + `TARGET_ABI`
 - Set the Cargo linker from `CC`
 
-You can override with `RUSTLER_TARGET` if needed.
+`RUSTLER_TARGET` overrides the derived triple.
 
 ### Nerves system requirements
 
@@ -310,17 +358,21 @@ The suite runs on device 0. Tests that need `cl_khr_fp64`, `cl_khr_fp16` or
 the run prints which. Run one `mix test` at a time: two runs share the device
 and can fail each other.
 
-To pick a device, put it first in the OpenCL loader's list. On macOS with PoCL
-from Homebrew, run the suite through the ICD loader:
+On a Mac, the suite runs on the Apple GPU with no setup. It has neither
+`cl_khr_fp64` nor `cl_khr_int64_base_atomics`, so the tests that need them are
+skipped. The full suite takes about 15 minutes.
+
+To run on PoCL on macOS, install PoCL and the ICD loader from Homebrew
+(`brew install pocl opencl-icd-loader`) and run the suite through the loader:
 
 ```bash
-OPENCL_DYLIB_PATH=/opt/homebrew/opt/opencl-icd-loader/lib/libOpenCL.dylib \
-OCL_ICD_VENDORS=/opt/homebrew/etc/OpenCL/vendors \
+OPENCL_DYLIB_PATH="$(brew --prefix)/opt/opencl-icd-loader/lib/libOpenCL.dylib" \
+OCL_ICD_VENDORS="$(brew --prefix)/etc/OpenCL/vendors" \
 mix test
 ```
 
 On Linux with `pocl-opencl-icd` installed, `mix test` finds PoCL with no
-overrides. PoCL has `cl_khr_fp64` and 64-bit atomics, so it runs every test except the
-ones that need `cl_khr_fp16`. The full suite takes about 15 minutes on an Apple GPU and about 30 on PoCL.
+overrides. PoCL has `cl_khr_fp64` and 64-bit atomics, so it runs every test except
+the ones that need `cl_khr_fp16`. The full suite takes about 30 minutes there.
 
-CI runs the suite on PoCL (`.github/workflows/ci.yml`).
+`.github/workflows/ci.yml` runs the suite on PoCL. It has not run on GitHub yet.

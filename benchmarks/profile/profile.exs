@@ -5,8 +5,10 @@
 # Nothing in lib/ or native/ changes.
 #
 #   Apple:  benchmarks/profile/run.sh
-#   PoCL:   OPENCL_DYLIB_PATH=/opt/homebrew/opt/opencl-icd-loader/lib/libOpenCL.dylib \
-#           OCL_ICD_VENDORS=/opt/homebrew/etc/OpenCL/vendors benchmarks/profile/run.sh
+#   PoCL:   OPENCL_DYLIB_PATH=$(brew --prefix)/opt/opencl-icd-loader/lib/libOpenCL.dylib \
+#           OCL_ICD_VENDORS=$(brew --prefix)/etc/OpenCL/vendors benchmarks/profile/run.sh
+#
+# macOS only. NXCL_PROF_FILE sets where the counters file goes (default /tmp/nxcl_prof.bin).
 #
 # Per call: wall = whole call with output read back; transfer = input uploads and output
 # reads; kernel = device time of launches; host = wall - transfer - kernel (Elixir tracing,

@@ -67,7 +67,7 @@ defmodule Models do
     Nx.add(x, f)
   end
 
-  # {label, fun, args} for the four models. Sizes match earlier stage measurements.
+  # {label, fun, args} for the four models. Fixed sizes, so runs are comparable.
   def cases do
     r = &BenchHelper.rand/2
     {n, d} = {128, 256}

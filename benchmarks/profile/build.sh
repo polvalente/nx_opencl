@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds libnxcl_prof.dylib next to this script. Usage: build.sh <real libOpenCL path>
 # Apple: /System/Library/Frameworks/OpenCL.framework/OpenCL
-# PoCL:  /opt/homebrew/opt/opencl-icd-loader/lib/libOpenCL.dylib
+# PoCL:  $(brew --prefix)/opt/opencl-icd-loader/lib/libOpenCL.dylib (Homebrew)
 set -e
 cd "$(dirname "$0")"
 real="${1:-/System/Library/Frameworks/OpenCL.framework/OpenCL}"

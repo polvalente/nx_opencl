@@ -10,7 +10,7 @@ defmodule NxOpencl.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "NxOpenCL",
-      description: "Nx backend for OpenCL GPUs",
+      description: "Nx backend and defn compiler for OpenCL GPUs, with a Rust NIF",
       docs: docs(),
       package: package(),
       aliases: aliases(),
@@ -31,7 +31,7 @@ defmodule NxOpencl.MixProject do
   def docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 
@@ -39,7 +39,24 @@ defmodule NxOpencl.MixProject do
     [
       name: :nx_opencl,
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => "https://github.com/TODO/nx_opencl"}
+      links: %{
+        "GitHub" => "https://github.com/polvalente/nx_opencl",
+        "Changelog" => "https://github.com/polvalente/nx_opencl/blob/main/CHANGELOG.md"
+      },
+      # The Rust crate ships as source; `target/` stays out.
+      files: ~w(
+        lib
+        native/nxcl_nif/src
+        native/nxcl_nif/Cargo.toml
+        native/nxcl_nif/Cargo.lock
+        native/nxcl_nif/build.rs
+        native/nxcl_nif/.cargo
+        mix.exs
+        README.md
+        CHANGELOG.md
+        LICENSE.md
+        .formatter.exs
+      )
     ]
   end
 
@@ -51,8 +68,9 @@ defmodule NxOpencl.MixProject do
         "format --check-formatted",
         "credo",
         "deps.unlock --check-unused",
-        "spellweaver.check",
-        "dialyzer"
+        "dialyzer",
+        # Last: `spellweaver.check` halts the VM, so a task after it never runs.
+        "spellweaver.check"
       ]
     ]
   end
@@ -60,6 +78,9 @@ defmodule NxOpencl.MixProject do
   def dialyzer do
     [
       plt_add_apps: [:mix, :ex_unit],
+      # One folder for both PLTs, so CI can cache it.
+      plt_local_path: "priv/plts",
+      plt_core_path: "priv/plts",
       ignore_warnings: ".dialyzer_ignore.exs"
     ]
   end

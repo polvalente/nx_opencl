@@ -8,12 +8,14 @@ jobs:
   pocl:
     name: Tests and checks on PoCL
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    # The PoCL suite takes about 30 minutes; the rest adds a Rust build and the checks.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      # Elixir, Erlang and Rust at the versions in mise.toml.
+      # Elixir, Erlang and Rust at the versions in mise.toml. The Rust entry there
+      # lists rustfmt and clippy as components, which the Cargo checks need.
       - uses: jdx/mise-action@v2
 
       # PoCL is a CPU OpenCL device. It has cl_khr_fp64 and 64-bit atomics, so it
@@ -30,17 +32,42 @@ jobs:
             deps
             _build
             native/nxcl_nif/target
-          key: ${{ runner.os }}-${{ hashFiles('mix.lock', 'mise.toml', 'native/nxcl_nif/Cargo.lock') }}
+          key: build-${{ runner.os }}-${{ hashFiles('mise.toml', 'mix.lock', 'native/nxcl_nif/Cargo.lock') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+
+      # The dialyzer PLTs (`plt_local_path` and `plt_core_path` in mix.exs).
+      - uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plt-${{ runner.os }}-${{ hashFiles('mise.toml', 'mix.lock') }}
+          restore-keys: |
+            plt-${{ runner.os }}-
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
 
       - run: mix deps.get
 
+      # `cargo test --lib` is checked on macOS only. The crate is a Rustler cdylib
+      # that leaves `enif_*` symbols undefined, and a test binary may fail to link
+      # on Linux because of them. The unit tests do not call those symbols, so the
+      # linker should drop them, but no one has run this on Linux. If the step
+      # fails with undefined `enif_*` symbols, drop `cargo test` and keep fmt and
+      # clippy.
       - name: Cargo checks
         working-directory: native/nxcl_nif
         run: |
           cargo fmt --check
           cargo clippy -- -D warnings
-          cargo test
+          cargo test --lib
 
+      # `mix test` runs in the test env and `mix check` in dev. Both use the same
+      # `native/nxcl_nif/target` (cached above), so Cargo builds the crate once.
+      # `mix check` stays in dev because dialyzer reports errors in `test/support`
+      # when it runs in the test env.
       - name: Tests
         env:
           MIX_ENV: test

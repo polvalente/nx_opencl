@@ -24,9 +24,14 @@ nx_opencl-*.tar
 
 # Rustler NIF build output.
 /priv/native/
+/priv/plts/
 /native/nxcl_nif/target/
 
 # Benchmark project and the profiling shim.
 /benchmarks/_build/
 /benchmarks/deps/
 /benchmarks/profile/*.dylib
+/benchmarks/profile/*.so
+
+# Working notes (also ignored in the author's global ignore file).
+.work/

@@ -19,16 +19,12 @@
     "npm"
   ],
   "ignorePaths": [
-    "architecture.md",
     "benchmarks",
-    "compiler_plan.md",
     "config",
     "mix.exs",
     "native",
     "priv",
-    "rel",
-    "test",
-    "test_plan.md"
+    "test"
   ],
   "words": [
     "nxcl",
@@ -84,6 +80,8 @@
     "panfrost",
     "panthor",
     "freedreno",
-    "EMLX"
+    "EMLX",
+    "Bluestein",
+    "clippy"
   ]
 }

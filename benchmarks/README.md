@@ -24,13 +24,18 @@ BENCH_EXLA=1 mix deps.get
 BENCH_EXLA=1 mix run elementwise.exs
 ```
 
+Set `BENCH_EXLA=1` on every command in this project, `mix deps.get` included.
+`mix.exs` reads it to decide whether EXLA is a dependency, and a command without it
+can change `mix.lock`. Check `git diff benchmarks/mix.lock` before you commit.
+
 EXLA 1.0 downloads an XLA binary on first build. On the Mac it runs on the CPU only.
 Do not combine EXLA with PoCL in one process: the two C++ runtimes clash and the VM
 aborts. Run PoCL without EXLA.
 
 Set `BENCH_BUDGET_MS` to change the time spent per cell (default 1500) and
 `BENCH_BACKENDS` (for example `NxCL.Compiler,EXLA`) to run some columns only.
-To use PoCL, set `OPENCL_DYLIB_PATH` and `OCL_ICD_VENDORS` as the test suite does.
+To use PoCL, set `OPENCL_DYLIB_PATH` and `OCL_ICD_VENDORS` as the README of the
+library describes for the test suite.
 
 ## What each script measures
 
@@ -57,6 +62,9 @@ be cheaper than a cold start.
 
 ## Profile split
 
+This tooling runs on macOS only: the shim builds as a `.dylib` with `cc -dynamiclib`
+and the default OpenCL library is Apple's framework.
+
 `benchmarks/profile/` splits a model call into transfer, kernel and host time. It
 holds a small C shim that stands in for `libOpenCL`, so nothing in `lib/` or `native/`
 changes. The shim reads the `CL_QUEUE_PROFILING_ENABLE` events for kernel time and times
@@ -67,6 +75,10 @@ benchmarks/profile/run.sh                  # Apple
 CALLS=100 ONLY=Transformer benchmarks/profile/run.sh
 benchmarks/profile/run.sh cold_start.exs   # first call and program build time
 ```
+
+Environment: `OPENCL_DYLIB_PATH` names the real `libOpenCL` (default: Apple's framework),
+`NXCL_PROF_FILE` the counters file (default `/tmp/nxcl_prof.bin`), `NXCL_MIX` the command
+that runs Mix (default `mise exec -- mix`).
 
 Set `NXCL_PROF_FINISH=1` to make every queue flush wait for the device, which shows
 the split of a run that ends in `clFinish`.
