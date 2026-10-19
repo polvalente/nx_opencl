@@ -19,8 +19,8 @@ defmodule NxCL.LinalgTest do
   at 3 (a `bf16` factorization rounds at every step, so the two sides drift apart
   at 64 by more than the type's tolerance, and 64 integer rows would overflow).
 
-  `Nx.BinaryBackend` is wrong, or raises, in these cases (probed on Nx 1.0, stage
-  12), so those rows state the answer:
+  `Nx.BinaryBackend` is wrong, or raises, in these cases (probed on Nx 1.0), so those
+  rows state the answer:
 
     * `cholesky` on `f64` and `c128`: the reference divides by `l_jj + 1.0e-10`, an
       error of 1e-10 against a tolerance of 1e-12. The answer is the factor `L`
@@ -222,8 +222,16 @@ defmodule NxCL.LinalgTest do
       test "on #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
+        # The reference takes tens of seconds a row at 257. There one left-side and one
+        # right-side option run, with no vector right-hand side, and one batched row.
         for n <- sizes(type) do
-          options = if n <= 3, do: @all_options, else: @some_options
+          options =
+            cond do
+              n <= 3 -> @all_options
+              n >= 257 -> [Enum.at(@some_options, 0), Enum.at(@some_options, 2)]
+              true -> @some_options
+            end
+
           a = small_or_dense(type, n, nil)
 
           for opts <- options do
@@ -232,16 +240,19 @@ defmodule NxCL.LinalgTest do
           end
 
           # A vector right-hand side.
-          for opts <- Enum.take(options, 4) do
-            b = Gen.random({n}, type, seed: NxCL.TestSupport.Compare.seed() + 5)
-            assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
+          if n < 257 do
+            for opts <- Enum.take(options, 4) do
+              b = Gen.random({n}, type, seed: NxCL.TestSupport.Compare.seed() + 5)
+              assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
+            end
           end
         end
 
-        # Batched at every size: a leading batch of 3, then {2, 2}; one of 2 at 257.
+        # Batched at every size: a leading batch of 3, then {2, 2}; one of 2 at 257, with
+        # one option.
         for n <- sizes(type),
             batch <- if(n >= 257, do: [[2]], else: [[3], [2, 2]]),
-            opts <- @some_options do
+            opts <- if(n >= 257, do: Enum.take(@some_options, 1), else: @some_options) do
           a = batched(type, batch, n)
           shape = List.to_tuple(batch ++ if(opts[:left_side], do: [n, 2], else: [2, n]))
           b = Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 6)
@@ -297,7 +308,10 @@ defmodule NxCL.LinalgTest do
           a = small_or_dense(type, n, nil)
           vector = Gen.random({n}, type, seed: NxCL.TestSupport.Compare.seed() + 8)
           matrix = Gen.random({n, 2}, type, seed: NxCL.TestSupport.Compare.seed() + 9)
-          assert_same(&Nx.LinAlg.solve/2, [a, vector], eager)
+
+          # The reference takes tens of seconds a row at 257: there the vector and the
+          # batched matrix right-hand sides are left out.
+          if n < 257, do: assert_same(&Nx.LinAlg.solve/2, [a, vector], eager)
           assert_same(&Nx.LinAlg.solve/2, [a, matrix], eager)
 
           # Batched: 3 matrices, or 2 at size 257.
@@ -305,8 +319,11 @@ defmodule NxCL.LinalgTest do
           a = small(type, n, count)
           b = Gen.random({count, n}, type, seed: NxCL.TestSupport.Compare.seed() + 10)
           assert_same(&Nx.LinAlg.solve/2, [a, b], eager)
-          b = Gen.random({count, n, 2}, type, seed: NxCL.TestSupport.Compare.seed() + 11)
-          assert_same(&Nx.LinAlg.solve/2, [a, b], eager)
+
+          if n < 257 do
+            b = Gen.random({count, n, 2}, type, seed: NxCL.TestSupport.Compare.seed() + 11)
+            assert_same(&Nx.LinAlg.solve/2, [a, b], eager)
+          end
         end
       end
     end

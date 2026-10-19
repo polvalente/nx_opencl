@@ -2,7 +2,6 @@ defmodule NxCL.MultiDeviceTest do
   @moduledoc """
   The eager backend runs on the device its operands live on. `device: {0, 0}`
   opens a second context on the same GPU, so the checks need no second device.
-  Run on one GPU, alone: two suites at once flake.
   """
   use ExUnit.Case, async: false
 

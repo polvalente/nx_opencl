@@ -169,12 +169,15 @@ const FUNCS: &[Func] = &[
 }
 ",
     },
-    // log(1 + z), through log1p of |1 + z|^2 - 1 while the square is safe.
+    // log(1 + z), through log1p of |1 + z|^2 - 1 while the square is safe. Left of
+    // x = -0.5 that square is within rounding of 1 near z = -1, so take log |1 + z|
+    // from the exact 1 + x instead.
     Func {
         name: "log1p",
-        deps: &["log"],
+        deps: &["log", "logabs"],
         src: "static $V $P_log1p($V a) {
   if (fabs(a.x) > $big || fabs(a.y) > $big) return $P_log(($V)(1$i + a.x, a.y));
+  if (a.x <= -0.5$s) return ($V)($P_logabs(($V)(1$i + a.x, a.y)), atan2(a.y, 1$i + a.x));
   $T re = 0.5$s * log1p(a.x * (2$i + a.x) + a.y * a.y);
   return ($V)(re, atan2(a.y, 1$i + a.x));
 }
@@ -339,8 +342,12 @@ const FUNCS: &[Func] = &[
         deps: &[],
         src: "static $V $P_atanh($V a) {
   $T x = a.x, y = a.y;
-  $T om = 1$i - x;
-  return ($V)(0.25$s * log1p(4$i * x / (om * om + y * y)), 0.5$s * atan2(2$i * y, om * (1$i + x) - y * y));
+  // The real part is odd in x. With |x| the log1p argument stays at or above 0;
+  // with x < 0 it nears -1 at z = -1 and loses all its digits.
+  $T ax = fabs(x);
+  $T om = 1$i - ax;
+  $T re = copysign(0.25$s * log1p(4$i * ax / (om * om + y * y)), x);
+  return ($V)(re, 0.5$s * atan2(2$i * y, (1$i - x) * (1$i + x) - y * y));
 }
 ",
     },
@@ -511,6 +518,56 @@ mod tests {
             assert!(text.contains(&format!(" cf_{}(", name)), "{}", name);
         }
         assert!(!text.contains(" cf_sin("));
+    }
+
+    // The text of `name`'s definition in the preamble: from its signature to the next `static`.
+    fn body_of(info: &TypeInfo, name: &str) -> String {
+        let text = preamble(info, &[name]);
+        let start = text
+            .find(&format!("{}(", fn_name(info, name)))
+            .expect("definition");
+        let rest = &text[start..];
+        rest[..rest.find("\nstatic").unwrap_or(rest.len())].to_string()
+    }
+
+    #[test]
+    fn log1p_takes_log_abs_of_the_exact_sum_left_of_minus_one_half() {
+        // Near z = -1 the square |1 + z|^2 - 1 rounds to -1 in `float`, and `log1p(-1)`
+        // is -inf. `1 + x` is exact there, so the branch takes `logabs` of it.
+        for dtype in [DType::new(Kind::C, 64), DType::new(Kind::C, 128)] {
+            let info = type_info(dtype).unwrap();
+            let body = body_of(&info, "log1p");
+            let branch = body
+                .lines()
+                .find(|l| l.contains("a.x <= -0.5"))
+                .unwrap_or_else(|| panic!("{}: no branch for x <= -0.5:\n{}", dtype, body));
+            assert!(
+                branch.contains("_logabs(") && branch.contains("1"),
+                "{}",
+                branch
+            );
+            // The branch comes before the `log1p` of the square.
+            assert!(body.find("a.x <= -0.5").unwrap() < body.find("log1p(a.x").unwrap());
+        }
+    }
+
+    #[test]
+    fn atanh_takes_its_real_part_from_the_magnitude_of_x() {
+        // With x < 0 the `log1p` argument nears -1 at z = -1. The real part is odd in x,
+        // so it is computed from |x| and given the sign of x.
+        for dtype in [DType::new(Kind::C, 64), DType::new(Kind::C, 128)] {
+            let info = type_info(dtype).unwrap();
+            let body = body_of(&info, "atanh");
+            assert!(body.contains("fabs(x)"), "{}:\n{}", dtype, body);
+            assert!(body.contains("copysign("), "{}:\n{}", dtype, body);
+            assert!(
+                body.contains(", x)"),
+                "copysign takes the sign of x:\n{}",
+                body
+            );
+            // No `log1p` of a quotient with the signed x in the numerator.
+            assert!(!body.contains("* x /"), "{}:\n{}", dtype, body);
+        }
     }
 
     #[test]

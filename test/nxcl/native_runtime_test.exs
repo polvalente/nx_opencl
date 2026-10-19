@@ -1,7 +1,7 @@
 defmodule NxCL.NativeRuntimeTest do
   @moduledoc """
-  Tests of the native program executor: decoding, kernel cache, outputs,
-  buffer liveness. They use a fresh device context where a test reads counters.
+  Tests of the native program executor: decoding, outputs, and the program
+  cache a jitted function fills. Most tests use a fresh device context.
   """
   use ExUnit.Case, async: false
 
@@ -157,7 +157,7 @@ defmodule NxCL.NativeRuntimeTest do
     end
   end
 
-  describe "kernel cache" do
+  describe "program cache" do
     test "a jitted function adds no program after its first call" do
       jitted =
         Nx.Defn.jit(fn x -> x |> Nx.tanh() |> Nx.multiply(x) |> Nx.tanh() end,
@@ -171,13 +171,16 @@ defmodule NxCL.NativeRuntimeTest do
       jitted.(x)
       size = NxCL.Compiler.ProgramCache.size()
 
+      # The jitted function used the cache; a vacuous zero would pass the check below.
+      assert size > 0
+
       for _ <- 1..99, do: assert(jitted.(x) == first)
       assert NxCL.Compiler.ProgramCache.size() == size
     end
   end
 
-  describe "buffer liveness" do
-    test "10 000 evals leave the input readable" do
+  describe "repeated evals" do
+    test "the input is still readable after 10 000 evals that return it and alias results" do
       ctx = Native.device_ctx_create(0)
       x = upload(ctx, [1.0, 2.0, 3.0, 4.0])
 

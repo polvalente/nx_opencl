@@ -33,12 +33,27 @@ defmodule NxCL.TestSupport.Gen do
   @spec dtypes() :: [Nx.Type.t()]
   def dtypes, do: @dtypes
 
-  @doc "Random tensor on `Nx.BinaryBackend`. Floats lie in [-4, 4]; integers span a small range."
+  @doc """
+  Random tensor on `Nx.BinaryBackend`. Floats lie in [-4, 4]; integers span a small range.
+
+  Without `:seed`, each call in a process draws new data: the seed is ExUnit's seed plus
+  the number of earlier unseeded calls in the process, so two operands of one row differ
+  (`subtract` of equal data would give all zeros) and a failing seed still reproduces the
+  data. With `:seed`, the data depends on that seed alone.
+  """
   @spec random(tuple(), Nx.Type.t(), keyword()) :: Nx.Tensor.t()
   def random(shape, type, opts \\ []) do
-    key = Nx.Random.key(Keyword.get(opts, :seed, NxCL.TestSupport.Compare.seed()))
+    seed = Keyword.get_lazy(opts, :seed, fn -> NxCL.TestSupport.Compare.seed() + salt() end)
+    key = Nx.Random.key(seed)
     {tensor, _key} = do_random(key, shape, type)
     tensor
+  end
+
+  # Counts the unseeded calls of this process; a test runs in its own process.
+  defp salt do
+    n = Process.get({__MODULE__, :salt}, 0)
+    Process.put({__MODULE__, :salt}, n + 1)
+    n
   end
 
   defp do_random(key, shape, {:c, size}) do

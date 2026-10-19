@@ -2,6 +2,7 @@ defmodule NxCL.DeviceCtxTest do
   use ExUnit.Case, async: false
 
   @moduletag :opencl
+
   describe "device_ctx_create/1" do
     test "creates a device context for device 0" do
       ctx = NxCL.Native.device_ctx_create(0)
@@ -14,7 +15,6 @@ defmodule NxCL.DeviceCtxTest do
     end
   end
 
-  @moduletag :opencl
   describe "device_info/1" do
     test "returns device information" do
       ctx = NxCL.Native.device_ctx_create(0)

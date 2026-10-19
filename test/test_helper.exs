@@ -1,3 +1,4 @@
+# Run the suite on one GPU, alone: two test runs at once share the device and flake.
 # Tests tagged `requires: :fp64 | :fp16 | :int64_atomics` are excluded when device 0 lacks the extension.
 skipped =
   for {:requires, cap} = filter <- NxCL.TestSupport.Device.unsupported_filters(),
@@ -5,4 +6,4 @@ skipped =
 
 for {_filter, cap} <- skipped, do: IO.puts(NxCL.TestSupport.Device.skip_reason(cap))
 
-ExUnit.start(exclude: [:skip, :known_gap] ++ Enum.map(skipped, &elem(&1, 0)))
+ExUnit.start(exclude: [:skip] ++ Enum.map(skipped, &elem(&1, 0)))

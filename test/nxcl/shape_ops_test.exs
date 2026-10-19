@@ -1,28 +1,21 @@
 defmodule NxCL.ShapeOpsTest do
   @moduledoc """
   Lowering and runtime behaviour of the shape ops that the differential rows
-  cannot show: which instructions lowering emits, which ops alias their input,
-  zero-size inputs (Nx 1.0 cannot build them, so they go through the native
-  wire), and the rank cap.
+  cannot show: which instructions lowering emits, the values that reshape,
+  squeeze, metadata and elem pass on, zero-size inputs (Nx 1.0 cannot build them,
+  so they go through the native wire), and the rank cap.
   """
   use ExUnit.Case, async: false
 
+  import NxCL.TestSupport, only: [lower: 2, ops: 1]
   import NxCL.TestSupport.Compare
 
   alias NxCL.Compiler.Instruction
-  alias NxCL.Compiler.Lower
   alias NxCL.Native
 
   @moduletag :opencl
 
   @f32 {:f, 32}
-
-  defp lower(fun, args) do
-    flat = args |> Nx.Defn.Composite.flatten_list() |> length()
-    fun |> Nx.Defn.debug_expr_apply(args) |> Lower.lower(flat)
-  end
-
-  defp ops(program), do: Enum.map(program.instructions, & &1.op)
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 
@@ -111,8 +104,8 @@ defmodule NxCL.ShapeOpsTest do
     end
   end
 
-  describe "aliases" do
-    test "reshape, squeeze, metadata and elem give the input's data" do
+  describe "reshape, squeeze, metadata and elem" do
+    test "give the input's values" do
       x = Nx.iota({6}, type: :f32)
 
       out =
@@ -130,7 +123,7 @@ defmodule NxCL.ShapeOpsTest do
       assert b == x
     end
 
-    test "an aliased buffer stays alive for a later kernel" do
+    test "a reshaped value can feed later ops" do
       x = Nx.iota({6}, type: :f32)
 
       assert_same(

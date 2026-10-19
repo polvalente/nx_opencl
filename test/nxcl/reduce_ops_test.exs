@@ -2,26 +2,21 @@ defmodule NxCL.ReduceOpsTest do
   @moduledoc """
   Lowering and runtime behaviour of reductions, scans, windows and sort that the
   differential rows cannot show: which instructions lowering emits, that
-  `reduce` with an add body shares the kernel of `sum`, which bodies raise,
+  `reduce` with an add body gives the result of `sum`, which bodies raise,
   softmax on a batch, and zero-size inputs, which go through the native wire
   because Nx 1.0 cannot build them.
   """
   use ExUnit.Case, async: false
 
+  import NxCL.TestSupport, only: [lower: 2]
   import NxCL.TestSupport.Compare
 
   alias NxCL.Compiler.Instruction
-  alias NxCL.Compiler.Lower
   alias NxCL.Native
 
   @moduletag :opencl
 
   @f32 {:f, 32}
-
-  defp lower(fun, args) do
-    flat = args |> Nx.Defn.Composite.flatten_list() |> length()
-    fun |> Nx.Defn.debug_expr_apply(args) |> Lower.lower(flat)
-  end
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 
@@ -38,8 +33,8 @@ defmodule NxCL.ReduceOpsTest do
         ).instructions
 
       assert [%Instruction{op: :sum, attrs: [1]}] = sum
-      # A body of one add is the steps `[add(0, 1)]`; the native code folds that into the
-      # same kernel as `sum` (next test).
+      # A body of one add is the steps `[add(0, 1)]`. The next test checks it gives the
+      # values of `sum`.
       assert [%Instruction{op: :reduce, attrs: [1, :add, 0, 1, 1]}] = generic
     end
 
@@ -87,8 +82,8 @@ defmodule NxCL.ReduceOpsTest do
     end
   end
 
-  describe "kernels" do
-    test "reduce(&Nx.add/2) gives the result of sum" do
+  describe "sums" do
+    test "reduce with an add body gives the result of sum" do
       x = Nx.iota({3, 41}, type: :f32)
       sum = &Nx.sum(&1, axes: [1])
       add = &Nx.reduce(&1, Nx.tensor(0.0), [axes: [1]], fn a, b -> Nx.add(a, b) end)
@@ -96,16 +91,16 @@ defmodule NxCL.ReduceOpsTest do
       assert Nx.to_binary(run(sum, [x])) == Nx.to_binary(run(add, [x]))
     end
 
-    test "a thread-sized line, a long line and many outputs reduce correctly" do
+    test "a short line, a long line and many lines sum correctly" do
       x = Nx.iota({1, 20}, type: :f32)
       assert Nx.to_number(run(&Nx.sum/1, [x])) == 190.0
 
-      # Few outputs and a long line: partial sums, then a fold of the partials.
+      # Two long lines.
       y = Nx.broadcast(Nx.tensor(1.0), {2, 100_000})
       out = run(&Nx.sum(&1, axes: [1]), [y])
       assert Nx.to_flat_list(out) == [100_000.0, 100_000.0]
 
-      # Many outputs: one group per output, one pass.
+      # Many lines.
       z = Nx.broadcast(Nx.tensor(1.0), {128, 1000})
       out = run(&Nx.sum(&1, axes: [1]), [z])
       assert Nx.to_flat_list(out) == List.duplicate(1000.0, 128)

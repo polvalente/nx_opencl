@@ -8,7 +8,7 @@ defmodule NxCL.HostCallTest do
   @moduledoc """
   Host callbacks (`io_call`, `runtime_call`, `print_value`) through `NxCL.Compiler`.
 
-  What `Nx.Defn.Evaluator` does, probed on Nx 1.0 (stage 11), and what we match:
+  What `Nx.Defn.Evaluator` does, probed on Nx 1.0, and what we match:
 
     * Nx 1.0 has no `:hook` node. `print_value` is an `io_call`, and a named
       `io_call` runs its own callback (the `:hooks` override is out of scope).
@@ -32,14 +32,13 @@ defmodule NxCL.HostCallTest do
 
   import ExUnit.CaptureIO
   import Nx.Defn
+  import NxCL.TestSupport, only: [run_jit: 1, run_jit: 2]
   import NxCL.TestSupport.Compare
 
   alias NxCL.Compiler.Lower
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
-
-  defp run_jit(fun, compiler \\ NxCL.Compiler), do: Nx.Defn.jit(fun, compiler: compiler)
 
   defp flush(acc \\ []) do
     receive do
@@ -323,8 +322,8 @@ defmodule NxCL.HostCallTest do
     end
   end
 
-  describe "transfers" do
-    test "tensors a callback does not take never leave the device" do
+  describe "callback inputs and outputs" do
+    test "a callback is handed only the tensors it takes" do
       fun = fn a, b ->
         c = Nx.add(b, 1)
         a = Nx.io_call(Nx.add(a, 1), tag(:a))
@@ -337,14 +336,16 @@ defmodule NxCL.HostCallTest do
 
       assert Nx.to_flat_list(a2) == [1.0, 2.0, 3.0, 4.0]
       assert Nx.shape(c) == {1024, 64}
+      # The counts come from the callback's input list (see `NxCL.TestSupport.Trace`):
+      # `b` is not in it, so the callback gets 16 bytes of `a` and nothing of `b`.
       assert stats.host_calls == 1
-      assert stats.host_reads == 1
-      assert stats.host_read_bytes == 16
+      assert stats.callback_inputs == 1
+      assert stats.callback_input_bytes == 16
       # A side-effect call returns its input buffer; nothing is uploaded.
-      assert stats.host_uploads == 0
+      assert stats.callback_outputs == 0
     end
 
-    test "a runtime_call reads and uploads only its own tensors" do
+    test "a runtime_call takes and returns only its own tensors" do
       fun = fn a, b ->
         big = Nx.multiply(b, 2)
         r = Nx.runtime_call(a, a, fn t, _ -> Nx.add(t, 1) end)
@@ -356,7 +357,8 @@ defmodule NxCL.HostCallTest do
           run_jit(fun).(Nx.iota({3}, type: :f32), Nx.iota({512, 512}, type: :f32))
         end)
 
-      assert %{host_calls: 1, host_reads: 1, host_read_bytes: 12, host_uploads: 1} = stats
+      assert %{host_calls: 1, callback_inputs: 1, callback_input_bytes: 12, callback_outputs: 1} =
+               stats
     end
 
     test "a container input counts each leaf it takes" do
@@ -368,14 +370,14 @@ defmodule NxCL.HostCallTest do
       {_, stats} =
         Trace.run(fn -> run_jit(fun).(Nx.iota({2}), Nx.iota({3}), Nx.iota({100_000})) end)
 
-      assert %{host_reads: 2, host_read_bytes: 20} = stats
+      assert %{callback_inputs: 2, callback_input_bytes: 20} = stats
     end
 
     test "a callback in a while reads once per iteration" do
       {_, stats} =
         Trace.run(fn -> run_jit(&counted_dynamic/2).(Nx.tensor(0.0), Nx.tensor(5)) end)
 
-      assert %{host_calls: 5, host_reads: 5, host_read_bytes: 20} = stats
+      assert %{host_calls: 5, callback_inputs: 5, callback_input_bytes: 20} = stats
     end
   end
 

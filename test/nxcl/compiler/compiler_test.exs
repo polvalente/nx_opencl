@@ -181,7 +181,7 @@ defmodule NxCL.CompilerTest do
     end
 
     test "an unsupported op raises ArgumentError when compiled" do
-      # Every Nx 1.0 op lowers since stage 12, so the node carries an op Nx does not define.
+      # Every Nx 1.0 op lowers, so the node carries an op Nx does not define.
       unknown = fn x ->
         %{x | data: %Nx.Defn.Expr{id: make_ref(), op: :not_an_nx_op, args: [x], context: nil}}
       end

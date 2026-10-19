@@ -16,13 +16,22 @@ defmodule NxCL.TestSupport.Trace do
       are `scope_runs`.
     * `:host_calls` - calls of `NxCL.Compiler.Executor.Host.run/3` that run a function (an
       `:io_call` with no function runs nothing).
-    * `:host_reads` and `:host_read_bytes` - the tensors `Host.run/3` reads back
-      for a function: one per leaf of the entry's `in_template`, and their bytes.
-    * `:host_uploads` - the tensors `Host.run/3` uploads: one per leaf of a
-      `:runtime_call` output template. An `:io_call` uploads none.
+    * `:callback_inputs` and `:callback_input_bytes` - the tensors a callback takes:
+      one per leaf of the entry's `in_template`, and their bytes. `Host.run/3` reads
+      exactly these back, but the count is read off the template, not observed.
+    * `:callback_outputs` - the tensors a callback returns: one per leaf of a
+      `:runtime_call` output template. An `:io_call` returns its input buffers and
+      uploads nothing.
 
-  The NIF functions (`buffer_read`, `eval_program`) cannot be call-traced, so the
-  counts come from the Elixir functions around them. Tracing follows one process:
+  The three callback counts are derived from the host-call table entry, not from
+  observed reads and uploads. Observing `NxCL.Native.buffer_read/2` from the
+  `Host` module does not work next to `NxCL.TestSupport.NoFallback`: its pattern on
+  `Host.read/2` silences the traced process, so the reads that follow go unseen.
+
+  `run/1` raises if a trace pattern matches no function, so a rename of a traced
+  private function fails the test instead of leaving a count at zero. A test that
+  expects a count of zero should also assert a count that must be above zero (for
+  example `scope_runs`) from the same run. Tracing follows one process:
   the executor must run in the caller (it does), and a test that uses this module
   must be `async: false`. Do not nest `run/1` or use it inside
   `NxCL.TestSupport.NoFallback.trace/1`: a process has one tracer.
@@ -33,9 +42,9 @@ defmodule NxCL.TestSupport.Trace do
     segment_runs: 0,
     scope_runs: 0,
     host_calls: 0,
-    host_reads: 0,
-    host_read_bytes: 0,
-    host_uploads: 0
+    callback_inputs: 0,
+    callback_input_bytes: 0,
+    callback_outputs: 0
   }
 
   @doc "Runs `fun` and returns `{result, counts}`."
@@ -106,9 +115,9 @@ defmodule NxCL.TestSupport.Trace do
 
     counts
     |> bump(:host_calls)
-    |> bump(:host_reads, length(leaves))
-    |> bump(:host_read_bytes, leaves |> Enum.map(&Nx.byte_size/1) |> Enum.sum())
-    |> bump(:host_uploads, uploads)
+    |> bump(:callback_inputs, length(leaves))
+    |> bump(:callback_input_bytes, leaves |> Enum.map(&Nx.byte_size/1) |> Enum.sum())
+    |> bump(:callback_outputs, uploads)
   end
 
   defp leaf_count(template), do: length(Nx.Defn.Composite.flatten_list([template]))
@@ -117,7 +126,8 @@ defmodule NxCL.TestSupport.Trace do
 
   # Patterns are set once per VM. Each appends the caller to the trace message. The
   # `Host.run/3` pattern matches the one `NxCL.TestSupport.NoFallback` sets, because a
-  # pattern on a function replaces the earlier one.
+  # pattern on a function replaces the earlier one. Each pattern must match exactly one
+  # function: a renamed function would otherwise leave its count at zero.
   defp install_patterns() do
     if :persistent_term.get({__MODULE__, :installed}, false) == false do
       Code.ensure_loaded!(NxCL.Compiler.Executor)
@@ -130,7 +140,10 @@ defmodule NxCL.TestSupport.Trace do
             {NxCL.Compiler.Executor, :run_sub, 3},
             {NxCL.Compiler.Executor.Host, :run, 3}
           ] do
-        :erlang.trace_pattern({mod, fun, arity}, spec, [:local])
+        case :erlang.trace_pattern({mod, fun, arity}, spec, [:local]) do
+          1 -> :ok
+          n -> raise "trace pattern #{inspect(mod)}.#{fun}/#{arity} matched #{n} functions, not 1"
+        end
       end
 
       :persistent_term.put({__MODULE__, :installed}, true)

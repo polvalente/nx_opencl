@@ -2,7 +2,7 @@ defmodule NxCL.TestSupportTest do
   @moduledoc "Tests of the test helpers: the comparison rules, device gating, and generators."
   use ExUnit.Case, async: false
 
-  alias NxCL.TestSupport.{Compare, Device, Gen}
+  alias NxCL.TestSupport.{Compare, Device, Factors, Gen}
 
   # Runs the evaluator, then breaks the result in the way `:mode` names.
   defmodule BrokenCompiler do
@@ -137,6 +137,15 @@ defmodule NxCL.TestSupportTest do
       assert Nx.to_binary(a) == Nx.to_binary(Gen.random({65}, {:f, 32}, seed: 7))
     end
 
+    test "two unseeded calls draw different data, and the same seed gives the same data" do
+      a = Gen.random({65}, {:f, 32})
+      b = Gen.random({65}, {:f, 32})
+      refute Nx.to_binary(a) == Nx.to_binary(b)
+
+      assert Nx.to_binary(Gen.random({65}, {:s, 8}, seed: 3)) ==
+               Nx.to_binary(Gen.random({65}, {:s, 8}, seed: 3))
+    end
+
     test "random tensors have the asked shape and type" do
       for shape <- Gen.shapes(), type <- [{:f, 32}, {:s, 8}, {:u, 16}, {:c, 64}] do
         t = Gen.random(shape, type, seed: 1)
@@ -149,6 +158,97 @@ defmodule NxCL.TestSupportTest do
       for {kind, _} = type <- Gen.dtypes(), kind in [:s, :u, :f, :bf] do
         assert Gen.edge_values(type).type == type
         if type != {:f, 64}, do: assert(tuple_size(Gen.overflow_values(type).shape) == 1)
+      end
+    end
+  end
+
+  describe "Factors on a half type" do
+    @describetag :opencl
+
+    # max |A| is 4, so a `bf16` tolerance is 8 * 2^-7 * 3 * 4 = 0.75. Each wrong factor
+    # is off by 4 or more in the identity it breaks.
+    defp half do
+      Nx.tensor([[4.0, 1.0, 2.0], [1.0, 3.0, 0.0], [2.0, 0.0, 2.0]], type: :bf16)
+    end
+
+    test "right factors pass" do
+      x = half()
+      assert :ok = Factors.assert_factors(:qr, &Nx.LinAlg.qr/1, x)
+      assert :ok = Factors.assert_factors(:eigh, &Nx.LinAlg.eigh/1, x)
+      assert :ok = Factors.assert_factors(:svd, &Nx.LinAlg.svd/1, x)
+      assert :ok = Factors.assert_factors(:lu, &Nx.LinAlg.lu/1, x)
+    end
+
+    test "an R with an entry below the diagonal fails" do
+      wrong = fn x ->
+        {q, r} = Nx.LinAlg.qr(x)
+        {q, Nx.put_slice(r, [2, 0], Nx.tensor([[4.0]], type: :bf16))}
+      end
+
+      # `Q R == A` is checked first and breaks too; either failure shows the check works.
+      assert_raise ExUnit.AssertionError, ~r/(Q R == A|R upper triangular)/, fn ->
+        Factors.assert_factors(:qr, wrong, half())
+      end
+    end
+
+    test "an R with a flipped row fails" do
+      wrong = fn x ->
+        {q, r} = Nx.LinAlg.qr(x)
+        {q, Nx.put_slice(r, [0, 0], Nx.negate(r[0]) |> Nx.new_axis(0))}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/Q R == A/, fn ->
+        Factors.assert_factors(:qr, wrong, half())
+      end
+    end
+
+    test "wrong eigenvalues fail" do
+      wrong = fn x ->
+        {w, v} = Nx.LinAlg.eigh(x)
+        {Nx.add(w, Nx.tensor(4.0, type: :bf16)), v}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/A V == V diag\(w\)/, fn ->
+        Factors.assert_factors(:eigh, wrong, half())
+      end
+    end
+
+    test "wrong singular values fail" do
+      wrong = fn x ->
+        {u, s, vt} = Nx.LinAlg.svd(x)
+        {u, Nx.multiply(s, Nx.tensor(2.0, type: :bf16)), vt}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/U S V\^H == A/, fn ->
+        Factors.assert_factors(:svd, wrong, half())
+      end
+    end
+
+    test "wrong singular values fail on f32, past the svd floor" do
+      x = Nx.as_type(half(), :f32)
+      assert :ok = Factors.assert_factors(:svd, &Nx.LinAlg.svd/1, x)
+
+      # An `f32` check allows the reference's own residual, so a factor that is wrong in
+      # the reference too would pass. The right function runs the reference.
+      wrong = fn x ->
+        {u, s, vt} = Nx.LinAlg.svd(x)
+        # 1.001 times S is off by about 5e-3, over the 1.6e-3 floor at max |A| = 4.
+        {u, Nx.multiply(s, 1.001), vt}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/U S V\^H == A/, fn ->
+        Factors.assert_factors(:svd, wrong, x, reference_fun: &Nx.LinAlg.svd/1)
+      end
+    end
+
+    test "an L with a wrong entry above the diagonal fails" do
+      wrong = fn x ->
+        {p, l, u} = Nx.LinAlg.lu(x)
+        {p, Nx.put_slice(l, [0, 2], Nx.tensor([[4.0]], type: :bf16)), u}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/(P L U == A|L unit lower triangular)/, fn ->
+        Factors.assert_factors(:lu, wrong, half())
       end
     end
   end

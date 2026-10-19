@@ -1,17 +1,10 @@
 defmodule NxCL.Compiler.LowerTest do
   use ExUnit.Case, async: true
   import Nx.Defn
+  import NxCL.TestSupport, only: [lower: 2]
 
   alias NxCL.Compiler.Instruction
-  alias NxCL.Compiler.Lower
   alias NxCL.Compiler.Program
-
-  defp trace(fun, args), do: Nx.Defn.debug_expr_apply(fun, args)
-
-  defp lower(fun, args) do
-    flat = args |> Nx.Defn.Composite.flatten_list() |> length()
-    fun |> trace(args) |> Lower.lower(flat)
-  end
 
   @f32 {:f, 32}
 
@@ -154,7 +147,7 @@ defmodule NxCL.Compiler.LowerTest do
 
   describe "unsupported input" do
     test "an op that is not lowered raises with the fixed prefix" do
-      # Every Nx 1.0 op lowers since stage 12, so the node carries an op Nx does not define.
+      # Every Nx 1.0 op lowers, so the node carries an op Nx does not define.
       unknown = fn x ->
         %{x | data: %Nx.Defn.Expr{id: make_ref(), op: :not_an_nx_op, args: [x], context: nil}}
       end

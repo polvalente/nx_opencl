@@ -14,15 +14,34 @@ defmodule NxCL.TestSupport.Factors do
 
   Every result must also have the reference's types and shapes.
 
-  Each check measures a residual, the largest absolute error of one identity. The
-  tolerance is the one `NxCL.TestSupport.Compare` uses for the type, scaled by
-  `max(1, max |A|)`. A default implementation has an error of its own (the `svd`
-  default stops at a loose tolerance, so even `Nx.BinaryBackend` misses `U S V^H == A`
-  by 2e-4 in `f32`), so the residual of the device may exceed the residual of the
-  reference by at most the tolerance. The reference differs from the device in
-  rounding (it truncates a half type, the device rounds to nearest), so `w` and `S`
-  are measured against the widened input's, not against the reference's. The arithmetic of a check runs in
-  `f64` or `c128` on `Nx.BinaryBackend`, so a check adds no rounding of its own.
+  Each check measures a residual, the largest absolute error of one identity.
+
+    * `f32`, `f64`, `c64` and `c128`: the tolerance is the one
+      `NxCL.TestSupport.Compare` uses for the type, scaled by `max(1, max |A|)`. A
+      default implementation has an error of its own (the `svd` default stops at a
+      loose tolerance, so even `Nx.BinaryBackend` misses `U S V^H == A` by 2e-4 in
+      `f32`), so the residual of the device may exceed the residual of the reference
+      by at most the tolerance.
+    * `f16` and `bf16`: the tolerance is `8 * eps * max(m, n) * max(1, max |A|)`, with
+      the epsilon of the type, and it does not look at the reference's residual. A half
+      type rounds at every step of a factorization, so the residual of the reference is
+      itself large and random (a `bf16` `R` of a 5-column input has entries of 0.3 below
+      the diagonal), and a tolerance tied to it fails at some seeds. The factor 8 is about
+      twice the largest residual seen over 400 seeds of `qr`, `eigh`, `svd` and `lu` on
+      3 x 3 to 4 x 5 inputs in `bf16`.
+
+  The default `svd` stops its iterations at a tolerance of `1.19e-7` for every type, so
+  its `U S V^H == A` residual is up to about `1.4e-4 * max |A|` in `f32` and `f64` (over
+  1600 `f32` cases and 400 `f64` cases), also on the reference. In `f64` the device and
+  the reference take the same steps and have the same residual. In `f32` they round
+  differently, take different steps, and the reference can sit at 5e-6 where the device
+  sits at 6e-4 (seed 77310, a 4 x 3 input). So for `f32` that one identity also passes
+  below `4e-4 * max |A|`, about three times the largest residual seen.
+
+  The reference differs from the device in rounding (it truncates a half type, the
+  device rounds to nearest), so `w` and `S` are measured against the widened input's,
+  not against the reference's. The arithmetic of a check runs in `f64` or `c128` on
+  `Nx.BinaryBackend`, so a check adds no rounding of its own.
 
   Each check runs the function through the compiler and, as `Compare` does,
   eagerly with the argument on `NxCL.Backend`.
@@ -30,25 +49,29 @@ defmodule NxCL.TestSupport.Factors do
 
   import ExUnit.Assertions
 
-  @tol %{
-    {:f, 64} => 1.0e-12,
-    {:f, 32} => 1.0e-5,
-    {:f, 16} => 1.0e-2,
-    {:bf, 16} => 1.0e-2
-  }
+  @tol %{{:f, 64} => 1.0e-12, {:f, 32} => 1.0e-5}
+
+  @half_epsilon %{{:f, 16} => :math.pow(2, -10), {:bf, 16} => :math.pow(2, -7)}
+  @half_factor 8
+  @svd_f32_floor 4.0e-4
 
   @type kind :: :qr | :eigh | :svd | :lu
 
   @doc """
   Runs `fun` on `x` and checks the factors of `kind`. `fun` is
   `&Nx.LinAlg.qr/1`, `&Nx.LinAlg.qr(&1, mode: :complete)`, and so on.
-  """
-  @spec assert_factors(kind(), function(), Nx.Tensor.t()) :: :ok
-  def assert_factors(kind, fun, x) do
-    wide = widen(x)
-    truth = apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), [wide])
 
-    reference = apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), [to_binary(x)])
+  The option `:reference_fun` (default `fun`) is the function the widened input and the
+  reference run. A test that checks the check itself passes a wrong `fun` and the right
+  `:reference_fun`, so the wrong factor shows only in the compiler and eager runs.
+  """
+  @spec assert_factors(kind(), function(), Nx.Tensor.t(), keyword()) :: :ok
+  def assert_factors(kind, fun, x, opts \\ []) do
+    ref_fun = Keyword.get(opts, :reference_fun, fun)
+    wide = widen(x)
+    truth = apply(Nx.Defn.jit(ref_fun, compiler: Nx.Defn.Evaluator), [wide])
+
+    reference = apply(Nx.Defn.jit(ref_fun, compiler: Nx.Defn.Evaluator), [to_binary(x)])
     actual = apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), [x])
     check(kind, x, {reference, truth}, actual, "compiler")
 
@@ -71,14 +94,17 @@ defmodule NxCL.TestSupport.Factors do
 
     type = x |> Nx.type() |> Nx.Type.to_floating()
     a = widen(x)
-    tol = tol(type) * max(1.0, scalar(Nx.reduce_max(Nx.abs(a))))
+    max_a = max(1.0, scalar(Nx.reduce_max(Nx.abs(a))))
+    tol = tolerance(type, Nx.shape(x), max_a)
     truth = truth |> Tuple.to_list() |> Enum.map(&widen/1)
     ours = residuals(kind, a, Enum.map(actual, &widen/1), truth)
     theirs = residuals(kind, a, Enum.map(expected, &widen/1), truth)
 
     for {{label, err}, {_, ref_err}} <- Enum.zip(ours, theirs) do
-      assert err <= tol + ref_err,
-             "#{kind} (#{path}): #{label}: max error #{err}, reference #{ref_err}, tolerance #{tol} (seed #{NxCL.TestSupport.Compare.seed()})"
+      allowed = allowed(kind, label, type, tol, ref_err, max_a)
+
+      assert err <= allowed,
+             "#{kind} (#{path}): #{label}: max error #{err}, reference #{ref_err}, tolerance #{allowed} (seed #{NxCL.TestSupport.Compare.seed()})"
     end
 
     :ok
@@ -130,6 +156,36 @@ defmodule NxCL.TestSupport.Factors do
     do: actual |> Nx.subtract(expected) |> Nx.abs() |> Nx.reduce_max() |> scalar()
 
   defp scalar(t), do: t |> Nx.real() |> Nx.to_number()
+
+  # A half type's tolerance stands alone. The other types allow the reference's error,
+  # and `f32` `svd` also allows `@svd_f32_floor * max |A|` for `U S V^H == A` (see the
+  # moduledoc).
+  defp allowed(kind, label, type, tol, ref_err, max_a) do
+    cond do
+      Map.has_key?(@half_epsilon, type) ->
+        tol
+
+      kind == :svd and type == {:f, 32} and label == "U S V^H == A" ->
+        max(tol + ref_err, @svd_f32_floor * max_a)
+
+      true ->
+        tol + ref_err
+    end
+  end
+
+  # A half type's tolerance is loose: at n = 3 to 5 it is about 20% of max |A| (8 * eps *
+  # n with eps = 2^-7). A bf16 check catches only gross defects, such as a wrong sign, a
+  # wrong factor of 2 or a missing row; it does not see a defect of a few percent.
+  defp tolerance(type, shape, max_a) do
+    case @half_epsilon do
+      %{^type => eps} ->
+        n = max(elem(shape, tuple_size(shape) - 1), elem(shape, tuple_size(shape) - 2))
+        @half_factor * eps * n * max_a
+
+      _ ->
+        tol(type) * max_a
+    end
+  end
 
   defp tol({:c, size}), do: Map.fetch!(@tol, {:f, div(size, 2)})
   defp tol(type), do: Map.fetch!(@tol, type)

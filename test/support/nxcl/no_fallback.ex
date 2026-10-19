@@ -17,7 +17,8 @@ defmodule NxCL.TestSupport.NoFallback do
 
   `guard/1` also traces calls into `Nx.BinaryBackend` made by the running process
   (an op that names `Nx.BinaryBackend` itself, bypassing the default). Such a
-  call is a fallback unless the function made a host call.
+  call is a fallback, also when the function made a host call: the trace goes silent
+  while a callback runs, so every call it still sees was made outside a callback.
   """
 
   @behaviour Nx.Backend
@@ -47,18 +48,19 @@ defmodule NxCL.TestSupport.NoFallback do
 
   @doc """
   Runs `fun` with this backend as the default and returns its result. Raises
-  `Fallback` when `Nx.BinaryBackend` computed during `fun` and no host call ran.
+  `Fallback` when `Nx.BinaryBackend` computed during `fun` outside a host call callback.
   """
   @spec guard((-> result)) :: result when result: var
   def guard(fun) do
-    {result, %{binary: seen_calls, host_calls: calls}} =
+    {result, %{binary: seen_calls}} =
       trace(fn -> Nx.with_default_backend(__MODULE__, fun) end)
 
     binary_calls = compute_calls(seen_calls)
 
-    if binary_calls != [] and calls == 0 do
+    if binary_calls != [] do
       raise Fallback,
-            "Nx.BinaryBackend computed with no host call: " <> inspect(Enum.uniq(binary_calls))
+            "Nx.BinaryBackend computed outside a host call: " <>
+              inspect(Enum.uniq(binary_calls))
     end
 
     result

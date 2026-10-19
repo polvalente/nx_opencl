@@ -7,9 +7,11 @@ defmodule NxCL.FFTTest do
   inputs scale by `1 / sqrt(n)` for `fft` and by `sqrt(n)` for `ifft`, so the
   output has unit-size entries and the harness tolerance for the type applies
   (an `f32` transform of long inputs has an absolute error that grows with the
-  size of its output). Integer inputs cannot scale, so they use lengths up to 8.
+  size of its output). Integer inputs cannot scale, so they use lengths up to 8, `rfft`
+  included: at length 100 an `f32` transform of integers up to 8 has an absolute error
+  of about 2e-5, past the absolute tolerance of 1e-5.
 
-  `Nx.BinaryBackend` is wrong in two cases (probed on Nx 1.0, stage 12), so those
+  `Nx.BinaryBackend` is wrong in two cases (probed on Nx 1.0), so those
   rows state the answer. For length 1 it returns an empty tensor; the answer is
   the input as a complex tensor. For a transform on axis 0 of a rank 3 tensor with
   a new `:length`, it returns values that differ from the transform of the same
@@ -206,7 +208,8 @@ defmodule NxCL.FFTTest do
 
         # `rfft` takes a real input; Nx rejects complex.
         unless complex?(type) do
-          for n <- [4, 7, 8, 100] do
+          # Integer inputs cannot scale, so they stop at length 8 (see the moduledoc).
+          for n <- if(integer?(type), do: [4, 7, 8], else: [4, 7, 8, 100]) do
             x = input(type, {2, n}, 0.3)
             assert_same(&Nx.rfft/1, [x])
             assert_same(&Nx.rfft(&1, length: 16), [x])

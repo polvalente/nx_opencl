@@ -9,24 +9,17 @@ defmodule NxCL.IndexingTest do
   """
   use ExUnit.Case, async: false
 
+  import NxCL.TestSupport, only: [lower: 2, ops: 1]
   import NxCL.TestSupport.Compare
   import NxCL.TestSupport.Device, only: [capability?: 1]
 
   alias NxCL.Compiler.Instruction
-  alias NxCL.Compiler.Lower
   alias NxCL.Native
 
   @moduletag :opencl
   @moduletag timeout: 600_000
 
   @f32 {:f, 32}
-
-  defp lower(fun, args) do
-    flat = args |> Nx.Defn.Composite.flatten_list() |> length()
-    fun |> Nx.Defn.debug_expr_apply(args) |> Lower.lower(flat)
-  end
-
-  defp ops(program), do: Enum.map(program.instructions, & &1.op)
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 

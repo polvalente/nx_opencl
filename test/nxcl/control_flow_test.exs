@@ -1,20 +1,19 @@
 defmodule NxCL.ControlFlowTest do
   @moduledoc """
-  Checks of the control-flow executor that a differential row cannot state: which
-  branches run, how many predicates the executor reads, the result of a
-  long loop, the zero-iteration result, and the lowering error for a value an
-  inner scope takes from its parent.
+  Checks of the control-flow executor that a differential row cannot state: the
+  value of a `cond` whose other branch would raise, how many predicates the
+  executor reads, the result of a long loop, the zero-iteration result, and the
+  lowering error for a value an inner scope takes from its parent.
   """
   use ExUnit.Case, async: false
 
   import Nx.Defn
+  import NxCL.TestSupport, only: [run_jit: 1]
 
   alias NxCL.Compiler.Lower
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
-
-  defp run_jit(fun), do: Nx.Defn.jit(fun, compiler: NxCL.Compiler)
 
   defn pick(p, x, idx) do
     cond do
@@ -22,7 +21,7 @@ defmodule NxCL.ControlFlowTest do
         x + 1
 
       true ->
-        # Never taken in the first test: out of range, and costly.
+        # Not taken in the first test; the second test shows it raises when it runs.
         sorted = Nx.sort(Nx.dot(x, Nx.transpose(x)), axis: 0)
         Nx.sum(Nx.gather(sorted, idx)) + Nx.sum(sorted)
     end
@@ -73,9 +72,9 @@ defmodule NxCL.ControlFlowTest do
   end
 
   describe "branches" do
-    test "an untaken branch never runs" do
+    test "a cond gives the value of its taken branch when the other branch would raise" do
       x = Nx.iota({16, 4}, type: :f32)
-      # Out of range for the sorted 16 x 16 matrix: this branch would raise if it ran.
+      # Out of range for the sorted 16 x 16 matrix: this branch raises if it runs.
       idx = Nx.tensor([[99, 99]])
       p = Nx.tensor(1, type: :u8)
 
@@ -116,6 +115,7 @@ defmodule NxCL.ControlFlowTest do
       assert Nx.to_number(result) == 10
       # The loop has no cond and a static count, so every scope run is a body run.
       assert %{predicate_reads: 0, scope_runs: 10} = counts
+      assert counts.segment_runs > 0
     end
 
     test "a dynamic loop reads one predicate per iteration, and one more to stop" do
@@ -126,6 +126,7 @@ defmodule NxCL.ControlFlowTest do
       assert Nx.to_number(result) == 7
       # Scope runs are the predicate scopes plus the body runs (7 iterations).
       assert %{predicate_reads: 8} = counts
+      assert counts.segment_runs > 0
       assert counts.scope_runs - counts.predicate_reads == 7
     end
 
@@ -136,6 +137,7 @@ defmodule NxCL.ControlFlowTest do
 
       {_, counts} = Trace.run(fn -> run_jit(fun).(Nx.tensor(1), Nx.tensor(1), x) end)
       assert %{predicate_reads: 1} = counts
+      assert counts.segment_runs > 0
 
       {_, counts} = Trace.run(fn -> run_jit(fun).(Nx.tensor(0), Nx.tensor(1), x) end)
       assert %{predicate_reads: 2} = counts
@@ -175,7 +177,9 @@ defmodule NxCL.ControlFlowTest do
       assert_raise ArgumentError, ~r/nest more than 64 levels/, fn ->
         state = %{
           depth: 64,
+          inputs: %{},
           instrs: [],
+          host_calls: [],
           refs: %{},
           captures: [],
           constants: [],

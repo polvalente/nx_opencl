@@ -1,15 +1,15 @@
 defmodule NxCL.DeviceArgsTest do
   @moduledoc """
   A compiled function that takes tensors already on the device uses their buffers
-  as they are. Run on one GPU, alone: two suites at once flake.
+  as they are.
   """
   use ExUnit.Case, async: false
 
   import Nx.Defn
+  import NxCL.TestSupport, only: [run_jit: 1]
 
   @moduletag :opencl
 
-  defp run_jit(fun), do: Nx.Defn.jit(fun, compiler: NxCL.Compiler)
   defp on_device(t), do: Nx.backend_copy(t, NxCL.Backend)
 
   defp dense(x, w, b), do: x |> Nx.dot(w) |> Nx.add(b) |> Nx.max(0)

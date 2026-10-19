@@ -196,7 +196,9 @@ defmodule NxCL.BackendTest do
             lu: &Nx.LinAlg.lu/1
           ] do
         {result, counts} = NxCL.TestSupport.Trace.run(fn -> fun.(gpu) end)
-        assert %{host_calls: 0, host_reads: 0} = counts, "#{name}"
+        # Segments ran, so a host-call count of zero is a real zero.
+        assert counts.segment_runs > 0, "#{name}"
+        assert %{host_calls: 0, callback_inputs: 0} = counts, "#{name}"
 
         for leaf <- Nx.Defn.Composite.flatten_list([result]) do
           assert %NxCL.Backend{} = leaf.data
@@ -235,15 +237,16 @@ defmodule NxCL.BackendTest do
   end
 
   describe "memory" do
-    test "10 000 adds with backend_deallocate each return :ok" do
+    # This cannot see a leak or a double free; it checks the return value and that
+    # freeing a result leaves the inputs readable.
+    test "deallocating the result of an add returns :ok, and the inputs stay readable" do
       a = Nx.tensor([1.0, 2.0, 3.0]) |> Nx.backend_transfer(NxCL.Backend)
       b = Nx.tensor([4.0, 5.0, 6.0]) |> Nx.backend_transfer(NxCL.Backend)
 
-      for _ <- 1..10_000 do
+      for _ <- 1..1_000 do
         assert :ok = a |> Nx.add(b) |> Nx.backend_deallocate()
       end
 
-      # The inputs are still readable after the loop.
       assert Nx.to_flat_list(a) == [1.0, 2.0, 3.0]
       assert Nx.to_flat_list(b) == [4.0, 5.0, 6.0]
     end

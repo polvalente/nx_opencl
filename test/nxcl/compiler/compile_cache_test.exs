@@ -1,8 +1,7 @@
 defmodule NxCL.Compiler.CompileCacheTest do
   @moduledoc """
   Closure cache, structural cache, options, device registry, queue partitions,
-  eviction and a concurrency stress run. Run on one GPU, alone: two suites at
-  once flake.
+  eviction and a concurrency stress run.
   """
   use ExUnit.Case, async: false
 
@@ -10,6 +9,7 @@ defmodule NxCL.Compiler.CompileCacheTest do
   alias NxCL.Compiler.ProgramCache
   alias NxCL.Devices
   alias NxCL.Native
+  alias NxCL.TestSupport
   alias NxCL.TestSupport.Calls
 
   @moduletag :opencl
@@ -161,17 +161,22 @@ defmodule NxCL.Compiler.CompileCacheTest do
       assert CompileCache.size(:cache_fifo) == 2
     end
 
-    test "an entry past its ttl misses on read, then the sweep removes it" do
-      start_supervised!({CompileCache, name: :cache_ttl, ttl: 100})
+    test "an entry past its ttl misses on read, and the sweep removes it later" do
+      pid = start_supervised!({CompileCache, name: :cache_ttl, ttl: 200})
       CompileCache.put(:a, 1, :cache_ttl)
       assert CompileCache.fetch(:a, :cache_ttl) == {:ok, 1}
 
-      # The sweep runs every 50 ms; read before it can run, past the ttl.
-      Process.sleep(110)
-      assert CompileCache.fetch(:a, :cache_ttl) == {:error, :cache_miss}
+      # A suspended cache cannot sweep, so only the read can hide the entry.
+      :sys.suspend(pid)
 
-      Process.sleep(100)
-      assert CompileCache.size(:cache_ttl) == 0
+      TestSupport.wait_until(fn ->
+        CompileCache.fetch(:a, :cache_ttl) == {:error, :cache_miss}
+      end)
+
+      assert CompileCache.size(:cache_ttl) == 1
+
+      :sys.resume(pid)
+      TestSupport.wait_until(fn -> CompileCache.size(:cache_ttl) == 0 end)
     end
 
     test "a bad bound raises" do
@@ -313,17 +318,20 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
     test "a cache entry dropped during a run does not free what the run uses" do
       with_env(ProgramCache, max_items: 1)
-      x = Nx.iota({256, 256}, type: :f32) |> Nx.divide(1000)
-      fun = fn a -> a |> Nx.dot(a) |> Nx.dot(a) |> Nx.dot(a) end
+      x = Nx.iota({64, 64}, type: :f32) |> Nx.divide(1000)
+      fun = fn a -> Nx.dot(a, a) end
       expected = Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator).(x)
 
-      runner = Task.async(fn -> for _ <- 1..10, do: jit(fun).(x) end)
+      runner = Task.async(fn -> for _ <- 1..50, do: jit(fun).(x) end)
       evictor = Task.async(fn -> for n <- 1..30, do: jit(fn y -> Nx.add(y, n) end).(x) end)
 
       Task.await(evictor, 60_000)
 
       for result <- Task.await(runner, 60_000),
-          do: assert(Nx.all_close(result, expected, atol: 1.0e-2) |> Nx.to_number() == 1)
+          do:
+            assert(
+              Nx.all_close(result, expected, rtol: 1.0e-4, atol: 1.0e-4) |> Nx.to_number() == 1
+            )
     end
   end
 

@@ -11,7 +11,8 @@ defmodule NxCL.BlockTest do
   """
   use ExUnit.Case, async: false
 
-  alias NxCL.Compiler.Lower
+  import NxCL.TestSupport, only: [lower: 2, ops: 1]
+
   alias NxCL.Compiler.Lower.Block
   alias NxCL.TestSupport.Trace
 
@@ -23,13 +24,6 @@ defmodule NxCL.BlockTest do
     |> Enum.filter(&(Code.ensure_loaded?(&1) and function_exported?(&1, :__struct__, 0)))
     |> Enum.sort()
   end
-
-  defp lower(fun, args) do
-    flat = args |> Nx.Defn.Composite.flatten_list() |> length()
-    fun |> Nx.Defn.debug_expr_apply(args) |> Lower.lower(flat)
-  end
-
-  defp ops(program), do: Enum.map(program.instructions, & &1.op)
 
   defp spd(n),
     do: Nx.add(Nx.multiply(Nx.eye(n), n), Nx.iota({n, n}, type: :f32) |> Nx.divide(100))
@@ -144,6 +138,8 @@ defmodule NxCL.BlockTest do
       {result, counts} =
         Trace.run(fn -> apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args) end)
 
+      # Segments ran, so a host-call count of zero is a real zero.
+      assert counts.segment_runs > 0
       {result, counts.host_calls}
     end
 

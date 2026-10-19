@@ -22,6 +22,11 @@ defmodule NxCL.TestSupport.Compare do
     {:f, 8} => 1.0e-1
   }
 
+  @doc "The default absolute and relative tolerance for `type` (a complex type uses that of its parts)."
+  @spec default_tolerance(Nx.Type.t()) :: float()
+  def default_tolerance({:c, size}), do: default_tolerance({:f, div(size, 2)})
+  def default_tolerance(type), do: Map.fetch!(@default_tol, type)
+
   @doc """
   Checks `fun` on `args` against the reference. Raises `ExUnit.AssertionError`
   on any mismatch.

@@ -87,6 +87,47 @@ defmodule NxCL.ReductionTest do
 
   defp units(type, shape), do: Gen.random(shape, type)
 
+  # Random factors for a product. A complex factor has a random phase and a modulus
+  # within 10% of 1, so a product of 15 or 24 of them stays near 1 (between about 0.2
+  # and 10): far above the tolerance, and its rounding error stays near 1e-6, under it.
+  defp random_factors({:c, size} = type, shape) do
+    part = {:f, div(size, 2)}
+    angle = Gen.random(shape, part)
+    modulus = Nx.add(1.0, Nx.multiply(Gen.random(shape, part), 0.025))
+    re = Nx.multiply(modulus, Nx.cos(angle))
+    im = Nx.multiply(modulus, Nx.sin(angle))
+    Nx.as_type(Nx.complex(re, im), type)
+  end
+
+  # A real factor has a random sign and a magnitude in [1, 1.5], so a product of 3 to 24
+  # of them is at least 1, well over the tolerance of even the half types. Integers keep
+  # their random values: their products wrap the same way on both sides.
+  defp random_factors({kind, _} = type, shape) when kind in [:f, :bf] do
+    x = Gen.random(shape, type)
+    Nx.multiply(Nx.sign(x), Nx.add(1.0, Nx.divide(Nx.abs(x), 8.0))) |> Nx.as_type(type)
+  end
+
+  defp random_factors(type, shape), do: Gen.random(shape, type)
+
+  # A product row compares a result with the reference, so it means nothing when the
+  # reference is within reach of the tolerance: a wrong answer of 0 would pass. The
+  # largest expected magnitude must be at least 100 times the absolute tolerance.
+  # Integers compare exactly and need no margin.
+  defp assert_product(fun, args, opts \\ []) do
+    expected = apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), args)
+
+    unless Nx.Type.integer?(expected.type) do
+      tol = Keyword.get(opts, :atol, NxCL.TestSupport.Compare.default_tolerance(expected.type))
+      largest = expected |> Nx.abs() |> Nx.reduce_max() |> Nx.to_number()
+
+      assert largest >= 100 * tol,
+             "the expected product is at most #{largest}, under 100 times the tolerance #{tol}: " <>
+               "the row cannot tell a wrong result from a right one"
+    end
+
+    assert_same(fun, args, opts)
+  end
+
   # Values with ties and, for floats, the special values, as one line of `n`.
   defp with_edges(type, n) do
     edges = Gen.edge_values(type)
@@ -137,15 +178,16 @@ defmodule NxCL.ReductionTest do
         type = unquote(Macro.escape(type))
 
         for shape <- shapes(type), axes <- axes_for(shape), keep <- [false, true] do
-          assert_same(&Nx.product(&1, axes: axes, keep_axes: keep), [
-            units(type, shape)
-          ])
+          assert_product(&Nx.product(&1, axes: axes, keep_axes: keep), [units(type, shape)])
         end
 
+        # Random values. Only the half types need a loose tolerance: they round at every
+        # multiply. The other types use the harness default.
         for shape <- [{3, 5}, {2, 3, 4}], axes <- [nil, [1]] do
-          assert_same(&Nx.product(&1, axes: axes), [Gen.random(shape, type)],
-            atol: 1.0e-2,
-            rtol: 1.0e-2
+          assert_product(
+            &Nx.product(&1, axes: axes),
+            [random_factors(type, shape)],
+            if(low?(type), do: [atol: 1.0e-2, rtol: 1.0e-2], else: [])
           )
         end
       end
