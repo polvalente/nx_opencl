@@ -83,10 +83,9 @@ defmodule NxCL.Compiler.Executor do
     leaves = Composite.flatten_list([program.output_template])
 
     binaries =
-      NxCL.Native.buffer_read_many(
-        ctx,
-        Enum.zip_with(outputs, leaves, &{&1, Nx.byte_size(&2)})
-      )
+      ctx
+      |> NxCL.Native.buffer_read_many(Enum.zip_with(outputs, leaves, &{&1, Nx.byte_size(&2)}))
+      |> NxCL.Native.ok!("could not read the outputs")
 
     tensors =
       binaries
@@ -260,7 +259,11 @@ defmodule NxCL.Compiler.Executor do
   # Runs a predicate scope and reads its scalar back. Nx tests `!= 0`.
   defp truthy?(%{out_types: [{kind, bits} = type]} = scope, carry, env) do
     [buf] = run_sub(scope, carry, env)
-    bytes = NxCL.Native.buffer_read(buf, div(bits, 8))
+
+    bytes =
+      buf
+      |> NxCL.Native.buffer_read(div(bits, 8))
+      |> NxCL.Native.ok!("could not read a predicate")
 
     if kind in [:s, :u] do
       bytes != :binary.copy(<<0>>, byte_size(bytes))
@@ -319,5 +322,9 @@ defmodule NxCL.Compiler.Executor do
     end
   end
 
-  defp upload(ctx, tensor), do: NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
+  defp upload(ctx, tensor),
+    do:
+      ctx
+      |> NxCL.Native.buffer_write(Nx.to_binary(tensor))
+      |> NxCL.Native.ok!("could not upload an argument")
 end

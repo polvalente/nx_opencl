@@ -1,4 +1,4 @@
-use crate::device_ctx::DeviceCtx;
+use crate::device_ctx::{lock, DeviceCtx};
 use opencl3::kernel::Kernel;
 use opencl3::program::Program;
 use std::sync::{Arc, Mutex};
@@ -11,10 +11,16 @@ pub struct CompiledKernel {
     /// Held from `set_arg` to enqueue: two queues share this kernel object, and
     /// its arguments are one set per object.
     pub launch: Mutex<()>,
-    pub _program: Program,
+    /// Keeps the built program alive as long as the kernel object.
+    _program: Program,
 }
 
-unsafe impl Send for CompiledKernel {}
+// SAFETY: `Kernel` holds a raw OpenCL handle, so the compiler will not mark it
+// `Sync`. OpenCL (1.1 and later) makes every API call thread safe except
+// `clSetKernelArg` on one kernel object, which races with another thread's
+// `clSetKernelArg` or enqueue of that object. Every such use takes `launch` from
+// the first `set_arg` to the enqueue (see `Program::eval`), so only one thread
+// touches a kernel's arguments at a time.
 unsafe impl Sync for CompiledKernel {}
 
 impl CompiledKernel {
@@ -50,10 +56,10 @@ pub fn cached(
         entry_point.to_string(),
         build_opts.to_string(),
     );
-    let mut cache = ctx
-        .kernels
-        .lock()
-        .map_err(|e| format!("Lock error: {:?}", e))?;
+    // The lock is held through a build, so two threads that want the same new
+    // kernel build it once. A build of a different kernel waits; compiles are
+    // rare next to launches.
+    let mut cache = lock(&ctx.kernels);
 
     if let Some(kernel) = cache.get(&key) {
         return Ok(kernel.clone());

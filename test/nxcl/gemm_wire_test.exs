@@ -39,10 +39,15 @@ defmodule NxCL.GemmWireTest do
   up = fn t -> Native.buffer_write(ctx, Nx.to_binary(t)) end
   a = Nx.iota({1, 37, 29}, type: :f32) |> Nx.divide(7)
   b = Nx.iota({1, 29, 41}, type: :f32) |> Nx.divide(5)
-  {:ok, p} = Native.compile_program(ctx, wire)
-  {:ok, [out]} = Native.eval_program(p, [up.(a), up.(b)])
-  bin = Native.buffer_read(out, 37 * 41 * 4)
-  IO.puts("RESULT " <> Base.encode64(bin))
+  case Native.compile_program(ctx, wire) do
+    {:ok, p} ->
+      {:ok, [out]} = Native.eval_program(p, [up.(a), up.(b)])
+      bin = Native.buffer_read(out, 37 * 41 * 4)
+      IO.puts("RESULT " <> Base.encode64(bin))
+
+    {:error, reason} ->
+      IO.puts("ERROR " <> Base.encode64(reason))
+  end
   """
 
   defp child_result(tile) do
@@ -57,8 +62,15 @@ defmodule NxCL.GemmWireTest do
     ]
 
     {out, 0} = System.cmd("mix", args, env: env, stderr_to_stdout: true)
-    [_, b64] = Regex.run(~r/RESULT (\S+)/, out)
-    b64 |> Base.decode64!() |> Nx.from_binary(:f32)
+
+    case Regex.run(~r/RESULT (\S+)/, out) do
+      [_, b64] ->
+        b64 |> Base.decode64!() |> Nx.from_binary(:f32)
+
+      nil ->
+        [_, b64] = Regex.run(~r/ERROR (\S+)/, out)
+        {:error, Base.decode64!(b64)}
+    end
   end
 
   describe "large products with stated answers" do
@@ -166,12 +178,11 @@ defmodule NxCL.GemmWireTest do
       end
     end
 
-    test "an override that is not valid is ignored" do
-      a = Nx.iota({1, 37, 29}, type: :f32) |> Nx.divide(7)
-      b = Nx.iota({1, 29, 41}, type: :f32) |> Nx.divide(5)
-      ctx = Native.device_ctx_create(0)
-      default = run_gemm(ctx, gemm_wire(1, 37, 41, 29), a, b) |> Nx.reshape({:auto})
-      assert_all_close(child_result("3,3,3,2,2"), default)
+    test "an override that is not valid is an error" do
+      assert {:error, message} = child_result("3,3,3,2,2")
+      assert message =~ "NXCL_GEMM_TILE"
+      assert {:error, message} = child_result("not a tile")
+      assert message =~ "NXCL_GEMM_TILE"
     end
   end
 

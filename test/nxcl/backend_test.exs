@@ -252,7 +252,7 @@ defmodule NxCL.BackendTest do
       t = Nx.tensor([1.0, 2.0]) |> Nx.backend_transfer(NxCL.Backend)
       assert :ok = Nx.backend_deallocate(t)
       assert :already_deallocated = Nx.backend_deallocate(t)
-      assert_raise ErlangError, fn -> Nx.to_binary(t) end
+      assert_raise ArgumentError, ~r/buffer was deallocated/, fn -> Nx.to_binary(t) end
     end
 
     test "a reshape shares memory; freeing the source keeps the result" do
@@ -263,7 +263,7 @@ defmodule NxCL.BackendTest do
       assert Nx.to_flat_list(r) == [1.0, 2.0, 3.0, 4.0]
 
       assert :ok = Nx.backend_deallocate(r)
-      assert_raise ErlangError, fn -> Nx.to_binary(r) end
+      assert_raise ArgumentError, ~r/buffer was deallocated/, fn -> Nx.to_binary(r) end
     end
 
     test "to_binary honours a limit" do

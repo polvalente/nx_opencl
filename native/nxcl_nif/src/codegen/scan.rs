@@ -15,14 +15,11 @@
 //! No atomics. A float scan adds in a different order from a left fold, so
 //! results differ from it in the last bits.
 
-use super::elementwise::math_of;
 use super::index;
 use super::movement::{ints, pragmas, Kernel};
-use super::reduce::{
-    bf16_helpers, combiner, load_as, math_bytes, store_as, Canon, CombKind, Combiner,
-};
-use super::types::{type_info, TypeInfo};
-use super::{Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::reduce::{combiner, Canon, CombKind, Combiner};
+use super::types::{bf16_helpers, load_as, math_bytes, math_of, store_as, type_info, TypeInfo};
+use super::{checked_product, entry_name, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
 
 const OPS: [&str; 4] = [
     "cumulative_sum",
@@ -36,7 +33,7 @@ pub fn handles(op: &str) -> bool {
 }
 
 /// Blocks per line for an axis of `n` elements and groups of `wg` items.
-pub fn blocks(n: usize, wg: usize) -> usize {
+fn blocks(n: usize, wg: usize) -> usize {
     n.div_ceil(wg).max(1)
 }
 
@@ -55,12 +52,14 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn entry(&self, pass: &str) -> String {
-        format!(
-            "sc_{}_{}_{}_{}",
-            self.comb.tag,
-            self.in_info.dtype.name(),
-            self.out_info.dtype.name(),
-            pass
+        entry_name(
+            "sc",
+            &[
+                &self.comb.tag,
+                &self.in_info.dtype.name(),
+                &self.out_info.dtype.name(),
+                pass,
+            ],
         )
     }
 
@@ -68,21 +67,22 @@ impl Ctx<'_> {
         self.comb.identity.as_deref().unwrap_or("0")
     }
 
-    fn spec(&self, pass: &str, k: Kernel, body: String, global: usize) -> KernelSpec {
-        let entry = self.entry(pass);
-        let source = format!(
-            "{head}__kernel void {entry}({params}) {{\n{body}}}\n",
-            head = self.head,
-            params = k.params.join(", ")
-        );
-        KernelSpec {
-            source,
-            entry,
-            build_options: String::new(),
-            global: vec![global],
-            local: vec![self.wg],
-            args: k.args,
-        }
+    /// A pass of `lines * blocks_per_line` groups of `wg` items.
+    fn spec(
+        &self,
+        pass: &str,
+        k: Kernel,
+        body: String,
+        groups: usize,
+    ) -> Result<KernelSpec, String> {
+        let global = checked_product("the scan launch size", &[groups, self.wg])?;
+        Ok(k.into_spec(
+            &self.head,
+            self.entry(pass),
+            &body,
+            vec![global],
+            vec![self.wg],
+        ))
     }
 
     /// Declares `N`, `inner`, `B` and `rev` as scalar arguments.
@@ -156,12 +156,12 @@ fn pass_block(ctx: &Ctx, b: usize, rev: bool, totals: bool) -> Result<KernelSpec
         scan = blelloch(wg, ctx.id()).replace("ACC", t),
         store = store_as(&ctx.out_info, "r"),
     );
-    Ok(ctx.spec(
+    ctx.spec(
         if totals { "p1t" } else { "p1" },
         k,
         body,
-        ctx.lines * b * wg,
-    ))
+        checked_product("the scan block count", &[ctx.lines, b])?,
+    )
 }
 
 fn pass_totals(ctx: &Ctx, b: usize) -> Result<KernelSpec, String> {
@@ -190,7 +190,7 @@ fn pass_totals(ctx: &Ctx, b: usize) -> Result<KernelSpec, String> {
         id = ctx.id(),
         scan = blelloch(wg, ctx.id()).replace("ACC", t),
     );
-    Ok(ctx.spec("p2", k, body, ctx.lines * wg))
+    ctx.spec("p2", k, body, ctx.lines)
 }
 
 fn pass_add(ctx: &Ctx, b: usize, rev: bool) -> Result<KernelSpec, String> {
@@ -215,7 +215,12 @@ fn pass_add(ctx: &Ctx, b: usize, rev: bool) -> Result<KernelSpec, String> {
 ",
         store = store_as(&ctx.out_info, "r"),
     );
-    Ok(ctx.spec("p3", k, body, ctx.lines * b * wg))
+    ctx.spec(
+        "p3",
+        k,
+        body,
+        checked_product("the scan block count", &[ctx.lines, b])?,
+    )
 }
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
@@ -244,15 +249,17 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         ));
     }
     let n = input.shape[axis];
-    let inner: usize = input.shape[axis + 1..].iter().product();
-    let outer: usize = input.shape[..axis].iter().product();
+    let inner = checked_product("the scan inner size", &input.shape[axis + 1..])?;
+    let outer = checked_product("the scan outer size", &input.shape[..axis])?;
+    let lines = checked_product("the scan line count", &[outer, inner])?;
     let acc_dtype = math_of(instr.out)?.dtype;
-    let canon = Canon::from_op(&instr.op).expect("scan op");
+    let canon =
+        Canon::from_op(&instr.op).ok_or_else(|| format!("{}: not a cumulative op", instr.op))?;
     let comb = combiner(&CombKind::Canon(canon), acc_dtype)?;
     let acc = comb.acc;
     let in_info = type_info(input.dtype)?;
     let out_info = type_info(instr.out)?;
-    let pragma_text = pragmas(instr, caps)?;
+    let pragma_text = pragmas(&instr.dtypes(), caps)?;
     // The scan array, the total and the carry.
     let wg = limits.group_size(math_bytes(&acc) + 1);
     let head = format!(
@@ -270,7 +277,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         wg,
         n,
         inner: inner.max(1),
-        lines: outer * inner,
+        lines,
     };
     let b = blocks(n, wg);
     if b == 1 {
@@ -282,12 +289,16 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
             pass_totals(&ctx, b)?,
             pass_add(&ctx, b, rev)?,
         ],
-        scratch: vec![ctx.lines * b * math_bytes(&acc)],
+        scratch: vec![checked_product(
+            "the scan totals buffer",
+            &[ctx.lines, b, math_bytes(&acc)],
+        )?],
     })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::plan;
     use super::super::types::Kind;
     use super::super::{Attr, DType, Operand};
     use super::*;
@@ -308,10 +319,6 @@ mod tests {
             out_shape: shape.to_vec(),
             attrs: vec![Attr::Int(axis), Attr::Int(reverse)],
         }
-    }
-
-    fn plan(i: &Instr) -> Plan {
-        generate(i, &Caps::all(), &Limits::apple()).unwrap()
     }
 
     #[test]
@@ -362,10 +369,7 @@ mod tests {
 
     #[test]
     fn the_group_size_obeys_the_device_limits() {
-        let small = Limits {
-            max_wg: 32,
-            local_mem: 512,
-        };
+        let small = Limits::new(32, 512);
         let p = generate(
             &instr("cumulative_sum", F32, &[600], 0, 0),
             &Caps::all(),
@@ -386,5 +390,35 @@ mod tests {
         assert!(generate(&instr("cumulative_sum", C64, &[8], 0, 0), &caps, &lim).is_ok());
         let err = generate(&instr("cumulative_sum", F32, &[8], 1, 0), &caps, &lim).unwrap_err();
         assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_tensor_has_a_positive_global_size() {
+        // The executor never launches this, and the spec stays well formed.
+        for shape in [[0usize].as_slice(), &[3, 0], &[0, 300]] {
+            let p = plan(&instr(
+                "cumulative_sum",
+                F32,
+                shape,
+                shape.len() as i64 - 1,
+                0,
+            ));
+            assert!(
+                p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)),
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sizes_that_overflow_are_errors() {
+        let big = 1usize << 40;
+        let err = generate(
+            &instr("cumulative_sum", F32, &[big, big, 2], 2, 0),
+            &Caps::all(),
+            &Limits::apple(),
+        )
+        .unwrap_err();
+        assert!(err.contains("is too large"), "{err}");
     }
 }

@@ -5,8 +5,9 @@ fn main() {
     // Cross-compilation linker is set by NxCL.Native via Rustler's :env
     // option, using Nerves' CC environment variable.
     //
-    // OPENCL_LIB_PATH is only needed if you want to statically link
-    // against a specific OpenCL library (unusual).
+    // OPENCL_LIB_PATH adds a link search path for libOpenCL. Nothing here links
+    // against it; it matters only if a dependency is built to link at build
+    // time (unusual).
     if let Ok(opencl_lib) = std::env::var("OPENCL_LIB_PATH") {
         println!("cargo:rustc-link-search=native={}", opencl_lib);
     }

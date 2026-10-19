@@ -425,39 +425,24 @@ pub fn preamble(info: &TypeInfo, names: &[&str]) -> String {
     out
 }
 
-// ── Fragments for later stages ──────────────────────────
+// ── Fragments the reduction and fft kernels use ─────────
 
-/// A complex literal of the type's width: `(float2)(re, im)`.
-#[allow(dead_code)]
-pub fn literal(info: &TypeInfo, re: f64, im: f64) -> String {
+/// A complex literal of the type's width, `(float2)(re, im)`, from whole
+/// numbers: they print exactly, and no NaN or infinity can reach the source.
+fn literal(info: &TypeInfo, re: i32, im: i32) -> String {
     let s = if info.component == "double" { "" } else { "f" };
-    format!("({})({:?}{s}, {:?}{s})", info.math, re, im, s = s)
+    format!("({})({}.0{s}, {}.0{s})", info.math, re, im, s = s)
 }
 
-#[allow(dead_code)]
 pub fn zero(info: &TypeInfo) -> String {
-    literal(info, 0.0, 0.0)
+    literal(info, 0, 0)
 }
 
-#[allow(dead_code)]
 pub fn one(info: &TypeInfo) -> String {
-    literal(info, 1.0, 0.0)
-}
-
-/// The real and imaginary part of element `idx` of buffer `buf`.
-#[allow(dead_code)]
-pub fn load_parts(buf: &str, idx: &str) -> (String, String) {
-    (format!("{buf}[{idx}].x"), format!("{buf}[{idx}].y"))
-}
-
-/// A statement that stores the complex value `value` at element `idx`.
-#[allow(dead_code)]
-pub fn store(buf: &str, idx: &str, value: &str) -> String {
-    format!("{buf}[{idx}] = {value};")
+    literal(info, 1, 0)
 }
 
 /// The helpers `accumulate` calls for `op` (`"sum"` or `"product"`).
-#[allow(dead_code)]
 pub fn accumulate_needs(op: &str) -> Result<&'static [&'static str], String> {
     match op {
         "sum" => Ok(&["add"]),
@@ -467,7 +452,6 @@ pub fn accumulate_needs(op: &str) -> Result<&'static [&'static str], String> {
 }
 
 /// The expression that folds `val` into `acc` for a complex sum or product.
-#[allow(dead_code)]
 pub fn accumulate(info: &TypeInfo, op: &str, acc: &str, val: &str) -> Result<String, String> {
     let name = match op {
         "sum" => "add",
@@ -538,17 +522,19 @@ mod tests {
     }
 
     #[test]
-    fn literals_and_fragments_follow_the_width() {
+    fn zero_and_one_follow_the_width() {
         let c64 = type_info(DType::new(Kind::C, 64)).unwrap();
         let c128 = type_info(DType::new(Kind::C, 128)).unwrap();
-        assert_eq!(literal(&c64, 1.5, -2.0), "(float2)(1.5f, -2.0f)");
+        assert_eq!(zero(&c64), "(float2)(0.0f, 0.0f)");
         assert_eq!(zero(&c128), "(double2)(0.0, 0.0)");
         assert_eq!(one(&c128), "(double2)(1.0, 0.0)");
-        assert_eq!(
-            load_parts("a", "i"),
-            ("a[i].x".to_string(), "a[i].y".to_string())
-        );
-        assert_eq!(store("o", "i", "v"), "o[i] = v;");
+        assert_eq!(literal(&c64, -2, 3), "(float2)(-2.0f, 3.0f)");
+    }
+
+    #[test]
+    fn accumulate_folds_with_the_helper_of_its_width() {
+        let c64 = type_info(DType::new(Kind::C, 64)).unwrap();
+        let c128 = type_info(DType::new(Kind::C, 128)).unwrap();
         assert_eq!(accumulate(&c64, "sum", "s", "v").unwrap(), "cf_add(s, v)");
         assert_eq!(
             accumulate(&c128, "product", "s", "v").unwrap(),
@@ -556,5 +542,7 @@ mod tests {
         );
         assert!(accumulate(&c64, "max", "s", "v").is_err());
         assert_eq!(accumulate_needs("sum").unwrap(), &["add"]);
+        assert_eq!(accumulate_needs("product").unwrap(), &["mul"]);
+        assert!(accumulate_needs("max").is_err());
     }
 }

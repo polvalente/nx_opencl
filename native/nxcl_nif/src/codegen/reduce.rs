@@ -30,11 +30,16 @@
 //! the extent in order, one work item per output, as `Nx` does.
 
 use super::complex;
-use super::elementwise::{math_of, scalar_binary, ScalarCode, BF16_HELPERS};
+use super::elementwise::{scalar_binary, ScalarCode};
 use super::index::{self, strides};
 use super::movement::{ints, pragmas, Kernel};
-use super::types::{type_info, DType, Half, TypeInfo};
-use super::{element_count, Attr, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::types::{
+    bf16_helpers, load_as, math_bytes, math_of, store_as, type_info, DType, TypeInfo,
+};
+use super::{
+    checked_product, element_count, entry_name, Attr, Caps, Instr, KernelArg, KernelSpec, Limits,
+    Plan,
+};
 
 const OPS: [&str; 9] = [
     "sum",
@@ -53,7 +58,7 @@ pub fn handles(op: &str) -> bool {
 }
 
 /// Extents up to this size run on one work item per output.
-pub const SMALL_EXTENT: usize = 64;
+const SMALL_EXTENT: usize = 64;
 /// Outputs at or above this count fill the device without slicing the extent.
 const FILL_GROUPS: usize = 64;
 /// Elements one work item reads before the tree when the extent is sliced.
@@ -62,14 +67,14 @@ const PER_ITEM: usize = 16;
 const MAX_SLICES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Strategy {
+enum Strategy {
     Thread,
     Group,
     Sliced(usize),
 }
 
 /// The strategy for `n_out` outputs of extent `extent`, with groups of `wg` items.
-pub fn strategy(extent: usize, n_out: usize, wg: usize) -> Strategy {
+fn strategy(extent: usize, n_out: usize, wg: usize) -> Strategy {
     if extent <= SMALL_EXTENT {
         Strategy::Thread
     } else if n_out >= FILL_GROUPS {
@@ -90,7 +95,7 @@ pub fn strategy(extent: usize, n_out: usize, wg: usize) -> Strategy {
 /// are the two accumulator parameters; step `k` defines variable `2 + k`. The
 /// last step is the result.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Step {
+pub(super) struct Step {
     pub op: String,
     pub a: usize,
     pub b: usize,
@@ -98,11 +103,21 @@ pub struct Step {
 
 /// Reads `[n, (op, a, b) * n]` from the front of `attrs`. Returns the steps
 /// and the number of attrs used.
-pub fn parse_steps(attrs: &[Attr]) -> Result<(Vec<Step>, usize), String> {
+pub(super) fn parse_steps(attrs: &[Attr]) -> Result<(Vec<Step>, usize), String> {
     let n = match attrs.first() {
-        Some(Attr::Int(n)) if *n > 0 => *n as usize,
+        Some(Attr::Int(n)) if *n > 0 => usize::try_from(*n).unwrap_or(usize::MAX),
         _ => return Err("reduce: the step count must be a positive integer".to_string()),
     };
+    // Each step takes three attrs. Check before allocating: the count comes
+    // from the wire and a huge one would ask for a huge vector.
+    if n > (attrs.len() - 1) / 3 {
+        return Err(format!(
+            "reduce: {} steps need {} attrs, got {}",
+            n,
+            n.saturating_mul(3).saturating_add(1),
+            attrs.len()
+        ));
+    }
     let mut steps = Vec::with_capacity(n);
     for k in 0..n {
         let at = 1 + 3 * k;
@@ -126,7 +141,7 @@ pub fn parse_steps(attrs: &[Attr]) -> Result<(Vec<Step>, usize), String> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Canon {
+pub(super) enum Canon {
     Sum,
     Product,
     Max,
@@ -165,7 +180,7 @@ impl Canon {
 
 /// A body of one `add`, `multiply`, `max` or `min` over the two parameters is
 /// the canonical combiner; any other body is generic.
-pub fn canon_of_steps(steps: &[Step]) -> Option<Canon> {
+fn canon_of_steps(steps: &[Step]) -> Option<Canon> {
     match steps {
         [s] if (s.a, s.b) == (0, 1) || (s.a, s.b) == (1, 0) => match s.op.as_str() {
             "add" => Some(Canon::Sum),
@@ -178,7 +193,7 @@ pub fn canon_of_steps(steps: &[Step]) -> Option<Canon> {
     }
 }
 
-pub enum CombKind {
+pub(super) enum CombKind {
     Canon(Canon),
     All,
     Any,
@@ -188,7 +203,7 @@ pub enum CombKind {
 /// `comb(new, acc)` as a C function, and the identity element when the
 /// combiner has one. Without an identity the kernels track whether a slot
 /// holds a value.
-pub struct Combiner {
+pub(super) struct Combiner {
     /// The accumulator type: a math type.
     pub acc: TypeInfo,
     pub code: ScalarCode,
@@ -213,7 +228,7 @@ fn one_of(info: &TypeInfo) -> String {
 }
 
 /// Smallest value of the accumulator type (the identity of `max`).
-pub fn lowest(info: &TypeInfo) -> String {
+fn lowest(info: &TypeInfo) -> String {
     if info.is_float() {
         "(-INFINITY)".to_string()
     } else {
@@ -222,7 +237,7 @@ pub fn lowest(info: &TypeInfo) -> String {
 }
 
 /// Largest value of the accumulator type (the identity of `min`).
-pub fn highest(info: &TypeInfo) -> String {
+fn highest(info: &TypeInfo) -> String {
     if info.is_float() {
         "INFINITY".to_string()
     } else {
@@ -231,7 +246,7 @@ pub fn highest(info: &TypeInfo) -> String {
 }
 
 /// The identity element of canonical op `canon` over `info`.
-pub fn identity_of(canon: Canon, info: &TypeInfo) -> Result<String, String> {
+fn identity_of(canon: Canon, info: &TypeInfo) -> Result<String, String> {
     if info.is_complex() && matches!(canon, Canon::Max | Canon::Min) {
         return Err("max and min do not accept complex values".to_string());
     }
@@ -244,13 +259,13 @@ pub fn identity_of(canon: Canon, info: &TypeInfo) -> Result<String, String> {
 }
 
 /// Builds the combiner for `kind` over the accumulator type `acc_dtype`.
-pub fn combiner(kind: &CombKind, acc_dtype: DType) -> Result<Combiner, String> {
+pub(super) fn combiner(kind: &CombKind, acc_dtype: DType) -> Result<Combiner, String> {
     let acc = type_info(acc_dtype)?;
     match kind {
         CombKind::Canon(canon) => {
             let identity = identity_of(*canon, &acc)?;
             let code = if acc.is_complex() {
-                // Complex sum and product use the helper stage 05 wrote.
+                // Complex sum and product fold with `complex::accumulate`.
                 let name = if *canon == Canon::Sum {
                     "sum"
                 } else {
@@ -337,60 +352,10 @@ pub fn combiner(kind: &CombKind, acc_dtype: DType) -> Result<Combiner, String> {
 
 // ── Loads and stores ────────────────────────────────────
 
-/// The value of buffer element `raw` (type `from`) as a C expression of the
-/// math type `to`.
-pub fn load_as(from: &TypeInfo, raw: &str, to: &TypeInfo) -> Result<String, String> {
-    let value = match from.half {
-        Some(Half::Bf16) => format!("bf16_to_f32({})", raw),
-        None if from.storage == "half" => format!("(float)({})", raw),
-        None => raw.to_string(),
-    };
-    let own = math_of(from.dtype)?;
-    if own.math == to.math {
-        Ok(value)
-    } else if own.is_complex() || to.is_complex() || (own.is_float() && !to.is_float()) {
-        Err(format!(
-            "cannot read a {} value as {}",
-            from.dtype, to.dtype
-        ))
-    } else {
-        Ok(format!("(({})({}))", to.math, value))
-    }
-}
-
-/// The expression `expr` (math type of `out`) as a buffer element of `out`.
-pub fn store_as(out: &TypeInfo, expr: &str) -> String {
-    match out.half {
-        Some(Half::Bf16) => format!("f32_to_bf16((float)({}))", expr),
-        None if out.storage == "half" => format!("(half)({})", expr),
-        None => format!("({})({})", out.storage, expr),
-    }
-}
-
-/// `BF16_HELPERS` when any type needs them.
-pub fn bf16_helpers(types: &[&TypeInfo]) -> &'static str {
-    if types.iter().any(|t| t.half == Some(Half::Bf16)) {
-        BF16_HELPERS
-    } else {
-        ""
-    }
-}
-
-/// Size of one C value of `info.math`, for local and scratch sizes.
-pub fn math_bytes(info: &TypeInfo) -> usize {
-    match info.math {
-        "char" | "uchar" => 1,
-        "short" | "ushort" => 2,
-        "int" | "uint" | "float" => 4,
-        "long" | "ulong" | "double" | "float2" => 8,
-        _ => 16,
-    }
-}
-
 // ── Geometry ────────────────────────────────────────────
 
 /// The kept and reduced axes of an input, with their sizes and input strides.
-pub struct Geometry {
+struct Geometry {
     pub kept: Vec<(usize, i64)>,
     pub reduced: Vec<(usize, i64)>,
     pub extent: usize,
@@ -418,8 +383,14 @@ impl Geometry {
                 kept.push((input[d], st[d]));
             }
         }
-        let extent: usize = reduced.iter().map(|r| r.0).product();
-        let n_out: usize = kept.iter().map(|k| k.0).product();
+        let extent = checked_product(
+            &format!("{}: the reduced extent", op),
+            &reduced.iter().map(|r| r.0).collect::<Vec<_>>(),
+        )?;
+        let n_out = checked_product(
+            &format!("{}: the output count", op),
+            &kept.iter().map(|k| k.0).collect::<Vec<_>>(),
+        )?;
         if element_count(out) != n_out {
             return Err(format!(
                 "{}: the output has {} elements, the kept axes {}",
@@ -513,7 +484,9 @@ fn decode(instr: &Instr) -> Result<Decoded, String> {
     };
     match op {
         "sum" | "product" | "reduce_max" | "reduce_min" => Ok(Decoded {
-            kind: canon(Canon::from_op(op).expect("canonical op")),
+            kind: canon(
+                Canon::from_op(op).ok_or_else(|| format!("{}: not a canonical reduction", op))?,
+            ),
             axes: ints(&instr.attrs, "reduction axes")?,
             tag: op.to_string(),
         }),
@@ -588,13 +561,15 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn entry(&self, pass: &str) -> String {
-        format!(
-            "rd_{}_{}_{}_{}_{}",
-            self.tag,
-            self.in_info.dtype.name(),
-            self.out_info.dtype.name(),
-            self.geo.shape_tag(),
-            pass
+        entry_name(
+            "rd",
+            &[
+                &self.tag,
+                &self.in_info.dtype.name(),
+                &self.out_info.dtype.name(),
+                &self.geo.shape_tag(),
+                pass,
+            ],
         )
     }
 
@@ -623,20 +598,7 @@ impl Ctx<'_> {
         global: usize,
         local: Vec<usize>,
     ) -> KernelSpec {
-        let entry = self.entry(pass);
-        let source = format!(
-            "{head}__kernel void {entry}({params}) {{\n{body}}}\n",
-            head = self.head,
-            params = k.params.join(", ")
-        );
-        KernelSpec {
-            source,
-            entry,
-            build_options: String::new(),
-            global: vec![global],
-            local,
-            args: k.args,
-        }
+        k.into_spec(&self.head, self.entry(pass), &body, vec![global], local)
     }
 }
 
@@ -757,7 +719,9 @@ fn fold_input_pass(
                 tree = tree(comb, wg),
                 s = store("sh[0]")
             );
-            Ok(ctx.spec("g", k, body, ctx.geo.n_out * slices * wg, vec![wg]))
+            let global =
+                checked_product("the reduction launch size", &[ctx.geo.n_out, slices, wg])?;
+            Ok(ctx.spec("g", k, body, global, vec![wg]))
         }
     }
 }
@@ -783,7 +747,8 @@ fn fold_partials_pass(ctx: &Ctx, comb: &Combiner, slices: usize) -> Result<Kerne
         tree = tree(comb, wg),
         s = store_as(&ctx.out_info, "sh[0]")
     );
-    Ok(ctx.spec("p2", k, body, ctx.geo.n_out * wg, vec![wg]))
+    let global = checked_product("the reduction launch size", &[ctx.geo.n_out, wg])?;
+    Ok(ctx.spec("p2", k, body, global, vec![wg]))
 }
 
 // ── Argmax and argmin ───────────────────────────────────
@@ -855,7 +820,9 @@ fn arg_input_pass(ctx: &Ctx, mode: Mode) -> Result<KernelSpec, String> {
                 "  long lid = (long)get_local_id(0);\n  long grp = (long)get_group_id(0);\n  long o = grp / G;\n  long g = grp % G;\n{base}  {t} bv;\n  long bi = -1;\n  for (long j = g * {wg} + lid; j < R; j += G * {wg}) {{\n{fold}  }}\n{tree}{write}",
                 tree = arg_tree(ctx)
             );
-            Ok(ctx.spec("g", k, body, ctx.geo.n_out * slices * wg, vec![wg]))
+            let global =
+                checked_product("the reduction launch size", &[ctx.geo.n_out, slices, wg])?;
+            Ok(ctx.spec("g", k, body, global, vec![wg]))
         }
     }
 }
@@ -875,7 +842,8 @@ fn arg_partials_pass(ctx: &Ctx, slices: usize) -> Result<KernelSpec, String> {
         tree = arg_tree(ctx),
         s = store_as(&ctx.out_info, "shi[0]")
     );
-    Ok(ctx.spec("p2", k, body, ctx.geo.n_out * wg, vec![wg]))
+    let global = checked_product("the reduction launch size", &[ctx.geo.n_out, wg])?;
+    Ok(ctx.spec("p2", k, body, global, vec![wg]))
 }
 
 // ── Generation ──────────────────────────────────────────
@@ -896,7 +864,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     let geo = Geometry::new(&instr.op, &input.shape, &instr.out_shape, &decoded.axes)?;
     let in_info = type_info(input.dtype)?;
     let out_info = type_info(instr.out)?;
-    let pragma_text = pragmas(instr, caps)?;
+    let pragma_text = pragmas(&instr.dtypes(), caps)?;
 
     let acc = match &decoded.kind {
         Kind::Fold { .. } => math_of(instr.out)?,
@@ -975,9 +943,12 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
                 Some(c) => fold_partials_pass(&ctx, c, g)?,
                 None => arg_partials_pass(&ctx, g)?,
             };
-            let mut scratch = vec![n_out * g * math_bytes(&ctx.acc)];
+            let mut scratch = vec![checked_product(
+                "the partials buffer",
+                &[n_out, g, math_bytes(&ctx.acc)],
+            )?];
             if is_arg {
-                scratch.push(n_out * g * 8);
+                scratch.push(checked_product("the index buffer", &[n_out, g, 8])?);
             }
             Ok(Plan {
                 passes: vec![first(Mode::Group { slices: g })?, second],
@@ -1006,15 +977,15 @@ fn empty_extent(ctx: &Ctx, comb: Option<&Combiner>) -> Result<Plan, String> {
         "empty",
         k,
         body,
-        ctx.geo.n_out.max(1),
+        ctx.geo.n_out,
         Vec::new(),
     )))
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{buf, ints, plan};
     use super::super::types::Kind as K;
-    use super::super::Operand;
     use super::*;
 
     const S32: DType = DType::new(K::S, 32);
@@ -1025,18 +996,6 @@ mod tests {
     const F64: DType = DType::new(K::F, 64);
     const BF16: DType = DType::new(K::Bf, 16);
     const C64: DType = DType::new(K::C, 64);
-
-    fn buf(dtype: DType, shape: &[usize]) -> Operand {
-        Operand {
-            dtype,
-            shape: shape.to_vec(),
-            constant: None,
-        }
-    }
-
-    fn ints(v: &[i64]) -> Vec<Attr> {
-        v.iter().map(|&i| Attr::Int(i)).collect()
-    }
 
     fn instr(
         op: &str,
@@ -1053,10 +1012,6 @@ mod tests {
             out_shape: out_shape.to_vec(),
             attrs,
         }
-    }
-
-    fn plan(i: &Instr) -> Plan {
-        generate(i, &Caps::all(), &Limits::apple()).unwrap()
     }
 
     fn sources(p: &Plan) -> Vec<&str> {
@@ -1212,10 +1167,7 @@ mod tests {
     #[test]
     fn group_size_obeys_the_device_limits() {
         // A device with 64 threads and 1 KiB of local memory.
-        let small = Limits {
-            max_wg: 64,
-            local_mem: 1024,
-        };
+        let small = Limits::new(64, 1024);
         let i = instr("sum", F64, &[2, 100_000], F64, &[2], ints(&[1]));
         let p = generate(&i, &Caps::all(), &small).unwrap();
         for s in &p.passes {
@@ -1236,5 +1188,36 @@ mod tests {
             &Limits::apple(),
         );
         assert!(err.unwrap_err().contains("empty axis"));
+    }
+
+    #[test]
+    fn a_step_count_beyond_the_attrs_is_an_error_not_an_allocation() {
+        let mut attrs = vec![Attr::Int(i64::MAX)];
+        attrs.extend([Attr::Atom("add".to_string()), Attr::Int(0), Attr::Int(1)]);
+        let err = parse_steps(&attrs).unwrap_err();
+        assert!(err.contains("steps need"), "{err}");
+        // One step is declared and none follows.
+        let err = parse_steps(&ints(&[1])).unwrap_err();
+        assert!(err.contains("steps need"), "{err}");
+        assert!(parse_steps(&ints(&[0])).is_err());
+        assert!(parse_steps(&ints(&[-3])).is_err());
+    }
+
+    #[test]
+    fn an_extent_that_overflows_is_an_error() {
+        let big = 1usize << 40;
+        let i = instr("sum", F32, &[big, big], F32, &[], ints(&[0, 1]));
+        let err = generate(&i, &Caps::all(), &Limits::apple()).unwrap_err();
+        assert!(err.contains("the reduced extent is too large"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_output_still_has_a_positive_global_size() {
+        // Three empty lines of 5: the executor never launches this, and the
+        // spec stays well formed.
+        let p = plan(&instr("sum", F32, &[0, 5], F32, &[0], ints(&[1])));
+        assert!(p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)));
+        let p = plan(&instr("sum", F32, &[0, 5000], F32, &[0], ints(&[1])));
+        assert!(p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)));
     }
 }

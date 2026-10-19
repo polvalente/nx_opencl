@@ -282,6 +282,88 @@ pub fn supported() -> Vec<DType> {
     all
 }
 
+// ── Helpers the kernel templates share ──────────────────
+
+pub const BF16_HELPERS: &str = "\
+static float bf16_to_f32(ushort x) { return as_float(((uint)x) << 16); }
+static ushort f32_to_bf16(float f) {
+  uint u = as_uint(f);
+  if ((u & 0x7fffffffu) > 0x7f800000u) return (ushort)((u >> 16) | 0x40u);
+  u += 0x7fffu + ((u >> 16) & 1u);
+  return (ushort)(u >> 16);
+}
+";
+
+/// The type an expression computes in: `bf16` computes as `f32`.
+pub fn math_of(dtype: DType) -> Result<TypeInfo, String> {
+    let info = type_info(dtype)?;
+    if info.half.is_some() {
+        type_info(DType::new(Kind::F, 32))
+    } else {
+        Ok(info)
+    }
+}
+
+/// The value of buffer element `raw` (type `from`) as a C expression of the
+/// math type `to`.
+pub fn load_as(from: &TypeInfo, raw: &str, to: &TypeInfo) -> Result<String, String> {
+    let value = match from.half {
+        Some(Half::Bf16) => format!("bf16_to_f32({})", raw),
+        None if from.storage == "half" => format!("(float)({})", raw),
+        None => raw.to_string(),
+    };
+    let own = math_of(from.dtype)?;
+    if own.math == to.math {
+        Ok(value)
+    } else if own.is_complex() || to.is_complex() || (own.is_float() && !to.is_float()) {
+        Err(format!(
+            "cannot read a {} value as {}",
+            from.dtype, to.dtype
+        ))
+    } else {
+        Ok(format!("(({})({}))", to.math, value))
+    }
+}
+
+/// The expression `expr` (math type of `out`) as a buffer element of `out`.
+pub fn store_as(out: &TypeInfo, expr: &str) -> String {
+    match out.half {
+        Some(Half::Bf16) => format!("f32_to_bf16((float)({}))", expr),
+        None if out.storage == "half" => format!("(half)({})", expr),
+        None => format!("({})({})", out.storage, expr),
+    }
+}
+
+/// `BF16_HELPERS` when any type needs them.
+pub fn bf16_helpers(types: &[&TypeInfo]) -> &'static str {
+    if types.iter().any(|t| t.half == Some(Half::Bf16)) {
+        BF16_HELPERS
+    } else {
+        ""
+    }
+}
+
+/// Size of one C value of `info.math`, for local and scratch sizes.
+pub fn math_bytes(info: &TypeInfo) -> usize {
+    if info.is_complex() {
+        info.bytes
+    } else {
+        (info.math_bits / 8) as usize
+    }
+}
+
+/// Size in bytes of the OpenCL C type `c`, for the types this table names.
+pub fn c_type_bytes(c: &str) -> Result<usize, String> {
+    match c {
+        "char" | "uchar" => Ok(1),
+        "short" | "ushort" | "half" => Ok(2),
+        "int" | "uint" | "float" => Ok(4),
+        "long" | "ulong" | "double" | "float2" => Ok(8),
+        "double2" => Ok(16),
+        other => Err(format!("no size known for the C type {}", other)),
+    }
+}
+
 // ── Constants ───────────────────────────────────────────
 
 /// A scalar constant as the wire sends it: an integer, a float, or one of the
@@ -606,5 +688,25 @@ mod tests {
             encode_const(u64t, ConstVal::Int(u64::MAX as i128)).unwrap(),
             u64::MAX.to_ne_bytes().to_vec()
         );
+    }
+
+    #[test]
+    fn c_type_sizes_agree_with_the_table() {
+        for dtype in supported().into_iter().chain(complex_types()) {
+            let info = type_info(dtype).unwrap();
+            assert_eq!(
+                c_type_bytes(info.math),
+                Ok(math_bytes(&info)),
+                "math type of {}",
+                dtype
+            );
+            // Wrapping arithmetic runs in at least 32 bits.
+            assert!(
+                c_type_bytes(info.wide).unwrap() >= 4,
+                "wide type of {}",
+                dtype
+            );
+        }
+        assert!(c_type_bytes("quad").is_err());
     }
 }

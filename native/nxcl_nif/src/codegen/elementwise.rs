@@ -10,8 +10,9 @@
 use std::collections::BTreeMap;
 
 use super::complex;
-use super::types::{type_info, DType, Half, Kind, TypeInfo};
-use super::{element_count, Caps, Instr, KernelArg, KernelSpec};
+use super::movement::{pragmas, Kernel};
+use super::types::{math_of, type_info, DType, Half, Kind, TypeInfo, BF16_HELPERS};
+use super::{element_count, Caps, Instr, KernelSpec};
 
 const UNARY_FLOAT_FNS: [&str; 21] = [
     "exp", "expm1", "log", "log1p", "sin", "cos", "tan", "sinh", "cosh", "tanh", "asin", "acos",
@@ -99,16 +100,6 @@ pub fn handles(op: &str) -> bool {
 }
 
 // ── C helpers ───────────────────────────────────────────
-
-pub(super) const BF16_HELPERS: &str = "\
-static float bf16_to_f32(ushort x) { return as_float(((uint)x) << 16); }
-static ushort f32_to_bf16(float f) {
-  uint u = as_uint(f);
-  if ((u & 0x7fffffffu) > 0x7f800000u) return (ushort)((u >> 16) | 0x40u);
-  u += 0x7fffu + ((u >> 16) & 1u);
-  return (ushort)(u >> 16);
-}
-";
 
 /// Integer `pow` by repeated squaring, wrapping in the unsigned type. A
 /// negative exponent gives the integer limit: 1 and -1 keep their value, the
@@ -204,16 +195,6 @@ fn f2i_helper(src: &TypeInfo, out: &TypeInfo) -> String {
 }
 
 // ── Generator ───────────────────────────────────────────
-
-/// The type an expression computes in: `bf16` computes as `f32`.
-pub(super) fn math_of(dtype: DType) -> Result<TypeInfo, String> {
-    let info = type_info(dtype)?;
-    if info.half.is_some() {
-        type_info(DType::new(Kind::F, 32))
-    } else {
-        Ok(info)
-    }
-}
 
 fn float_lit(m: &TypeInfo, text: &str) -> String {
     if m.math == "double" {
@@ -1016,47 +997,18 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     let (expr, compute) = gen.body()?;
     let result = gen.store(&expr, &compute)?;
 
-    // Extension check over every type the kernel touches.
-    let mut dtypes: Vec<DType> = instr.operands.iter().map(|o| o.dtype).collect();
-    dtypes.push(instr.out);
+    // Extension check over every type the kernel touches, the compute type too.
+    let mut dtypes = instr.dtypes();
     dtypes.push(compute.dtype);
-    let mut pragmas = String::new();
-    for dtype in dtypes {
-        if let Some(ext) = type_info(dtype)?.ext {
-            if !caps.has(ext) {
-                return Err(format!(
-                    "missing extension {}: the device cannot run {}",
-                    ext.name(),
-                    dtype
-                ));
-            }
-            let pragma = format!("#pragma OPENCL EXTENSION {} : enable\n", ext.name());
-            if !pragmas.contains(&pragma) {
-                pragmas.push_str(&pragma);
-            }
-        }
-    }
+    let pragma_text = pragmas(&dtypes, caps)?;
 
-    let mut params = Vec::new();
-    let mut args = Vec::new();
+    let mut kernel = Kernel::new(instr);
     let mut names = Vec::new();
     for (k, operand) in instr.operands.iter().enumerate() {
-        let storage = type_info(operand.dtype)?.storage;
         names.push(operand.dtype.name());
-        match &operand.constant {
-            Some(bytes) => {
-                params.push(format!("const {} in{}", storage, k));
-                args.push(KernelArg::Scalar(bytes.clone()));
-            }
-            None => {
-                params.push(format!("__global const {}* in{}", storage, k));
-                args.push(KernelArg::Operand(k));
-            }
-        }
+        kernel.operand(k)?;
     }
-    let out_storage = type_info(instr.out)?.storage;
-    params.push(format!("__global {}* out", out_storage));
-    args.push(KernelArg::Output);
+    kernel.output()?;
 
     let entry = format!("ew_{}_{}_{}", instr.op, names.join("_"), instr.out.name());
     // The complex helpers each width calls, after the pragmas that enable it.
@@ -1067,25 +1019,16 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     }
     let helpers: String = gen.helpers.values().cloned().collect();
     let locals = gen.locals.join("\n");
-    let source = format!(
-        "{pragmas}{preamble}{helpers}__kernel void {entry}({params}) {{\n  size_t i = get_global_id(0);\n{locals}\n  out[i] = {result};\n}}\n",
-        params = params.join(", ")
-    );
-
-    Ok(KernelSpec {
-        source,
-        entry,
-        build_options: String::new(),
-        global: vec![element_count(&instr.out_shape).max(1)],
-        local: Vec::new(),
-        args,
-    })
+    let head = format!("{pragma_text}{preamble}{helpers}");
+    let body = format!("  size_t i = get_global_id(0);\n{locals}\n  out[i] = {result};\n");
+    let global = vec![element_count(&instr.out_shape)];
+    Ok(kernel.into_spec(&head, entry, &body, global, Vec::new()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::types::{encode_const, supported, Class, ConstVal};
-    use super::super::{Attr, Operand};
+    use super::super::{Attr, KernelArg, Operand};
     use super::*;
 
     const U8: DType = DType::new(Kind::U, 8);

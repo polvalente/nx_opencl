@@ -56,29 +56,30 @@ defmodule NxCL.Native do
   @spec queue_create(reference()) :: reference() | {:error, String.t()}
   def queue_create(_ctx), do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec device_info(reference()) :: [{String.t(), String.t()}]
+  @spec device_info(reference()) :: [{String.t(), String.t()}] | {:error, String.t()}
   def device_info(_ctx), do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec buffer_create(reference(), non_neg_integer()) :: reference()
+  @spec buffer_create(reference(), non_neg_integer()) :: reference() | {:error, String.t()}
   def buffer_create(_ctx, _size), do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec buffer_write(reference(), binary()) :: reference()
+  @spec buffer_write(reference(), binary()) :: reference() | {:error, String.t()}
   def buffer_write(_ctx, _data), do: :erlang.nif_error(:nif_not_loaded)
 
-  @spec buffer_read(reference(), non_neg_integer()) :: binary()
+  @spec buffer_read(reference(), non_neg_integer()) :: binary() | {:error, String.t()}
   def buffer_read(_buf, _size), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Reads several buffers with one wait on the device. Each item is `{buffer, size}`;
   the result lists the binaries in the same order.
   """
-  @spec buffer_read_many(reference(), [{reference(), non_neg_integer()}]) :: [binary()]
+  @spec buffer_read_many(reference(), [{reference(), non_neg_integer()}]) ::
+          [binary()] | {:error, String.t()}
   def buffer_read_many(_ctx, _items), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
   Drops the handle's hold on the device memory. The memory goes when no other
-  handle shares it. Reading a freed handle raises. Returns `false` when the
-  handle was already free.
+  handle shares it. Reading a freed handle returns `{:error, message}`. Returns
+  `false` when the handle was already free.
   """
   @spec buffer_free(reference()) :: boolean()
   def buffer_free(_buf), do: :erlang.nif_error(:nif_not_loaded)
@@ -107,4 +108,15 @@ defmodule NxCL.Native do
   @spec eval_program_on(reference(), [reference() | nil], reference()) ::
           {:ok, [reference()]} | {:error, String.t()}
   def eval_program_on(_program, _buffers, _queue), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Returns the value of a NIF call, or raises when the call returned
+  `{:error, message}`. Every fallible NIF reports failure that way and never
+  raises on its own.
+  """
+  @spec ok!(value | {:error, String.t()}, String.t()) :: value when value: term()
+  def ok!({:error, message}, what) when is_binary(message),
+    do: raise(ArgumentError, "#{what}: #{message}")
+
+  def ok!(value, _what), do: value
 end

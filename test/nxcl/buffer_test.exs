@@ -1,5 +1,6 @@
 defmodule NxCL.BufferTest do
   use ExUnit.Case, async: false
+  import Bitwise
   import NxCL.TestHelpers
 
   @moduletag :opencl
@@ -46,6 +47,30 @@ defmodule NxCL.BufferTest do
     test "create empty buffer", %{ctx: ctx} do
       buf = NxCL.Native.buffer_create(ctx, 16)
       assert is_reference(buf)
+    end
+  end
+
+  describe "errors" do
+    setup do
+      %{ctx: NxCL.Native.device_ctx_create(0)}
+    end
+
+    test "a fallible NIF returns {:error, message} and does not raise", %{ctx: ctx} do
+      assert {:error, message} = NxCL.Native.buffer_create(ctx, 1 <<< 63)
+      assert message =~ "too large"
+
+      buf = NxCL.Native.buffer_write(ctx, <<1, 2, 3, 4>>)
+      assert NxCL.Native.buffer_free(buf)
+      assert {:error, "buffer was deallocated"} = NxCL.Native.buffer_read(buf, 4)
+      assert {:error, "buffer was deallocated"} = NxCL.Native.buffer_read_many(ctx, [{buf, 4}])
+    end
+
+    test "ok!/2 passes a value through and raises on an error" do
+      assert NxCL.Native.ok!(<<1>>, "read") == <<1>>
+
+      assert_raise ArgumentError, "read: buffer was deallocated", fn ->
+        NxCL.Native.ok!({:error, "buffer was deallocated"}, "read")
+      end
     end
   end
 end

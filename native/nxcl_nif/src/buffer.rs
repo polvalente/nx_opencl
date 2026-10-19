@@ -3,19 +3,21 @@ use opencl3::types::{CL_FALSE, CL_TRUE};
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use crate::device_ctx::DeviceCtx;
+use crate::device_ctx::{lock, DeviceCtx};
 
 pub struct DeviceBuffer {
     pub buffer: Buffer<u8>,
     pub size: usize,
 }
 
-unsafe impl Send for DeviceBuffer {}
-unsafe impl Sync for DeviceBuffer {}
-
 impl DeviceBuffer {
     pub fn create(ctx: &DeviceCtx, size: usize) -> Result<Self, String> {
+        if size > isize::MAX as usize {
+            return Err(format!("buffer of {} bytes is too large", size));
+        }
         // OpenCL rejects a zero-size buffer; an empty tensor gets one spare byte.
+        // SAFETY: the host pointer is null and no host-pointer flag is set, so
+        // OpenCL allocates the memory itself and reads nothing from the host.
         let buffer = unsafe {
             Buffer::<u8>::create(
                 &ctx.context,
@@ -33,6 +35,9 @@ impl DeviceBuffer {
         if data.is_empty() {
             return Self::create(ctx, 0);
         }
+        // SAFETY: `CL_MEM_COPY_HOST_PTR` copies `data.len()` bytes from a pointer
+        // that is valid for that many bytes. OpenCL does not keep the pointer
+        // after the call, and does not write through it.
         let buffer = unsafe {
             Buffer::<u8>::create(
                 &ctx.context,
@@ -49,6 +54,10 @@ impl DeviceBuffer {
         })
     }
 
+    /// Reads up to `size` bytes through the context's own queue. A run on that
+    /// queue may still be queued when this is called; the read comes after it.
+    /// A run on another queue always finishes before it returns, so its output
+    /// is ready for this read too.
     pub fn read(&self, ctx: &DeviceCtx, size: usize) -> Result<Vec<u8>, String> {
         let read_size = std::cmp::min(size, self.size);
         if read_size == 0 {
@@ -56,11 +65,10 @@ impl DeviceBuffer {
         }
         let mut output = vec![0u8; read_size];
 
-        let queue = ctx
-            .queue
-            .lock()
-            .map_err(|e| format!("Lock error: {:?}", e))?;
+        let queue = lock(&ctx.queue);
 
+        // SAFETY: `output` holds `read_size` bytes, at most the buffer's size,
+        // and the read is blocking, so it finishes before `output` moves or drops.
         unsafe { queue.enqueue_read_buffer(&self.buffer, CL_TRUE, 0, &mut output, &[]) }
             .map_err(|e| format!("Failed to read buffer: {:?}", e))?;
 
@@ -78,10 +86,7 @@ impl DeviceBuffer {
             .map(|(buf, size)| vec![0u8; std::cmp::min(*size, buf.size)])
             .collect();
 
-        let queue = ctx
-            .queue
-            .lock()
-            .map_err(|e| format!("Lock error: {:?}", e))?;
+        let queue = lock(&ctx.queue);
 
         let mut events = Vec::with_capacity(items.len());
         let mut failure = None;
@@ -89,6 +94,9 @@ impl DeviceBuffer {
             if output.is_empty() {
                 continue;
             }
+            // SAFETY: the read is not blocking, so `output` must stay alive and
+            // unmoved until the queue drains. The vectors in `outputs` are not
+            // touched again until `finish` below has returned, on every path.
             match unsafe { queue.enqueue_read_buffer(&buf.buffer, CL_FALSE, 0, output, &[]) } {
                 Ok(event) => events.push(event),
                 Err(e) => {

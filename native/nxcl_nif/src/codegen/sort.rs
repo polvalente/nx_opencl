@@ -16,12 +16,10 @@
 //! `M` comes from the device's local memory size and key width, capped at 4096.
 //! No atomics.
 
-use super::elementwise::math_of;
 use super::index;
 use super::movement::{ints, pragmas, Kernel};
-use super::reduce::{bf16_helpers, load_as, math_bytes, store_as};
-use super::types::{type_info, TypeInfo};
-use super::{Attr, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::types::{bf16_helpers, load_as, math_bytes, math_of, store_as, type_info, TypeInfo};
+use super::{checked_product, entry_name, Attr, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
 
 const OPS: [&str; 2] = ["sort", "argsort"];
 
@@ -33,7 +31,7 @@ pub fn handles(op: &str) -> bool {
 const MAX_LOCAL: usize = 4096;
 
 /// Local capacity (a power of two) for keys of `key_bytes`, plus a 4-byte index.
-pub fn local_capacity(limits: &Limits, key_bytes: usize) -> usize {
+fn local_capacity(limits: &Limits, key_bytes: usize) -> usize {
     let mut m = 1;
     while m * 2 <= MAX_LOCAL && m * 2 * (key_bytes + 4) <= limits.local_mem {
         m *= 2;
@@ -42,14 +40,19 @@ pub fn local_capacity(limits: &Limits, key_bytes: usize) -> usize {
 }
 
 /// The line length padded to a power of two.
-pub fn padded(n: usize) -> usize {
-    n.max(1).next_power_of_two()
+fn padded(n: usize) -> Result<usize, String> {
+    n.max(1)
+        .checked_next_power_of_two()
+        .ok_or_else(|| format!("a sort axis of {} elements is too long", n))
 }
+
+/// The largest padded line: the kernels carry indices as `int`.
+const MAX_PADDED: usize = i32::MAX as usize;
 
 /// Launches a sort of one line of `n` elements takes with local capacity `m`.
 #[cfg(test)]
-pub fn pass_count(n: usize, m: usize) -> usize {
-    let p = padded(n);
+fn pass_count(n: usize, m: usize) -> usize {
+    let p = padded(n).unwrap();
     let m = m.min(p);
     if p <= m {
         return 1;
@@ -83,31 +86,53 @@ struct Ctx<'a> {
 
 impl Ctx<'_> {
     fn entry(&self, pass: &str) -> String {
-        format!(
-            "so_{}_{}_{}_{}_m{}",
-            if self.arg { "argsort" } else { "sort" },
-            self.in_info.dtype.name(),
-            self.out_info.dtype.name(),
-            pass,
-            self.m
+        entry_name(
+            "so",
+            &[
+                if self.arg { "argsort" } else { "sort" },
+                &self.in_info.dtype.name(),
+                &self.out_info.dtype.name(),
+                pass,
+                &format!("m{}", self.m),
+            ],
         )
     }
 
-    fn spec(&self, pass: &str, k: Kernel, body: String, groups: usize) -> KernelSpec {
-        let entry = self.entry(pass);
-        let source = format!(
-            "{head}__kernel void {entry}({params}) {{\n{body}}}\n",
-            head = self.head,
-            params = k.params.join(", ")
-        );
-        KernelSpec {
-            source,
-            entry,
-            build_options: String::new(),
-            global: vec![groups * self.t],
-            local: vec![self.t],
-            args: k.args,
-        }
+    /// A pass of `groups` groups of `t` items.
+    fn spec(
+        &self,
+        pass: &str,
+        k: Kernel,
+        body: String,
+        groups: usize,
+    ) -> Result<KernelSpec, String> {
+        let global = checked_product("the sort launch size", &[groups, self.t])?;
+        Ok(k.into_spec(
+            &self.head,
+            self.entry(pass),
+            &body,
+            vec![global],
+            vec![self.t],
+        ))
+    }
+
+    /// A pass of one item per element of `items`, rounded up to whole groups.
+    fn spec_items(
+        &self,
+        pass: &str,
+        k: Kernel,
+        body: String,
+        items: usize,
+    ) -> Result<KernelSpec, String> {
+        let groups = items.div_ceil(self.t);
+        let global = checked_product("the sort launch size", &[groups, self.t])?;
+        Ok(k.into_spec(
+            &self.head,
+            self.entry(pass),
+            &body,
+            vec![global],
+            vec![self.t],
+        ))
     }
 
     /// The value written for local slot `t`: the key for `sort`, the index for `argsort`.
@@ -213,7 +238,12 @@ fn pass_block(ctx: &Ctx) -> Result<KernelSpec, String> {
         half = m / 2,
         ex = exchange("sk", "si", kt, "N"),
     );
-    Ok(ctx.spec("block", k, body, ctx.lines * nb))
+    ctx.spec(
+        "block",
+        k,
+        body,
+        checked_product("the sort block count", &[ctx.lines, nb])?,
+    )
 }
 
 /// One global compare distance `j` of merge size `kk`.
@@ -229,7 +259,6 @@ fn pass_global(ctx: &Ctx, kk: usize, j: usize) -> Result<KernelSpec, String> {
     k.long("kk".to_string(), kk as i64);
     k.long("j".to_string(), j as i64);
     let half = ctx.p / 2;
-    let t = ctx.t;
     // One work item per pair; the group size does not matter, so the launch
     // rounds up and the guard drops the extra items.
     let body = format!(
@@ -247,10 +276,8 @@ fn pass_global(ctx: &Ctx, kk: usize, j: usize) -> Result<KernelSpec, String> {
         ex = exchange("key", "idx", kt, "N"),
         PAIR_G = PAIR.replace("      ", "  "),
     );
-    let mut spec = ctx.spec("global", k, body, 0);
-    let items = ctx.lines * half;
-    spec.global = vec![items.div_ceil(t) * t];
-    Ok(spec)
+    let items = checked_product("the sort pair count", &[ctx.lines, half])?;
+    ctx.spec_items("global", k, body, items)
 }
 
 /// The distances below `M` of merge size `kk`, in local memory.
@@ -288,7 +315,12 @@ fn pass_merge(ctx: &Ctx, kk: usize) -> Result<KernelSpec, String> {
         half = m / 2,
         ex = exchange("sk", "si", kt, "N"),
     );
-    Ok(ctx.spec("merge", k, body, ctx.lines * nb))
+    ctx.spec(
+        "merge",
+        k,
+        body,
+        checked_product("the sort block count", &[ctx.lines, nb])?,
+    )
 }
 
 /// Last pass: the first `N` slots of each line go to the output.
@@ -302,7 +334,6 @@ fn pass_out(ctx: &Ctx) -> Result<KernelSpec, String> {
     k.args.push(KernelArg::Scratch(1));
     geometry(ctx, &mut k);
     k.long("P".to_string(), ctx.p as i64);
-    let t = ctx.t;
     let body = format!(
         "  long g = (long)get_global_id(0);
   long line = g / N;
@@ -313,9 +344,8 @@ fn pass_out(ctx: &Ctx) -> Result<KernelSpec, String> {
         lines = ctx.lines,
         r = ctx.result("skeys[line * P + kpos]", "sidx[line * P + kpos]"),
     );
-    let mut spec = ctx.spec("out", k, body, 0);
-    spec.global = vec![(ctx.lines * ctx.n).div_ceil(t) * t];
-    Ok(spec)
+    let items = checked_product("the sort output size", &[ctx.lines, ctx.n])?;
+    ctx.spec_items("out", k, body, items)
 }
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
@@ -351,10 +381,11 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
             .ok_or_else(|| format!("{}: axis {} is out of range", instr.op, axis_attr))?;
         (
             input.shape[axis],
-            input.shape[axis + 1..].iter().product::<usize>(),
-            input.shape[..axis].iter().product::<usize>(),
+            checked_product("the sort inner size", &input.shape[axis + 1..])?,
+            checked_product("the sort outer size", &input.shape[..axis])?,
         )
     };
+    let lines = checked_product("the sort line count", &[outer, inner])?;
     let in_info = type_info(input.dtype)?;
     if in_info.is_complex() {
         return Err(format!("{} does not accept complex values", instr.op));
@@ -362,7 +393,13 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     let out_info = type_info(instr.out)?;
     let key = math_of(input.dtype)?;
     let arg = instr.op == "argsort";
-    let p = padded(n);
+    let p = padded(n)?;
+    if p > MAX_PADDED {
+        return Err(format!(
+            "{}: an axis of {} elements is too long: the sort indexes with 32 bits",
+            instr.op, n
+        ));
+    }
     let cap = local_capacity(limits, math_bytes(&key));
     if cap < 2 {
         return Err(format!(
@@ -375,7 +412,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     let items = limits.group_size(1);
     let head = format!(
         "{}{}{}",
-        pragmas(instr, caps)?,
+        pragmas(&instr.dtypes(), caps)?,
         bf16_helpers(&[&in_info, &out_info]),
         before_fn(&key, desc)
     );
@@ -390,7 +427,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         p,
         n,
         inner,
-        lines: outer * inner,
+        lines,
         arg,
     };
     if p <= m {
@@ -408,12 +445,16 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         kk *= 2;
     }
     passes.push(pass_out(&ctx)?);
-    let scratch = vec![ctx.lines * p * math_bytes(&ctx.key), ctx.lines * p * 4];
+    let scratch = vec![
+        checked_product("the sort key buffer", &[ctx.lines, p, math_bytes(&ctx.key)])?,
+        checked_product("the sort index buffer", &[ctx.lines, p, 4])?,
+    ];
     Ok(Plan { passes, scratch })
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::plan;
     use super::super::types::Kind;
     use super::super::{Attr, DType, Operand};
     use super::*;
@@ -439,10 +480,6 @@ mod tests {
         }
     }
 
-    fn plan(i: &Instr) -> Plan {
-        generate(i, &Caps::all(), &Limits::apple()).unwrap()
-    }
-
     #[test]
     fn local_capacity_follows_local_memory_and_key_width() {
         let apple = Limits::apple();
@@ -450,21 +487,19 @@ mod tests {
         assert_eq!(local_capacity(&apple, 4), 4096);
         assert_eq!(local_capacity(&apple, 8), 2048);
         assert_eq!(local_capacity(&apple, 1), 4096);
-        let small = Limits {
-            max_wg: 64,
-            local_mem: 1024,
-        };
+        let small = Limits::new(64, 1024);
         assert_eq!(local_capacity(&small, 4), 128);
     }
 
     #[test]
     fn lines_pad_to_a_power_of_two() {
-        assert_eq!(padded(0), 1);
-        assert_eq!(padded(1), 1);
-        assert_eq!(padded(63), 64);
-        assert_eq!(padded(65), 128);
-        assert_eq!(padded(4097), 8192);
-        assert_eq!(padded(9000), 16384);
+        assert_eq!(padded(0).unwrap(), 1);
+        assert_eq!(padded(1).unwrap(), 1);
+        assert_eq!(padded(63).unwrap(), 64);
+        assert_eq!(padded(65).unwrap(), 128);
+        assert_eq!(padded(4097).unwrap(), 8192);
+        assert_eq!(padded(9000).unwrap(), 16384);
+        assert!(padded(usize::MAX).unwrap_err().contains("too long"));
     }
 
     #[test]
@@ -482,7 +517,7 @@ mod tests {
             let p = plan(&instr("argsort", F32, &[n], 0, "desc"));
             assert_eq!(p.passes.len(), pass_count(n, m), "n = {n}");
             // Keys and indices for the padded line.
-            let padded = padded(n);
+            let padded = padded(n).unwrap();
             assert_eq!(p.scratch, vec![padded * 4, padded * 4], "n = {n}");
         }
         // 8192 elements: block sort, one global exchange, one merge, copy out.
@@ -503,7 +538,7 @@ mod tests {
         let f = plan(&instr("argsort", F32, &[100], 0, "asc"));
         let src = &f.passes[0].source;
         // A tie on the key falls back to the index, so equal keys keep their order.
-        assert!(src.contains("ia < ib") || src.contains("i0 < i1") || src.contains("<"));
+        assert!(src.contains("return ia < ib;"), "{src}");
         assert!(src.contains("isnan"));
         // Integers have no NaN.
         let i = plan(&instr("argsort", U8, &[100], 0, "asc"));
@@ -525,5 +560,45 @@ mod tests {
         assert!(err.contains("asc or desc"), "{err}");
         let err = generate(&instr("sort", F32, &[8], 3, "asc"), &caps, &lim).unwrap_err();
         assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_tensor_has_a_positive_global_size() {
+        // The executor never launches this, and the spec stays well formed.
+        for shape in [[0usize].as_slice(), &[3, 0], &[0, 9000]] {
+            let p = plan(&instr("sort", F32, shape, shape.len() as i64 - 1, "asc"));
+            assert!(
+                p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)),
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_axis_that_a_32_bit_index_cannot_reach_is_an_error() {
+        let err = generate(
+            &instr("argsort", F32, &[1usize << 31], 0, "asc"),
+            &Caps::all(),
+            &Limits::apple(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("32 bits") && err.contains("2147483648"),
+            "{err}"
+        );
+        // An axis too long to pad at all is an error too.
+        assert!(padded(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn sizes_that_overflow_are_errors() {
+        let big = 1usize << 40;
+        let err = generate(
+            &instr("sort", F32, &[big, big, 2], 2, "asc"),
+            &Caps::all(),
+            &Limits::apple(),
+        )
+        .unwrap_err();
+        assert!(err.contains("is too large"), "{err}");
     }
 }

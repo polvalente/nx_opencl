@@ -20,9 +20,10 @@
 //! needs a device, so `cargo test` checks the expansion against a direct convolution.
 
 use super::gemm::{self, Binding, Gemm};
-use super::movement::{ints, pragmas};
+use super::index::MAX_RANK;
+use super::movement::{assemble, ints, pragmas};
 use super::types::type_info;
-use super::{element_count, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::{checked_product, element_count, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
 
 pub fn handles(op: &str) -> bool {
     op == "conv"
@@ -30,7 +31,7 @@ pub fn handles(op: &str) -> bool {
 
 /// The sizes of a normalized convolution. Vectors have one entry per spatial axis.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Conv {
+struct Conv {
     pub batch: usize,
     pub channels: usize,
     pub in_sp: Vec<usize>,
@@ -47,7 +48,7 @@ pub struct Conv {
 
 /// The GEMM a convolution turns into, and where the columns come from.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Expansion {
+struct Expansion {
     pub groups: usize,
     /// Output channels per group (`M` of the GEMM).
     pub og: usize,
@@ -58,6 +59,10 @@ pub struct Expansion {
     pub out_sp: Vec<usize>,
     /// `N' * prod(out_sp)` (`N` of the GEMM).
     pub np: usize,
+    /// `prod(out_sp)`.
+    pub out_positions: usize,
+    /// Elements in the `cols` scratch buffer: `groups * k * np`.
+    pub cols: usize,
     /// Input batch step per group: `N'` for batch groups, else 0.
     pub batch_step: usize,
     /// Input channel step per group: `I` for feature groups, else 0.
@@ -67,7 +72,7 @@ pub struct Expansion {
 impl Expansion {
     /// Elements in the `cols` scratch buffer.
     pub fn cols_len(&self) -> usize {
-        self.groups * self.k * self.np
+        self.cols
     }
 
     pub fn out_shape(&self) -> Vec<usize> {
@@ -121,7 +126,7 @@ impl Expansion {
 
 /// Checks the sizes and returns the expansion. `out_shape` is the
 /// instruction's output shape, `[O, N', spatial...]`.
-pub fn expand(c: &Conv, out_shape: &[usize]) -> Result<Expansion, String> {
+fn expand(c: &Conv, out_shape: &[usize]) -> Result<Expansion, String> {
     let d = c.in_sp.len();
     if d == 0 {
         return Err("conv needs at least one spatial axis".to_string());
@@ -162,30 +167,48 @@ pub fn expand(c: &Conv, out_shape: &[usize]) -> Result<Expansion, String> {
     }
     let groups = fg * bg;
     let n_out = c.batch / bg;
+    // Extent of `size` cells spaced `step` apart: `(size - 1) * step + 1`, or 0
+    // for no cells. The sizes come from the wire, so the product is checked.
+    let spread = |what: &str, a: usize, size: usize, step: usize| -> Result<usize, String> {
+        if size == 0 {
+            return Ok(0);
+        }
+        (size - 1)
+            .checked_mul(step)
+            .and_then(|v| v.checked_add(1))
+            .filter(|&v| i64::try_from(v).is_ok())
+            .ok_or_else(|| format!("conv: the {} of axis {} is too large", what, a))
+    };
     let mut out_sp = Vec::with_capacity(d);
     for a in 0..d {
-        let dilated = if c.in_sp[a] == 0 {
-            0
-        } else {
-            (c.in_sp[a] - 1) * c.input_dilation[a] + 1
-        };
-        let extent = if c.kernel_sp[a] == 0 {
-            0
-        } else {
-            (c.kernel_sp[a] - 1) * c.kernel_dilation[a] + 1
-        };
-        let padded = dilated as i64 + c.pad[a].0 + c.pad[a].1;
-        if padded < extent as i64 || extent == 0 {
+        let dilated = spread("dilated input", a, c.in_sp[a], c.input_dilation[a])?;
+        let extent = spread("dilated kernel", a, c.kernel_sp[a], c.kernel_dilation[a])?;
+        if extent == 0 {
+            return Err(format!("conv: the kernel has size 0 along axis {}", a));
+        }
+        // Both extents fit in an i64, and the sum of three i64 values fits in i128.
+        let padded = dilated as i128 + c.pad[a].0 as i128 + c.pad[a].1 as i128;
+        if padded < extent as i128 {
             return Err(format!("conv: the kernel does not fit axis {}", a));
         }
-        out_sp.push(((padded - extent as i64) as usize) / c.strides[a] + 1);
+        let cells = (padded - extent as i128) / c.strides[a] as i128 + 1;
+        out_sp.push(
+            usize::try_from(cells)
+                .map_err(|_| format!("conv: the output of axis {} is too large", a))?,
+        );
     }
+    let out_positions = checked_product("the conv output positions", &out_sp)?;
+    let kernel_positions = checked_product("the conv kernel positions", &c.kernel_sp)?;
+    let k = checked_product("the conv K", &[c.kernel_channels, kernel_positions])?;
+    let np = checked_product("the conv columns", &[n_out, out_positions])?;
     let e = Expansion {
         groups,
         og: c.filters / groups,
-        k: c.kernel_channels * c.kernel_sp.iter().product::<usize>(),
+        k,
         n_out,
-        np: n_out * out_sp.iter().product::<usize>(),
+        np,
+        out_positions,
+        cols: checked_product("the conv column buffer", &[groups, k, np])?,
         out_sp,
         batch_step: if bg > 1 { n_out } else { 0 },
         chan_step: if fg > 1 { c.kernel_channels } else { 0 },
@@ -220,8 +243,17 @@ fn parse(instr: &Instr) -> Result<Conv, String> {
         ));
     }
     let a = ints(&instr.attrs, "conv")?;
-    let d = *a.first().ok_or("conv: missing the spatial rank")? as usize;
-    if a.len() != 1 + 5 * d + 2 || d == 0 || x.shape.len() != d + 2 || w.shape.len() != d + 2 {
+    let first = *a.first().ok_or("conv: missing the spatial rank")?;
+    let d = usize::try_from(first)
+        .ok()
+        .filter(|&d| (1..=MAX_RANK).contains(&d))
+        .ok_or_else(|| {
+            format!(
+                "conv: the spatial rank D is {}, not between 1 and {}",
+                first, MAX_RANK
+            )
+        })?;
+    if a.len() != 1 + 5 * d + 2 || x.shape.len() != d + 2 || w.shape.len() != d + 2 {
         return Err(format!(
             "conv: expected {} attrs and rank {} operands for {} spatial axes",
             1 + 5 * d + 2,
@@ -229,10 +261,15 @@ fn parse(instr: &Instr) -> Result<Conv, String> {
             d
         ));
     }
-    let take = |from: usize| -> Vec<usize> {
+    // A negative stride, dilation or group count is an error here, so a later
+    // check never reports it as a zero.
+    let size = |v: i64, what: &str| -> Result<usize, String> {
+        usize::try_from(v).map_err(|_| format!("conv: {} {} is negative", what, v))
+    };
+    let take = |from: usize, what: &str| -> Result<Vec<usize>, String> {
         a[1 + from * d..1 + (from + 1) * d]
             .iter()
-            .map(|&v| v.max(0) as usize)
+            .map(|&v| size(v, what))
             .collect()
     };
     let pad_at = 1 + d;
@@ -243,14 +280,14 @@ fn parse(instr: &Instr) -> Result<Conv, String> {
         filters: w.shape[0],
         kernel_channels: w.shape[1],
         kernel_sp: w.shape[2..].to_vec(),
-        strides: take(0),
+        strides: take(0, "stride")?,
         pad: (0..d)
             .map(|i| (a[pad_at + 2 * i], a[pad_at + 2 * i + 1]))
             .collect(),
-        kernel_dilation: take(3),
-        input_dilation: take(4),
-        feature_groups: a[1 + 5 * d].max(0) as usize,
-        batch_groups: a[2 + 5 * d].max(0) as usize,
+        kernel_dilation: take(3, "kernel dilation")?,
+        input_dilation: take(4, "input dilation")?,
+        feature_groups: size(a[1 + 5 * d], "feature group count")?,
+        batch_groups: size(a[2 + 5 * d], "batch group count")?,
     })
 }
 
@@ -259,7 +296,7 @@ fn parse(instr: &Instr) -> Result<Conv, String> {
 fn im2col(instr: &Instr, c: &Conv, e: &Expansion, caps: &Caps) -> Result<KernelSpec, String> {
     let d = c.in_sp.len();
     let info = type_info(instr.out)?;
-    let pragma = pragmas(instr, caps)?;
+    let pragma = pragmas(&instr.dtypes(), caps)?;
     let entry = format!("im2col_{}d_{}", d, instr.out.name());
 
     let mut params = vec![
@@ -271,12 +308,13 @@ fn im2col(instr: &Instr, c: &Conv, e: &Expansion, caps: &Caps) -> Result<KernelS
         params.push(format!("const long {name}"));
         args.push(KernelArg::Scalar(v.to_ne_bytes().to_vec()));
     };
-    let sp_total: usize = c.in_sp.iter().product();
+    let sp_total = checked_product("the conv input positions", &c.in_sp)?;
+    let kernel_positions = checked_product("the conv kernel positions", &c.kernel_sp)?;
     long("total".into(), e.cols_len() as i64);
     long("K".into(), e.k as i64);
     long("NP".into(), e.np as i64);
-    long("P".into(), e.out_sp.iter().product::<usize>() as i64);
-    long("KP".into(), c.kernel_sp.iter().product::<usize>() as i64);
+    long("P".into(), e.out_positions as i64);
+    long("KP".into(), kernel_positions as i64);
     long("C".into(), c.channels as i64);
     long("ISP".into(), sp_total as i64);
     long("bstep".into(), e.batch_step as i64);
@@ -315,12 +353,8 @@ fn im2col(instr: &Instr, c: &Conv, e: &Expansion, caps: &Caps) -> Result<KernelS
          cols[id] = ok ? in[src] : ({s})(0);\n",
         s = info.storage
     ));
-    let source = format!(
-        "{pragma}__kernel void {entry}({params}) {{\n{body}}}\n",
-        params = params.join(", ")
-    );
     Ok(KernelSpec {
-        source,
+        source: assemble(&pragma, &entry, &params.join(", "), &body),
         entry,
         build_options: String::new(),
         global: vec![e.cols_len().max(1)],
@@ -335,6 +369,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     let g = e.gemm(instr.out);
     let bytes = type_info(instr.out)?.bytes;
     let out_elems = element_count(&instr.out_shape);
+    let cols_bytes = checked_product("the conv column buffer", &[e.cols_len(), bytes])?;
     // No columns to gather: the GEMM writes zeros (K == 0) or nothing.
     let empty = e.cols_len() == 0 || out_elems == 0;
     let bind = Binding {
@@ -342,16 +377,13 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         b: KernelArg::Scratch(0),
         out: KernelArg::Output,
     };
-    let tile = std::env::var("NXCL_GEMM_TILE")
-        .ok()
-        .and_then(|v| gemm::parse_tile(&v).ok());
-    let gemm_pass = gemm::kernel(&g, &bind, caps, limits, tile)?;
+    let gemm_pass = gemm::kernel(&g, &bind, caps, limits, gemm::forced_tile()?)?;
     if empty {
         return Ok(Plan::single(gemm_pass));
     }
     Ok(Plan {
         passes: vec![im2col(instr, &c, &e, caps)?, gemm_pass],
-        scratch: vec![e.cols_len() * bytes],
+        scratch: vec![cols_bytes],
     })
 }
 
@@ -531,8 +563,11 @@ mod tests {
         let plan = generate(&i, &Caps::all(), &Limits::apple()).unwrap();
         assert_eq!(plan.scratch, vec![18 * 30 * 4]);
         assert_eq!(plan.passes.len(), 2);
-        assert!(plan.passes[0].entry.starts_with("im2col_2d_"));
-        assert!(plan.passes[1].entry.starts_with("gemm_"));
+        // The gather reads the input and writes the scratch buffer.
+        assert_eq!(
+            plan.passes[0].args[..2],
+            [KernelArg::Operand(0), KernelArg::Scratch(0)]
+        );
         // The GEMM reads the kernel buffer and the scratch buffer.
         assert_eq!(
             plan.passes[1].args[..3],
@@ -675,7 +710,6 @@ mod tests {
             let i = test_instr(&c, F32);
             let plan = generate(&i, &Caps::all(), &Limits::apple()).unwrap();
             let src = &plan.passes[0].source;
-            assert!(plan.passes[0].entry.starts_with(&format!("im2col_{d}d_")));
             for a in 0..d {
                 assert!(
                     src.contains(&format!("const long op{a} =")),
@@ -704,5 +738,90 @@ mod tests {
         assert!(p.passes[1].source.contains("cf_mul"));
         assert!(p.passes[0].source.contains("float2"));
         assert_eq!(p.scratch, vec![18 * 30 * 8]);
+    }
+
+    /// The conv2d instruction with attr `at` replaced by `v`.
+    fn with_attr(at: usize, v: i64) -> Instr {
+        let mut i = test_instr(&conv2d(), F32);
+        i.attrs[at] = super::super::Attr::Int(v);
+        i
+    }
+
+    fn conv_err(i: &Instr) -> String {
+        generate(i, &Caps::all(), &Limits::apple()).unwrap_err()
+    }
+
+    #[test]
+    fn a_bad_spatial_rank_names_d_and_the_limit() {
+        for d in [-1, 0, 9, i64::MAX] {
+            let err = conv_err(&with_attr(0, d));
+            assert!(
+                err.contains("D is") && err.contains("between 1 and 8"),
+                "{d}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_strides_dilations_and_groups_are_errors_that_say_so() {
+        // Attr layout for two spatial axes: D, strides (1-2), pads (3-6),
+        // kernel dilation (7-8), input dilation (9-10), groups (11, 12).
+        for (at, what) in [
+            (1, "stride"),
+            (7, "kernel dilation"),
+            (9, "input dilation"),
+            (11, "feature group count"),
+            (12, "batch group count"),
+        ] {
+            let err = conv_err(&with_attr(at, -2));
+            assert!(
+                err.contains(what) && err.contains("negative"),
+                "{what}: {err}"
+            );
+        }
+        // Zero is still a different error: it is not negative.
+        let err = conv_err(&with_attr(1, 0));
+        assert!(err.contains("must be positive"), "{err}");
+    }
+
+    #[test]
+    fn products_that_overflow_are_errors_not_wraps() {
+        let big = usize::MAX / 2 + 1;
+        let mut c = conv2d();
+        c.in_sp = vec![big, 3];
+        c.input_dilation = vec![4, 1];
+        let err = expand(&c, &[4, 2, 1, 1]).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        let mut c = conv2d();
+        c.kernel_sp = vec![3, big];
+        c.kernel_dilation = vec![1, 3];
+        assert!(expand(&c, &[4, 2, 1, 1]).unwrap_err().contains("too large"));
+        // Padding at the limits of i64 cannot wrap the sum.
+        let mut c = conv2d();
+        c.pad = vec![(i64::MAX, i64::MAX), (0, 0)];
+        assert!(expand(&c, &[4, 2, 1, 1]).is_err());
+        c.pad = vec![(i64::MIN, i64::MIN), (0, 0)];
+        assert!(expand(&c, &[4, 2, 1, 1])
+            .unwrap_err()
+            .contains("does not fit"));
+        // Sizes whose column buffer overflows.
+        let mut c = conv2d();
+        c.in_sp = vec![1 << 31, 1 << 31];
+        c.kernel_sp = vec![1, 1];
+        c.batch = 1 << 20;
+        let out = [4, 1 << 20, 1 << 31, 1 << 31];
+        assert!(expand(&c, &out).unwrap_err().contains("too large"));
+    }
+
+    #[test]
+    fn a_zero_sized_kernel_and_a_kernel_that_does_not_fit_have_their_own_messages() {
+        let mut c = conv2d();
+        c.kernel_sp = vec![0, 2];
+        let err = expand(&c, &[4, 2, 1, 1]).unwrap_err();
+        assert!(err.contains("size 0 along axis 0"), "{err}");
+        let mut c = conv2d();
+        c.kernel_sp = vec![9, 2];
+        let err = expand(&c, &[4, 2, 1, 1]).unwrap_err();
+        assert!(err.contains("does not fit axis 0"), "{err}");
     }
 }

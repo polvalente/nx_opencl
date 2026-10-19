@@ -25,11 +25,11 @@
 //! stays `s32`; complex values use the helpers of `complex.rs`.
 
 use super::complex;
-use super::elementwise::math_of;
 use super::movement::pragmas;
-use super::reduce::{bf16_helpers, load_as, store_as};
-use super::types::{type_info, Class, DType, TypeInfo};
-use super::{Caps, Instr, KernelArg, KernelSpec, Limits, Operand, Plan};
+use super::types::{
+    bf16_helpers, c_type_bytes, load_as, math_of, store_as, type_info, Class, DType, TypeInfo,
+};
+use super::{checked_product, long_arg, Attr, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
 
 pub fn handles(op: &str) -> bool {
     op == "batched_gemm"
@@ -37,7 +37,7 @@ pub fn handles(op: &str) -> bool {
 
 /// One work-group tile. A group has `bn / tn` by `bm / tm` threads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Tile {
+pub(super) struct Tile {
     pub bm: usize,
     pub bn: usize,
     pub bk: usize,
@@ -69,10 +69,14 @@ impl Tile {
             && self.bn.is_multiple_of(self.tn)
     }
 
-    /// True when a group of this tile runs on a device with `limits`.
+    /// True when a group of this tile runs on a device with `limits`: the
+    /// group is `bn / tn` by `bm / tm` items, and each side must fit its own
+    /// per-dimension limit as well as the total.
     pub fn fits(&self, limits: &Limits, elem: usize) -> bool {
         self.valid()
             && self.threads() <= limits.max_wg
+            && self.bn / self.tn <= limits.max_item_sizes[0]
+            && self.bm / self.tm <= limits.max_item_sizes[1]
             && self.local_bytes(elem) <= limits.local_mem
     }
 
@@ -115,7 +119,7 @@ const WIDE_GROUP: usize = 1024;
 const TARGET_GROUPS: usize = 96;
 
 /// Parses `bm,bn,bk,tm,tn`.
-pub fn parse_tile(text: &str) -> Result<Tile, String> {
+fn parse_tile(text: &str) -> Result<Tile, String> {
     let parts: Vec<usize> = text
         .split(',')
         .map(|p| p.trim().parse::<usize>())
@@ -139,7 +143,10 @@ pub fn parse_tile(text: &str) -> Result<Tile, String> {
 
 /// Work groups a tile makes for `batch` products of `m x n`.
 fn groups(t: &Tile, batch: usize, m: usize, n: usize) -> usize {
-    batch.max(1) * m.div_ceil(t.bm) * n.div_ceil(t.bn)
+    batch
+        .max(1)
+        .saturating_mul(m.div_ceil(t.bm))
+        .saturating_mul(n.div_ceil(t.bn))
 }
 
 /// The tile for `batch` products of `m x n` values of `elem` bytes. `forced`
@@ -147,7 +154,7 @@ fn groups(t: &Tile, batch: usize, m: usize, n: usize) -> usize {
 /// that fits the limits, is not much larger than the problem, and leaves at least
 /// `TARGET_GROUPS` groups; if none leaves that many, the fitting tile with the
 /// most groups. Errors only when even the smallest tile does not fit.
-pub fn select_tile(
+fn select_tile(
     limits: &Limits,
     elem: usize,
     (batch, m, n): (usize, usize, usize),
@@ -164,7 +171,8 @@ pub fn select_tile(
     let fitting: Vec<&Tile> = table.iter().filter(|t| t.fits(limits, elem)).collect();
     let last = fitting.len().saturating_sub(1);
     let roomy = |(i, t): &(usize, &&Tile)| {
-        let small_problem = t.bm >= 4 * m.max(1) || t.bn >= 4 * n.max(1);
+        let small_problem =
+            t.bm >= m.max(1).saturating_mul(4) || t.bn >= n.max(1).saturating_mul(4);
         *i == last || !small_problem
     };
     let candidates: Vec<&Tile> = fitting
@@ -186,15 +194,25 @@ pub fn select_tile(
         })
 }
 
-fn forced_tile() -> Option<Tile> {
-    std::env::var("NXCL_GEMM_TILE")
-        .ok()
-        .and_then(|v| parse_tile(&v).ok())
+/// The tile `NXCL_GEMM_TILE` asks for, if the variable is set. A value that
+/// does not parse is an error, not a silent fall back to the table.
+pub(super) fn forced_tile() -> Result<Option<Tile>, String> {
+    tile_from(std::env::var("NXCL_GEMM_TILE"))
+}
+
+fn tile_from(value: Result<String, std::env::VarError>) -> Result<Option<Tile>, String> {
+    match value {
+        Ok(text) => parse_tile(&text).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("NXCL_GEMM_TILE is not valid text".to_string())
+        }
+    }
 }
 
 /// The sizes of one product.
 #[derive(Clone, Copy, Debug)]
-pub struct Gemm {
+pub(super) struct Gemm {
     pub dtype: DType,
     pub batch: usize,
     pub m: usize,
@@ -204,7 +222,7 @@ pub struct Gemm {
 
 /// Which buffers a GEMM kernel reads and writes.
 #[derive(Clone, Debug)]
-pub struct Binding {
+pub(super) struct Binding {
     pub a: KernelArg,
     pub b: KernelArg,
     pub out: KernelArg,
@@ -220,16 +238,6 @@ struct Code {
     mac: String,
     add: String,
     store: String,
-}
-
-fn bytes_of(c_type: &str) -> usize {
-    match c_type {
-        "char" | "uchar" => 1,
-        "short" | "ushort" | "half" => 2,
-        "int" | "uint" | "float" => 4,
-        "long" | "ulong" | "double" | "float2" => 8,
-        _ => 16,
-    }
 }
 
 fn code(dtype: DType) -> Result<Code, String> {
@@ -294,21 +302,6 @@ static inline {s} gemm_st({t} v) {{ return {store}; }}\n",
         add = c.add,
         store = c.store,
     )
-}
-
-fn ext_pragmas(dtype: DType, caps: &Caps) -> Result<String, String> {
-    let probe = Instr {
-        op: "batched_gemm".to_string(),
-        operands: vec![Operand {
-            dtype,
-            shape: Vec::new(),
-            constant: None,
-        }],
-        out: dtype,
-        out_shape: Vec::new(),
-        attrs: Vec::new(),
-    };
-    pragmas(&probe, caps)
 }
 
 const TILED: &str = r#"
@@ -412,13 +405,13 @@ fn fill_template(tpl: &str, entry: &str, c: &Code) -> String {
         .replace("$T", c.t)
 }
 
-fn long_arg(v: usize) -> KernelArg {
-    KernelArg::Scalar((v as i64).to_ne_bytes().to_vec())
+fn size_arg(v: usize) -> Result<KernelArg, String> {
+    Ok(KernelArg::Scalar(long_arg(v)?))
 }
 
 /// The kernel for one product, reading and writing the buffers in `bind`.
 /// `tile` is the forced tile, if any; the caller passes `None` to use the table.
-pub fn kernel(
+pub(super) fn kernel(
     g: &Gemm,
     bind: &Binding,
     caps: &Caps,
@@ -426,33 +419,40 @@ pub fn kernel(
     tile: Option<Tile>,
 ) -> Result<KernelSpec, String> {
     let c = code(g.dtype)?;
-    let pragma = ext_pragmas(g.dtype, caps)?;
+    let pragma = pragmas(&[g.dtype], caps)?;
     let name = g.dtype.name();
-    let elem = bytes_of(c.t);
+    let elem = c_type_bytes(c.t)?;
     let head = format!("{pragma}{}", helpers(&c));
-    let sizes = [long_arg(g.m), long_arg(g.n), long_arg(g.k)];
+    let sizes = [size_arg(g.m)?, size_arg(g.n)?, size_arg(g.k)?];
     let mut args = vec![bind.a.clone(), bind.b.clone(), bind.out.clone()];
     args.extend(sizes);
 
-    let (source, entry, options, global, local) = if g.k == 0 || g.batch * g.m * g.n == 0 {
+    let total = checked_product("the gemm output size", &[g.batch, g.m, g.n])?;
+    let (source, entry, options, global, local) = if g.k == 0 || total == 0 {
         let entry = format!("gemm_zero_{name}");
-        let args = vec![bind.out.clone(), long_arg(g.batch * g.m * g.n)];
+        let args = vec![bind.out.clone(), size_arg(total)?];
         return Ok(KernelSpec {
             source: format!("{pragma}{}", fill_template(FILL, &entry, &c)),
             entry,
             build_options: String::new(),
-            global: vec![(g.batch * g.m * g.n).max(1)],
+            global: vec![total.max(1)],
             local: Vec::new(),
             args,
         });
     } else if g.n == 1 {
-        let wg = limits.group_size(elem).min(g.k.next_power_of_two()).max(1);
+        let wg = limits
+            .group_size(elem)
+            .min(g.k.checked_next_power_of_two().unwrap_or(usize::MAX))
+            .max(1);
         let entry = format!("gemm_matvec_{name}");
         (
             fill_template(MATVEC, &entry, &c),
             entry,
             format!("-DWG={wg}"),
-            vec![g.m * wg, g.batch],
+            vec![
+                checked_product("the gemm launch size", &[g.m, wg])?,
+                g.batch,
+            ],
             vec![wg, 1],
         )
     } else if g.m == 1 {
@@ -472,8 +472,14 @@ pub fn kernel(
             entry,
             tile.options(),
             vec![
-                g.n.div_ceil(tile.bn) * (tile.bn / tile.tn),
-                g.m.div_ceil(tile.bm) * (tile.bm / tile.tm),
+                checked_product(
+                    "the gemm launch width",
+                    &[g.n.div_ceil(tile.bn), tile.bn / tile.tn],
+                )?,
+                checked_product(
+                    "the gemm launch height",
+                    &[g.m.div_ceil(tile.bm), tile.bm / tile.tm],
+                )?,
                 g.batch,
             ],
             vec![tile.bn / tile.tn, tile.bm / tile.tm, 1],
@@ -500,9 +506,10 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     }
     let size = |i: usize, what: &str| -> Result<usize, String> {
         match instr.attrs.get(i) {
-            Some(super::Attr::Int(v)) if *v >= 0 => Ok(*v as usize),
-            _ => Err(format!("batched_gemm attr {} ({}) must be a size", i, what)),
+            Some(Attr::Int(v)) => usize::try_from(*v).ok(),
+            _ => None,
         }
+        .ok_or_else(|| format!("batched_gemm attr {} ({}) must be a size", i, what))
     };
     let g = Gemm {
         dtype: instr.out,
@@ -538,11 +545,12 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         b: KernelArg::Operand(1),
         out: KernelArg::Output,
     };
-    kernel(&g, &bind, caps, limits, forced_tile()).map(Plan::single)
+    kernel(&g, &bind, caps, limits, forced_tile()?).map(Plan::single)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::buf;
     use super::super::types::Kind;
     use super::*;
 
@@ -551,15 +559,11 @@ mod tests {
     const C64: DType = DType::new(Kind::C, 64);
 
     fn limits(max_wg: usize, local_mem: usize) -> Limits {
-        Limits { max_wg, local_mem }
+        Limits::new(max_wg, local_mem)
     }
 
     fn gemm(dtype: DType, batch: usize, m: usize, n: usize, k: usize) -> Instr {
-        let op = |shape: [usize; 3]| Operand {
-            dtype,
-            shape: shape.to_vec(),
-            constant: None,
-        };
+        let op = |shape: [usize; 3]| buf(dtype, &shape);
         Instr {
             op: "batched_gemm".to_string(),
             operands: vec![op([batch, m, k]), op([batch, k, n])],
@@ -567,7 +571,7 @@ mod tests {
             out_shape: vec![batch, m, n],
             attrs: [batch, m, n, k]
                 .iter()
-                .map(|&v| super::super::Attr::Int(v as i64))
+                .map(|&v| Attr::Int(v as i64))
                 .collect(),
         }
     }
@@ -800,5 +804,62 @@ mod tests {
         assert!(generate(&gemm(f64t, 1, 4, 4, 4), &none, &Limits::apple())
             .unwrap_err()
             .contains("cl_khr_fp64"));
+    }
+
+    #[test]
+    fn a_bad_tile_variable_is_an_error_and_an_unset_one_is_not() {
+        use std::env::VarError;
+        assert_eq!(tile_from(Err(VarError::NotPresent)), Ok(None));
+        assert_eq!(
+            tile_from(Ok("8,8,4,1,1".to_string())),
+            Ok(Some(Tile::new(8, 8, 4, 1, 1)))
+        );
+        let err = tile_from(Ok("8,8,4,1".to_string())).unwrap_err();
+        assert!(err.contains("NXCL_GEMM_TILE"), "{err}");
+        assert!(tile_from(Ok("8,8,4,3,3".to_string())).is_err());
+        assert!(tile_from(Err(VarError::NotUnicode("x".into()))).is_err());
+    }
+
+    #[test]
+    fn each_side_of_the_group_obeys_its_own_work_item_limit() {
+        // 256 items in total, but at most 4 along each of the first two axes.
+        let mut l = limits(256, 32 * 1024);
+        l.max_item_sizes = [4, 4, 1];
+        let t = select_tile(&l, 4, (1, 512, 512), None).unwrap();
+        assert!(t.bn / t.tn <= 4 && t.bm / t.tm <= 4, "{:?}", t);
+        // The 128 x 128 tile has 16 x 16 items and no longer fits.
+        assert!(!TABLE[0].fits(&l, 4));
+        // A forced tile obeys the limit as well.
+        let forced = parse_tile("128,128,8,8,8").unwrap();
+        assert!(!forced.fits(&l, 4));
+    }
+
+    #[test]
+    fn sizes_that_overflow_are_errors() {
+        let big = 1usize << 30;
+        let mut i = gemm(F32, 1, 1, 1, 1);
+        i.operands = vec![buf(F32, &[big, big, 1]), buf(F32, &[big, 1, big])];
+        i.out_shape = vec![big, big, big];
+        i.attrs = vec![
+            Attr::Int(big as i64),
+            Attr::Int(big as i64),
+            Attr::Int(big as i64),
+            Attr::Int(1),
+        ];
+        let err = generate(&i, &Caps::all(), &limits(256, 32 * 1024)).unwrap_err();
+        assert!(err.contains("the gemm output size is too large"), "{err}");
+        // A negative size is not a size.
+        let mut i = gemm(F32, 1, 2, 2, 2);
+        i.attrs[1] = Attr::Int(-1);
+        assert!(generate(&i, &Caps::all(), &limits(256, 32 * 1024))
+            .unwrap_err()
+            .contains("must be a size"));
+    }
+
+    #[test]
+    fn an_unknown_c_type_has_no_size() {
+        assert_eq!(c_type_bytes("float2"), Ok(8));
+        assert_eq!(c_type_bytes("double2"), Ok(16));
+        assert!(c_type_bytes("quad").unwrap_err().contains("quad"));
     }
 }

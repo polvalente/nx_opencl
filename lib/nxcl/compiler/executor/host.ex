@@ -32,7 +32,12 @@ defmodule NxCL.Compiler.Executor.Host do
     end
 
     leaves = Composite.flatten_list([result])
-    Enum.map(leaves, &NxCL.Native.buffer_write(ctx, &1 |> Nx.to_tensor() |> Nx.to_binary()))
+
+    Enum.map(leaves, fn leaf ->
+      ctx
+      |> NxCL.Native.buffer_write(leaf |> Nx.to_tensor() |> Nx.to_binary())
+      |> NxCL.Native.ok!("could not upload a callback result")
+    end)
   end
 
   # Rebuilds the input container with host tensors read from the buffers.
@@ -44,6 +49,7 @@ defmodule NxCL.Compiler.Executor.Host do
         tensor =
           buf
           |> NxCL.Native.buffer_read(size)
+          |> NxCL.Native.ok!("could not read a callback argument")
           |> Nx.from_binary(template.type)
           |> Nx.reshape(template.shape, names: template.names)
 

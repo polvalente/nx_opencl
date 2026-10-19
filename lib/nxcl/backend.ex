@@ -58,14 +58,16 @@ defmodule NxCL.Backend do
   @impl true
   def from_binary(%Nx.Tensor{} = tensor, binary, backend_opts) do
     ctx = NxCL.Devices.fetch!(Keyword.take(backend_opts, [:device])).ctx
-    ref = NxCL.Native.buffer_write(ctx, binary)
+    ref = ctx |> NxCL.Native.buffer_write(binary) |> NxCL.Native.ok!("could not upload a tensor")
     put_in(tensor.data, %__MODULE__{ref: ref, ctx: ctx})
   end
 
   # `limit` counts elements (vectorized axes included), as in `Nx.BinaryBackend`.
   @impl true
   def to_binary(%Nx.Tensor{data: %__MODULE__{ref: ref}, type: {_, bits}} = tensor, limit) do
-    NxCL.Native.buffer_read(ref, div(bits * min(limit, Nx.flat_size(tensor)), 8))
+    ref
+    |> NxCL.Native.buffer_read(div(bits * min(limit, Nx.flat_size(tensor)), 8))
+    |> NxCL.Native.ok!("could not read a tensor")
   end
 
   @impl true

@@ -78,6 +78,7 @@ dependencies = [
 name = "nxcl_nif"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "opencl3",
  "rustler",
 ]

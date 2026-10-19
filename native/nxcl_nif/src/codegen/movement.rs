@@ -10,10 +10,9 @@
 //! every dtype. Every op writes a fresh buffer; none works in place.
 
 use super::complex;
-use super::elementwise::BF16_HELPERS;
 use super::index::{self, coords, dims, strides};
-use super::types::{type_info, DType, Half, TypeInfo};
-use super::{element_count, Attr, Caps, Instr, KernelArg, KernelSpec};
+use super::types::{type_info, DType, Half, TypeInfo, BF16_HELPERS};
+use super::{checked_product, element_count, Attr, Caps, Instr, KernelArg, KernelSpec};
 
 const OPS: [&str; 10] = [
     "broadcast",
@@ -102,6 +101,7 @@ impl<'a> Kernel<'a> {
         }
     }
 
+    /// The kernel with one work item per output element.
     pub(super) fn finish(
         self,
         caps: &Caps,
@@ -109,29 +109,44 @@ impl<'a> Kernel<'a> {
         helpers: &str,
         body: &str,
     ) -> Result<KernelSpec, String> {
-        let pragmas = pragmas(self.instr, caps)?;
-        let source = format!(
-            "{pragmas}{helpers}__kernel void {entry}({params}) {{\n{body}}}\n",
-            params = self.params.join(", ")
-        );
-        Ok(KernelSpec {
-            source,
+        let head = format!("{}{}", pragmas(&self.instr.dtypes(), caps)?, helpers);
+        let global = vec![element_count(&self.instr.out_shape)];
+        Ok(self.into_spec(&head, entry, body, global, Vec::new()))
+    }
+
+    /// The spec for a kernel named `entry` with the parameters declared so far,
+    /// after `head` (pragmas and helper source). A global size of 0 becomes 1:
+    /// OpenCL rejects an empty launch. The executor never launches a kernel
+    /// whose output is empty, so the one item that would run never does.
+    pub(super) fn into_spec(
+        self,
+        head: &str,
+        entry: String,
+        body: &str,
+        global: Vec<usize>,
+        local: Vec<usize>,
+    ) -> KernelSpec {
+        KernelSpec {
+            source: assemble(head, &entry, &self.params.join(", "), body),
             entry,
             build_options: String::new(),
-            global: vec![element_count(&self.instr.out_shape).max(1)],
-            local: Vec::new(),
+            global: global.into_iter().map(|g| g.max(1)).collect(),
+            local,
             args: self.args,
-        })
+        }
     }
 }
 
-/// The extension pragmas for every type the kernel touches, or an error
-/// when the device lacks one.
-pub(super) fn pragmas(instr: &Instr, caps: &Caps) -> Result<String, String> {
-    let mut dtypes: Vec<DType> = instr.operands.iter().map(|o| o.dtype).collect();
-    dtypes.push(instr.out);
+/// The source of one kernel: `head`, then the `__kernel` function.
+pub(super) fn assemble(head: &str, entry: &str, params: &str, body: &str) -> String {
+    format!("{head}__kernel void {entry}({params}) {{\n{body}}}\n")
+}
+
+/// The extension pragmas for every type in `dtypes`, or an error when the
+/// device lacks one.
+pub(super) fn pragmas(dtypes: &[DType], caps: &Caps) -> Result<String, String> {
     let mut out = String::new();
-    for dtype in dtypes {
+    for &dtype in dtypes {
         if let Some(ext) = type_info(dtype)?.ext {
             if !caps.has(ext) {
                 return Err(format!(
@@ -151,7 +166,7 @@ pub(super) fn pragmas(instr: &Instr, caps: &Caps) -> Result<String, String> {
 
 // ── Index helpers ───────────────────────────────────────
 
-fn check_rank(instr: &Instr) -> Result<usize, String> {
+fn check_instr_rank(instr: &Instr) -> Result<usize, String> {
     let widest = instr
         .operands
         .iter()
@@ -375,7 +390,10 @@ fn slice(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
             return Err(format!("slice: axis {} should give {} elements", d, want));
         }
         hi.push(input[d] as i64 - len);
-        step.push(st * in_st[d]);
+        step.push(
+            st.checked_mul(in_st[d])
+                .ok_or_else(|| format!("slice: stride {} on axis {} is too large", st, d))?,
+        );
     }
     let mut k = Kernel::new(instr);
     for n in 0..=rank {
@@ -464,13 +482,26 @@ fn pad(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
         if i < 0 {
             return Err(format!("pad: interior padding {} is negative", i));
         }
-        let want = l + h + n + (n - 1).max(0) * i;
-        if instr.out_shape[d] as i64 != want {
+        // The config comes from the wire, so the sums use wider integers.
+        let (wide_n, wide_i) = (n as i128, i as i128);
+        let want = l as i128 + h as i128 + wide_n + (wide_n - 1).max(0) * wide_i;
+        if instr.out_shape[d] as i128 != want {
             return Err(format!("pad: axis {} should have {} elements", d, want));
         }
+        let extent = if n == 0 {
+            0
+        } else {
+            (wide_n - 1) * (wide_i + 1) + 1
+        };
         lo.push(l);
-        step.push(i + 1);
-        ext.push(if n == 0 { 0 } else { (n - 1) * (i + 1) + 1 });
+        step.push(
+            i.checked_add(1)
+                .ok_or_else(|| format!("pad: interior padding {} is too large", i))?,
+        );
+        ext.push(
+            i64::try_from(extent)
+                .map_err(|_| format!("pad: the padded extent of axis {} is too large", d))?,
+        );
     }
     let mut k = Kernel::new(instr);
     k.operand(0)?;
@@ -545,7 +576,7 @@ fn join(instr: &Instr, caps: &Caps, stack: bool) -> Result<KernelSpec, String> {
             instr.op, total, out[axis]
         ));
     }
-    let inner: i64 = out[axis + 1..].iter().map(|&d| d as i64).product();
+    let inner = checked_product("the join inner size", &out[axis + 1..])? as i64;
     let mut k = Kernel::new(instr);
     for idx in 0..n {
         k.operand(idx)?;
@@ -622,7 +653,7 @@ fn iota(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
                 .ok_or_else(|| format!("iota: axis {} is out of range", a))?;
             k.long(
                 "inner".to_string(),
-                out[axis + 1..].iter().map(|&d| d as i64).product(),
+                checked_product("the iota inner size", &out[axis + 1..])? as i64,
             );
             k.long("dim".to_string(), out[axis] as i64);
             "((long)i / inner) % dim".to_string()
@@ -670,7 +701,7 @@ fn eye(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
 
 /// Generate the kernel for a movement instruction.
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
-    check_rank(instr)?;
+    check_instr_rank(instr)?;
     match instr.op.as_str() {
         "broadcast" => broadcast(instr, caps),
         "transpose" => transpose(instr, caps),
@@ -688,6 +719,7 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{buf, instr, ints};
     use super::super::types::{encode_const, ConstVal, Kind};
     use super::super::Operand;
     use super::*;
@@ -701,39 +733,11 @@ mod tests {
     const C128: DType = DType::new(Kind::C, 128);
     const BF16: DType = DType::new(Kind::Bf, 16);
 
-    fn buf(dtype: DType, shape: &[usize]) -> Operand {
-        Operand {
-            dtype,
-            shape: shape.to_vec(),
-            constant: None,
-        }
-    }
-
     fn konst(dtype: DType, v: i128) -> Operand {
         Operand {
             dtype,
             shape: vec![],
             constant: Some(encode_const(dtype, ConstVal::Int(v)).unwrap()),
-        }
-    }
-
-    fn ints(v: &[i64]) -> Vec<Attr> {
-        v.iter().map(|&i| Attr::Int(i)).collect()
-    }
-
-    fn instr(
-        op: &str,
-        operands: Vec<Operand>,
-        out: DType,
-        out_shape: &[usize],
-        attrs: Vec<Attr>,
-    ) -> Instr {
-        Instr {
-            op: op.to_string(),
-            operands,
-            out,
-            out_shape: out_shape.to_vec(),
-            attrs,
         }
     }
 
@@ -1246,5 +1250,54 @@ mod tests {
             assert!(handles(op));
         }
         assert!(!handles("add"));
+    }
+
+    #[test]
+    fn pad_and_slice_configs_at_the_limits_of_i64_are_errors_not_wraps() {
+        let pad = |attrs: &[i64], out: &[usize]| {
+            instr(
+                "pad",
+                vec![buf(F32, &[3]), buf(F32, &[])],
+                F32,
+                out,
+                ints(attrs),
+            )
+        };
+        // Interior padding of i64::MAX: the output size cannot match.
+        let err = generate(&pad(&[0, 0, i64::MAX], &[5]), &Caps::all()).unwrap_err();
+        assert!(err.contains("should have"), "{err}");
+        // A one-element axis ignores interior padding, so only `i + 1` can wrap.
+        let one = instr(
+            "pad",
+            vec![buf(F32, &[1]), buf(F32, &[])],
+            F32,
+            &[1],
+            ints(&[0, 0, i64::MAX]),
+        );
+        let err = generate(&one, &Caps::all()).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        // A stride times the axis stride overflows.
+        let slice = instr(
+            "slice",
+            vec![buf(F32, &[2, 3]), buf(S32, &[]), buf(S32, &[])],
+            F32,
+            &[1, 1],
+            ints(&[1, 1, i64::MAX, 1]),
+        );
+        let err = generate(&slice, &Caps::all()).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_tensor_has_a_positive_global_size() {
+        // The executor never launches this, and the spec stays well formed.
+        let i = instr(
+            "transpose",
+            vec![buf(F32, &[0, 4])],
+            F32,
+            &[4, 0],
+            ints(&[1, 0]),
+        );
+        assert!(gen(&i).global.iter().all(|&g| g > 0));
     }
 }

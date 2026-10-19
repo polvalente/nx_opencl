@@ -13,12 +13,12 @@
 //! window's selected cell by the reference rule (the later of equal cells wins),
 //! and adds the window's source value when the selected cell is `p`.
 
-use super::elementwise::{math_of, scalar_binary, ScalarCode};
+use super::elementwise::{scalar_binary, ScalarCode};
 use super::index::{self, coords, dims, strides};
 use super::movement::{ints, pragmas, Kernel};
-use super::reduce::{bf16_helpers, combiner, load_as, parse_steps, store_as, Canon, CombKind};
-use super::types::type_info;
-use super::{element_count, Caps, Instr, KernelSpec, Plan};
+use super::reduce::{combiner, parse_steps, Canon, CombKind};
+use super::types::{bf16_helpers, load_as, math_of, store_as, type_info};
+use super::{element_count, Caps, Instr, Plan};
 
 const OPS: [&str; 7] = [
     "window_sum",
@@ -108,18 +108,8 @@ fn input_index(rank: usize) -> String {
 }
 
 fn finish(instr: &Instr, k: Kernel, head: &str, entry: String, body: &str) -> Plan {
-    let source = format!(
-        "{head}__kernel void {entry}({params}) {{\n{body}}}\n",
-        params = k.params.join(", ")
-    );
-    Plan::single(KernelSpec {
-        source,
-        entry,
-        build_options: String::new(),
-        global: vec![element_count(&instr.out_shape).max(1)],
-        local: Vec::new(),
-        args: k.args,
-    })
+    let global = vec![element_count(&instr.out_shape)];
+    Plan::single(k.into_spec(head, entry, body, global, Vec::new()))
 }
 
 /// `window_sum`, `window_product`, `window_max`, `window_min` and `window_reduce`.
@@ -148,7 +138,8 @@ fn fold(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
         let tag = combiner(&CombKind::Steps(steps.clone()), math_of(instr.out)?.dtype)?.tag;
         (CombKind::Steps(steps), &instr.attrs[used..], tag)
     } else {
-        let canon = Canon::from_op(&instr.op).expect("window op");
+        let canon = Canon::from_op(&instr.op)
+            .ok_or_else(|| format!("{}: not a window reduction", instr.op))?;
         (CombKind::Canon(canon), &instr.attrs[..], canon_tag(canon))
     };
     let w = parse_window(window_attrs, rank)?;
@@ -158,7 +149,7 @@ fn fold(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let out_info = type_info(instr.out)?;
     let head = format!(
         "{}{}{}",
-        pragmas(instr, caps)?,
+        pragmas(&instr.dtypes(), caps)?,
         bf16_helpers(&[&in_info, &out_info]),
         comb.code.render()
     );
@@ -265,7 +256,7 @@ fn scatter(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     code.merge(scalar_binary("add", acc.dtype, "add_fn")?);
     let head = format!(
         "{}{}{}static long fdiv(long a, long b) {{ return a >= 0 ? a / b : -((-a + b - 1) / b); }}\nstatic long cdiv(long a, long b) {{ return -fdiv(-a, b); }}\n",
-        pragmas(instr, caps)?,
+        pragmas(&instr.dtypes(), caps)?,
         bf16_helpers(&[&in_info, &src_info, &init_info, &out_info]),
         code.render()
     );
@@ -386,25 +377,14 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{buf, ints, plan};
     use super::super::types::Kind;
-    use super::super::{Attr, DType, Operand};
+    use super::super::{Attr, DType};
     use super::*;
 
     const S32: DType = DType::new(Kind::S, 32);
     const F32: DType = DType::new(Kind::F, 32);
     const C64: DType = DType::new(Kind::C, 64);
-
-    fn buf(dtype: DType, shape: &[usize]) -> Operand {
-        Operand {
-            dtype,
-            shape: shape.to_vec(),
-            constant: None,
-        }
-    }
-
-    fn ints(v: &[i64]) -> Vec<Attr> {
-        v.iter().map(|&i| Attr::Int(i)).collect()
-    }
 
     /// Rank 2: dims, strides, dilations, then (low, high) per axis.
     fn window(dims: [i64; 2], strides: [i64; 2], pad: [(i64, i64); 2]) -> Vec<Attr> {
@@ -421,10 +401,6 @@ mod tests {
             out_shape: out_shape.to_vec(),
             attrs,
         }
-    }
-
-    fn plan(i: &Instr) -> Plan {
-        generate(i, &Caps::all()).unwrap()
     }
 
     #[test]

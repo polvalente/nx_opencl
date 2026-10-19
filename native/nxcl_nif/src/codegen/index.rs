@@ -21,7 +21,9 @@ pub fn check_rank(op: &str, rank: usize) -> Result<(), String> {
 pub fn strides(shape: &[usize]) -> Vec<i64> {
     let mut out = vec![1i64; shape.len()];
     for d in (0..shape.len().saturating_sub(1)).rev() {
-        out[d] = out[d + 1] * shape[d + 1] as i64;
+        // Saturates on a shape with a zero axis and huge ones; such a tensor is
+        // empty and no kernel indexes it.
+        out[d] = out[d + 1].saturating_mul(shape[d + 1] as i64);
     }
     out
 }
@@ -65,5 +67,13 @@ mod tests {
     fn the_rank_cap_is_eight() {
         assert!(check_rank("x", 8).is_ok());
         assert!(check_rank("x", 9).unwrap_err().contains("rank 9"));
+    }
+
+    #[test]
+    fn strides_of_an_empty_but_huge_shape_do_not_wrap() {
+        let s = strides(&[0, 1 << 40, 1 << 40]);
+        assert_eq!(s[2], 1);
+        assert_eq!(s[1], 1 << 40);
+        assert_eq!(s[0], i64::MAX);
     }
 }

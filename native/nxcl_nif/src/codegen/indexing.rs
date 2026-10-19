@@ -23,11 +23,10 @@
 //! axes keep their order. `gather` writes `[indices batch..., rest...]`; an update
 //! row is a window over the rest axes that starts at 0.
 
-use super::elementwise::BF16_HELPERS;
 use super::index::{self, dims, strides};
 use super::movement::{ints, type_names, Kernel};
-use super::types::{type_info, Half, Kind, TypeInfo};
-use super::{element_count, Caps, Instr, KernelArg, KernelSpec, Plan};
+use super::types::{type_info, Half, Kind, TypeInfo, BF16_HELPERS};
+use super::{checked_product, element_count, Caps, Instr, KernelArg, KernelSpec, Plan};
 
 const OPS: [&str; 3] = ["gather", "indexed_add", "indexed_put"];
 
@@ -162,10 +161,6 @@ fn index_offset(count: usize) -> String {
         .collect()
 }
 
-fn product(v: &[usize]) -> usize {
-    v.iter().product()
-}
-
 // ── gather ──────────────────────────────────────────────
 
 /// Operands: the tensor, the indices `[batch..., k]`. Attrs: the gathered axes.
@@ -208,7 +203,8 @@ fn gather(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     kern.operand(1)?;
     kern.output()?;
     flag(&mut kern);
-    kern.long("rc".to_string(), product(&rest_dims) as i64);
+    let rest_count = checked_product("the gather window size", &rest_dims)?;
+    kern.long("rc".to_string(), rest_count as i64);
     kern.longs("rd", &dims(&rest_dims));
     kern.longs("rs", &g.rest_strides());
     kern.longs("gd", &gd);
@@ -235,9 +231,10 @@ fn gather(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
 /// Checked shapes of an indexed op: operands `[target, indices {n, k}, updates {n, window...}]`.
 struct Indexed {
     geo: Geo,
-    rows: usize,
     /// Elements per update row.
     row_len: usize,
+    /// Elements in all the updates: `rows * row_len`.
+    updates: usize,
     window: Vec<usize>,
 }
 
@@ -295,10 +292,11 @@ fn indexed(instr: &Instr) -> Result<Indexed, String> {
             ));
         }
     }
+    let row_len = checked_product("the update row size", &window)?;
     Ok(Indexed {
-        row_len: product(&window),
+        row_len,
+        updates: checked_product("the update count", &[rows, row_len])?,
         geo,
-        rows,
         window,
     })
 }
@@ -318,7 +316,7 @@ fn update_pass(
     declare(&mut k)?;
     flag(&mut k);
     let (gd, gs) = ix.geo.gathered();
-    k.long("nu".to_string(), (ix.rows * ix.row_len) as i64);
+    k.long("nu".to_string(), ix.updates as i64);
     k.long("uc".to_string(), ix.row_len as i64);
     k.longs("ud", &dims(&ix.window));
     k.longs("rs", &ix.geo.rest_strides());
@@ -337,7 +335,7 @@ fn update_pass(
     src.push_str(body);
     let entry = format!("{}_k{kk}_r{r}_{}", spec.name, type_names(instr));
     let mut out = k.finish(caps, entry, spec.helpers, &src)?;
-    out.global = vec![(ix.rows * ix.row_len).max(1)];
+    out.global = vec![ix.updates.max(1)];
     Ok(out)
 }
 
@@ -440,7 +438,7 @@ fn indexed_put(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     )?;
     Ok(Plan {
         passes: vec![init, claim, write],
-        scratch: vec![tc * 4],
+        scratch: vec![checked_product("the winner buffer", &[tc, 4])?],
     })
 }
 
@@ -663,7 +661,7 @@ fn indexed_add(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
             )?;
             Ok(Plan {
                 passes: vec![init, add, fin],
-                scratch: vec![tc * 4],
+                scratch: vec![checked_product("the winner buffer", &[tc, 4])?],
             })
         }
     }
@@ -682,8 +680,8 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{buf, ints, plan};
     use super::super::types::{DType, Kind};
-    use super::super::Operand;
     use super::*;
 
     const S32: DType = DType::new(Kind::S, 32);
@@ -698,18 +696,6 @@ mod tests {
     const BF16: DType = DType::new(Kind::Bf, 16);
     const C64: DType = DType::new(Kind::C, 64);
     const C128: DType = DType::new(Kind::C, 128);
-
-    fn buf(dtype: DType, shape: &[usize]) -> Operand {
-        Operand {
-            dtype,
-            shape: shape.to_vec(),
-            constant: None,
-        }
-    }
-
-    fn ints(v: &[i64]) -> Vec<super::super::Attr> {
-        v.iter().map(|&i| super::super::Attr::Int(i)).collect()
-    }
 
     fn gather_instr(ix: DType, tensor: &[usize], indices: &[usize], out: &[usize]) -> Instr {
         Instr {
@@ -730,10 +716,6 @@ mod tests {
             out_shape: vec![4, 3],
             attrs: ints(&[0]),
         }
-    }
-
-    fn plan(i: &Instr) -> Plan {
-        generate(i, &Caps::all()).unwrap()
     }
 
     fn no_atomics() -> Caps {

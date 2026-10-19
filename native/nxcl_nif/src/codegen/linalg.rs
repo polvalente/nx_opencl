@@ -19,11 +19,9 @@
 //! `f16` compute in `float` and round when they store.
 
 use super::complex;
-use super::elementwise::math_of;
 use super::movement::{pragmas, Kernel};
-use super::reduce::{bf16_helpers, load_as, store_as};
-use super::types::TypeInfo;
-use super::{Attr, Caps, Instr, KernelSpec, Limits, Plan};
+use super::types::{bf16_helpers, load_as, math_of, store_as, TypeInfo};
+use super::{checked_product, Attr, Caps, Instr, Limits, Plan};
 
 const OPS: [&str; 2] = ["triangular_solve", "cholesky"];
 
@@ -146,7 +144,7 @@ fn check_operands(instr: &Instr, n: usize) -> Result<(), String> {
 /// Leading batch size and the matrix order of a stack of square matrices.
 fn square_batch(op: &str, shape: &[usize]) -> Result<(usize, usize), String> {
     match shape {
-        [batch @ .., n, m] if n == m => Ok((batch.iter().product(), *n)),
+        [batch @ .., n, m] if n == m => Ok((checked_product("the matrix batch", batch)?, *n)),
         _ => Err(format!(
             "{}: expected square matrices, got shape {:?}",
             op, shape
@@ -259,7 +257,8 @@ fn triangular_solve(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     k.output()?;
     k.long("n".to_string(), n as i64);
     k.long("m".to_string(), m as i64);
-    k.long("total".to_string(), (batch * m) as i64);
+    let total = checked_product("the solve count", &[batch, m])?;
+    k.long("total".to_string(), total as i64);
     k.long("a_rs".to_string(), a_rs as i64);
     k.long("a_cs".to_string(), a_cs as i64);
     k.long("sx".to_string(), sx as i64);
@@ -269,7 +268,7 @@ fn triangular_solve(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let entry = format!("ts_{}{}", instr.out.name(), if conj { "_conj" } else { "" });
     let helpers = arith.helpers(&["sub", "mul", "div", "conj"]);
     let mut spec = k.finish(caps, entry, &helpers, &body)?;
-    spec.global = vec![(batch * m).max(1)];
+    spec.global = vec![total.max(1)];
     Ok(Plan::single(spec))
 }
 
@@ -337,19 +336,16 @@ fn cholesky(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String>
 
     let entry = format!("chol_{}", instr.out.name());
     let helpers = arith.helpers(&["sub", "mul", "div", "conj", "sqrt"]);
-    let pragma_text = pragmas(instr, caps)?;
-    let source = format!(
-        "{pragma_text}{helpers}__kernel void {entry}({params}) {{\n{body}}}\n",
-        params = k.params.join(", ")
-    );
-    Ok(Plan::single(KernelSpec {
-        source,
+    let pragma_text = pragmas(&instr.dtypes(), caps)?;
+    let head = format!("{pragma_text}{helpers}");
+    let global = checked_product("the cholesky launch size", &[batch.max(1), wg])?;
+    Ok(Plan::single(k.into_spec(
+        &head,
         entry,
-        build_options: String::new(),
-        global: vec![batch.max(1) * wg],
-        local: vec![wg],
-        args: k.args,
-    }))
+        &body,
+        vec![global],
+        vec![wg],
+    )))
 }
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
@@ -362,8 +358,9 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::plan;
     use super::super::types::Kind;
-    use super::super::{DType, Operand};
+    use super::super::{DType, KernelSpec, Operand};
     use super::*;
 
     const F32: DType = DType::new(Kind::F, 32);
@@ -400,10 +397,6 @@ mod tests {
             out_shape: shape.to_vec(),
             attrs: vec![],
         }
-    }
-
-    fn plan(i: &Instr) -> Plan {
-        generate(i, &Caps::all(), &Limits::apple()).unwrap()
     }
 
     fn scalars(spec: &KernelSpec) -> Vec<i64> {
