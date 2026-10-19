@@ -17,8 +17,13 @@ defmodule NxCL.Compiler.Executor.Plan do
   # Each step lists the table keys to drop once its last reader has run.
   # Captures and constants stay in the table until the run ends, because
   # nested bodies share them.
+  #
+  # The plan and every segment's compiled program share the bounded
+  # `NxCL.Compiler.ProgramCache` with all other programs, so one program with many
+  # segments can push older entries out. An evicted segment compiles again on its
+  # next run.
 
-  alias NxCL.Compiler.Executor
+  alias NxCL.Compiler.Executor.Wire
   alias NxCL.Compiler.Instruction
   alias NxCL.Compiler.Program
 
@@ -26,7 +31,55 @@ defmodule NxCL.Compiler.Executor.Plan do
 
   defstruct [:scope, :const_keys, :const_wire, :const_key]
 
-  @type t :: %__MODULE__{}
+  @typedoc "A key of the buffer table: an input, capture, constant, result or carry ref."
+  @type key :: Instruction.ref()
+
+  @typedoc "`{position, key}` of each result a control step leaves live."
+  @type live :: [{non_neg_integer(), key()}]
+
+  @type scope :: %{steps: [step()], outputs: [key()], out_types: [Nx.Type.t()]}
+
+  @type step ::
+          %{
+            kind: :segment,
+            key: {:segment, binary()},
+            wire: Wire.t(),
+            ins: [key()],
+            n_consts: non_neg_integer(),
+            outs: [key()],
+            free: [key()]
+          }
+          | %{
+              kind: :cond,
+              operands: [key()],
+              clauses: [{scope(), scope()}],
+              else: scope(),
+              live: live(),
+              free: [key()]
+            }
+          | %{
+              kind: :while,
+              operands: [key()],
+              cond: scope(),
+              body: scope(),
+              static: non_neg_integer() | nil,
+              live: live(),
+              free: [key()]
+            }
+          | %{
+              kind: :host_call,
+              operands: [key()],
+              index: non_neg_integer(),
+              live: live(),
+              free: [key()]
+            }
+
+  @type t :: %__MODULE__{
+          scope: scope(),
+          const_keys: [key()],
+          const_wire: Wire.t(),
+          const_key: {:consts, binary()}
+        }
 
   @doc "Plans `program`. Compiles nothing; segments compile on first run."
   @spec build(Program.t()) :: t()
@@ -37,13 +90,13 @@ defmodule NxCL.Compiler.Executor.Plan do
     keys = Enum.sort(needed)
     const_wire = Enum.map(keys, fn {:const, c} -> const_slot(program.constants, c) end)
     outs = for k <- 0..(length(keys) - 1)//1, do: {:const, k}
-    wire = {[], [], const_wire, [], outs}
+    wire = Wire.build([], [], const_wire, [], outs)
 
     %__MODULE__{
       scope: scope,
       const_keys: keys,
       const_wire: wire,
-      const_key: {Executor, :consts, :erlang.md5(:erlang.term_to_binary(wire))}
+      const_key: {:consts, :erlang.md5(:erlang.term_to_binary(wire))}
     }
   end
 
@@ -71,7 +124,7 @@ defmodule NxCL.Compiler.Executor.Plan do
     inputs |> Map.merge(captures) |> Map.merge(consts)
   end
 
-  defp const_slot(constants, c), do: Executor.encode_const(Enum.at(constants, c))
+  defp const_slot(constants, c), do: Wire.const(Enum.at(constants, c))
 
   # Returns `{scope, needed_consts}`. A const is needed as a buffer when a
   # control step or a scope output reads it; segments hold their own consts.
@@ -224,17 +277,22 @@ defmodule NxCL.Compiler.Executor.Plan do
 
     instrs =
       for {instr, _} <- step.chunk,
-          do: Executor.encode_instruction(%{instr | operands: Enum.map(instr.operands, map)})
+          do: Wire.instruction(%{instr | operands: Enum.map(instr.operands, map)})
 
     outs = Enum.map(live_defs, fn {:result, m} -> {:result, m - step.start} end)
 
     wire =
-      {Enum.map(step.ext, &Map.fetch!(types, &1)), [],
-       Enum.map(step.used_consts, fn {:const, c} -> const_slot(constants, c) end), instrs, outs}
+      Wire.build(
+        Enum.map(step.ext, &Map.fetch!(types, &1)),
+        [],
+        Enum.map(step.used_consts, fn {:const, c} -> const_slot(constants, c) end),
+        instrs,
+        outs
+      )
 
     %{
       kind: :segment,
-      key: {Executor, :segment, :erlang.md5(:erlang.term_to_binary(wire))},
+      key: {:segment, :erlang.md5(:erlang.term_to_binary(wire))},
       wire: wire,
       ins: step.ext,
       n_consts: length(step.used_consts),

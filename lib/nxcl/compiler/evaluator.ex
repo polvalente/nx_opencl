@@ -15,32 +15,47 @@ defmodule NxCL.Compiler.Evaluator do
   # An op the lowering cannot take raises `ArgumentError` ("does not yet lower op
   # ..."). Nothing runs on `Nx.BinaryBackend`.
 
+  import NxCL.Compiler.Lower.Shared,
+    only: [axes: 2, check_complex: 3, fit_axis: 6, monoid?: 1, push: 2]
+
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Evaluator.Steps
   alias NxCL.Compiler.Executor
-  alias NxCL.Compiler.Lower
   alias NxCL.Compiler.Lower.Block
   alias NxCL.Compiler.Lower.Contract
+  alias NxCL.Compiler.Lower.Shared
   alias NxCL.Compiler.Ops
   alias NxCL.Compiler.Program
+  alias NxCL.Devices
 
   @doc """
   Builds and runs a program. `out` is the result template (a tensor or a
   container of them), `tensors` the operands. `build` gets the builder state and
   the operands as `{ref, tensor}` pairs and returns `{state, ref | [ref]}`.
+
+  The program runs on the device the operands live on. Operands on two
+  contexts raise `ArgumentError`. With no operand on a device, `opts[:device]`
+  names the device (default 0); a tensor from another backend goes up to it.
   """
-  @spec run(Nx.Container.t(), [T.t()], (map(), [{term(), T.t()}] -> {map(), term()})) ::
-          Nx.Container.t()
-  def run(out, tensors, build) do
-    tensors = Enum.map(tensors, &device/1)
+  @spec run(
+          Nx.Container.t(),
+          [Shared.tensor()],
+          (Shared.builder(), [{term(), Shared.tensor()}] -> {Shared.builder(), term()}),
+          keyword()
+        ) :: Nx.Container.t()
+  def run(out, tensors, build, opts \\ []) do
+    device_opts = device_opts(tensors, opts)
+    tensors = Enum.map(tensors, &device(&1, device_opts))
     operands = tensors |> Enum.with_index() |> Enum.map(fn {t, i} -> {{:input, i}, t} end)
 
-    {st, out_refs} = build.(%{instrs: [], constants: [], host_calls: []}, operands)
+    {st, out_refs} = build.(%{instrs: [], constants: []}, operands)
     program = program(st, tensors, out, List.wrap(out_refs))
-    opts = device_opts(tensors)
-    buffers = Executor.run_buffers(program, Enum.map(tensors, &{:buffer, &1.data.ref}), opts)
-    ctx = NxCL.Devices.fetch!(opts).ctx
+
+    buffers =
+      Executor.run_buffers(program, Enum.map(tensors, &{:buffer, &1.data.ref}), device_opts)
+
+    ctx = Devices.fetch!(device_opts).ctx
 
     {result, []} =
       Composite.traverse(out, buffers, fn t, [buf | rest] ->
@@ -57,26 +72,56 @@ defmodule NxCL.Compiler.Evaluator do
       inputs: Enum.map(tensors, &{&1.type, &1.shape}),
       constants: Enum.reverse(st.constants),
       instructions: instructions,
-      host_calls: Enum.reverse(st.host_calls),
       outputs: out_refs,
       output_template: Composite.traverse(out, &Nx.to_template/1),
-      ref_counts: Lower.ref_counts(instructions, out_refs)
+      ref_counts: Shared.ref_counts(instructions, out_refs)
     }
   end
 
-  # A tensor from another backend goes to the device first.
-  # The device of the first operand that sits on one; the default device otherwise.
-  defp device_opts(tensors) do
-    with %T{data: %NxCL.Backend{ctx: ctx}} <- List.first(tensors),
-         %{key: key} <- NxCL.Devices.for_ctx(ctx) do
-      [device: key]
-    else
-      _ -> []
+  @doc """
+  The `[device: key]` option for a run over `tensors`. The tensors already on a
+  device decide it, and they must share one context. With none, `opts[:device]`
+  (default 0) decides. Raises `ArgumentError` on a mismatch.
+  """
+  @spec device_opts([Shared.tensor()], keyword()) :: [device: Devices.key()]
+  def device_opts(tensors, opts \\ []) do
+    ctxs = for %T{data: %NxCL.Backend{ctx: ctx}} <- tensors, uniq: true, do: ctx
+
+    case ctxs do
+      [] -> [device: Devices.key(opts)]
+      [ctx] -> [device: device_key!(ctx, opts)]
+      _many -> raise ArgumentError, mixed_contexts_message(ctxs)
     end
   end
 
-  defp device(%T{data: %NxCL.Backend{}} = t), do: t
-  defp device(%T{} = t), do: NxCL.Backend.from_binary(t, Nx.to_binary(t), [])
+  defp device_key!(ctx, opts) do
+    case Devices.for_ctx(ctx) do
+      %{key: key} ->
+        if Keyword.has_key?(opts, :device) and Devices.key(opts) != key do
+          raise ArgumentError,
+                "the operands live on device #{inspect(key)}, not on the requested " <>
+                  "device #{inspect(Devices.key(opts))}; move them with Nx.backend_transfer/3"
+        end
+
+        key
+
+      nil ->
+        raise ArgumentError, "a tensor lives on an OpenCL context that NxCL.Devices does not know"
+    end
+  end
+
+  defp mixed_contexts_message(ctxs) do
+    keys = for ctx <- ctxs, do: with(%{key: key} <- Devices.for_ctx(ctx), do: key)
+
+    "the operands live on different OpenCL contexts (devices #{inspect(keys)}); " <>
+      "move them to one device with Nx.backend_transfer/3 first"
+  end
+
+  # A tensor from another backend goes up to the run's device.
+  defp device(%T{data: %NxCL.Backend{}} = t, _device_opts), do: t
+
+  defp device(%T{} = t, device_opts),
+    do: NxCL.Backend.from_binary(t, Nx.to_binary(t), device_opts)
 
   # -- Operand helpers ----------------------------------------------------
 
@@ -87,14 +132,14 @@ defmodule NxCL.Compiler.Evaluator do
   defp conform(st, {ref, %T{shape: from, type: type}}, shape) do
     rank = tuple_size(shape)
     axes = Enum.to_list((rank - tuple_size(from))..(rank - 1)//1)
-    Lower.push(st, Ops.broadcast(ref, type, shape, axes))
+    push(st, Ops.broadcast(ref, type, shape, axes))
   end
 
   defp conform_all(st, operands, shape), do: map_state(st, operands, &conform(&1, &2, shape))
 
   # Casts an operand to `type` with an `as_type` instruction.
   defp cast(st, {ref, %T{type: type}}, type), do: {st, ref}
-  defp cast(st, {ref, %T{} = x}, type), do: Lower.push(st, Ops.as_type(ref, type, x.shape))
+  defp cast(st, {ref, %T{} = x}, type), do: push(st, Ops.as_type(ref, type, x.shape))
 
   defp cast_all(st, operands, type), do: map_state(st, operands, &cast(&1, &2, type))
 
@@ -110,225 +155,242 @@ defmodule NxCL.Compiler.Evaluator do
 
   defp refs(operands), do: Enum.map(operands, &elem(&1, 0))
 
-  # A start index is a scalar tensor or an integer; an integer goes up as an
-  # `s64` scalar so every start index is an operand and the program caches by shape.
+  # A start index is a scalar tensor or an integer; an integer becomes an `s64`
+  # scalar, uploaded with the other operands, so every start index is an operand
+  # and the program caches by shape.
   defp start_tensor(%T{} = t), do: t
 
   defp start_tensor(i) when is_integer(i),
-    do: NxCL.Backend.from_binary(Nx.template({}, {:s, 64}), <<i::signed-64-native>>, [])
+    do: Nx.tensor(i, type: {:s, 64}, backend: Nx.BinaryBackend)
 
   # -- Elementwise ----------------------------------------------------------
 
-  @spec unary(atom(), T.t(), T.t()) :: T.t()
+  @spec unary(atom(), Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def unary(op, out, tensor) do
-    Lower.check_complex(op, out, [tensor])
+    check_complex(op, out, [tensor])
 
     run(out, [tensor], fn st, [x] ->
       {st, [rx]} = conform_all(st, [x], out.shape)
-      Lower.push(st, Ops.unary(op, rx, out.type, out.shape))
+      push(st, Ops.unary(op, rx, out.type, out.shape))
     end)
   end
 
-  @spec binary(atom(), T.t(), T.t(), T.t()) :: T.t()
+  @spec binary(atom(), Shared.tensor(), Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def binary(op, out, left, right) do
-    Lower.check_complex(op, out, [left, right])
+    check_complex(op, out, [left, right])
 
     run(out, [left, right], fn st, [l, r] ->
       {st, [rl, rr]} = conform_all(st, [l, r], out.shape)
-      Lower.push(st, Ops.binary(op, rl, rr, out.type, out.shape))
+      push(st, Ops.binary(op, rl, rr, out.type, out.shape))
     end)
   end
 
-  @spec as_type(T.t(), T.t()) :: T.t()
+  @spec as_type(Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def as_type(out, tensor) do
     run(out, [tensor], fn st, [x] ->
       {st, [rx]} = conform_all(st, [x], out.shape)
-      Lower.push(st, Ops.as_type(rx, out.type, out.shape))
+      push(st, Ops.as_type(rx, out.type, out.shape))
     end)
   end
 
-  @spec bitcast(T.t(), T.t()) :: T.t()
+  @spec bitcast(Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def bitcast(out, tensor) do
-    Lower.check_complex(:bitcast, out, [tensor])
+    check_complex(:bitcast, out, [tensor])
 
     run(out, [tensor], fn st, [x] ->
       {st, [rx]} = conform_all(st, [x], out.shape)
-      Lower.push(st, Ops.bitcast(rx, out.type, out.shape))
+      push(st, Ops.bitcast(rx, out.type, out.shape))
     end)
   end
 
-  @spec select(T.t(), T.t(), T.t(), T.t()) :: T.t()
+  @spec select(Shared.tensor(), Shared.tensor(), Shared.tensor(), Shared.tensor()) ::
+          Shared.tensor()
   def select(out, pred, on_true, on_false) do
     run(out, [pred, on_true, on_false], fn st, operands ->
       {st, [rp, rt, rf]} = conform_all(st, operands, out.shape)
-      Lower.push(st, Ops.select(rp, rt, rf, out.type, out.shape))
+      push(st, Ops.select(rp, rt, rf, out.type, out.shape))
     end)
   end
 
-  @spec clip(T.t(), T.t(), T.t(), T.t()) :: T.t()
+  @spec clip(Shared.tensor(), Shared.tensor(), Shared.tensor(), Shared.tensor()) ::
+          Shared.tensor()
   def clip(out, tensor, min, max) do
-    Lower.check_complex(:clip, out, [tensor, min, max])
+    check_complex(:clip, out, [tensor, min, max])
 
     run(out, [tensor, min, max], fn st, operands ->
       {st, [rx, low, high]} = conform_all(st, operands, out.shape)
-      Lower.push(st, Ops.clip(rx, low, high, out.type, out.shape))
+      push(st, Ops.clip(rx, low, high, out.type, out.shape))
     end)
   end
 
   # -- Dot and conv -----------------------------------------------------------
 
-  @spec dot(T.t(), T.t(), [integer()], [integer()], T.t(), [integer()], [integer()]) :: T.t()
+  @spec dot(
+          Shared.tensor(),
+          Shared.tensor(),
+          [integer()],
+          [integer()],
+          Shared.tensor(),
+          [integer()],
+          [integer()]
+        ) :: Shared.tensor()
   def dot(out, left, contract_l, batch_l, right, contract_r, batch_r) do
     run(out, [left, right], fn st, [l, r] ->
       {st, rl} = cast(st, l, out.type)
       {st, rr} = cast(st, r, out.type)
       sides = {{left.shape, contract_l, batch_l}, {right.shape, contract_r, batch_r}}
-      Contract.dot(st, &Lower.push/2, out, {rl, rr}, sides)
+      Contract.dot(st, out, {rl, rr}, sides)
     end)
   end
 
-  @spec conv(T.t(), T.t(), T.t(), keyword()) :: T.t()
+  @spec conv(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def conv(out, tensor, kernel, opts) do
     run(out, [tensor, kernel], fn st, [x, w] ->
       {st, rx} = cast(st, x, out.type)
       {st, rw} = cast(st, w, out.type)
-      Contract.conv(st, &Lower.push/2, out, {{rx, tensor.shape}, {rw, kernel.shape}}, opts)
+      Contract.conv(st, out, {{rx, tensor.shape}, {rw, kernel.shape}}, opts)
     end)
   end
 
   # -- Shape ------------------------------------------------------------------
 
-  @spec alias_op(:reshape | :squeeze, T.t(), T.t()) :: T.t()
+  @spec alias_op(:reshape | :squeeze, Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def alias_op(op, out, tensor) do
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.alias_op(op, ref, out.type, out.shape))
+      push(st, Ops.alias_op(op, ref, out.type, out.shape))
     end)
   end
 
-  @spec broadcast(T.t(), T.t(), [non_neg_integer()]) :: T.t()
+  @spec broadcast(Shared.tensor(), Shared.tensor(), [non_neg_integer()]) :: Shared.tensor()
   def broadcast(out, tensor, axes) do
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.broadcast(ref, out.type, out.shape, axes))
+      push(st, Ops.broadcast(ref, out.type, out.shape, axes))
     end)
   end
 
-  @spec transpose(T.t(), T.t(), [non_neg_integer()]) :: T.t()
+  @spec transpose(Shared.tensor(), Shared.tensor(), [non_neg_integer()]) :: Shared.tensor()
   def transpose(out, tensor, axes) do
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.transpose(ref, out.type, out.shape, axes))
+      push(st, Ops.transpose(ref, out.type, out.shape, axes))
     end)
   end
 
-  @spec reverse(T.t(), T.t(), [non_neg_integer()]) :: T.t()
+  @spec reverse(Shared.tensor(), Shared.tensor(), [non_neg_integer()]) :: Shared.tensor()
   def reverse(out, tensor, axes) do
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.reverse(ref, out.type, out.shape, axes))
+      push(st, Ops.reverse(ref, out.type, out.shape, axes))
     end)
   end
 
-  @spec slice(T.t(), T.t(), list(), [non_neg_integer()], [pos_integer()]) :: T.t()
+  @spec slice(Shared.tensor(), Shared.tensor(), list(), [non_neg_integer()], [pos_integer()]) ::
+          Shared.tensor()
   def slice(out, tensor, starts, lengths, strides) do
     run(out, [tensor | Enum.map(starts, &start_tensor/1)], fn st, [{ref, _} | starts] ->
-      Lower.push(
+      push(
         st,
         Ops.slice(ref, refs(starts), out.type, out.shape, lengths, strides)
       )
     end)
   end
 
-  @spec put_slice(T.t(), T.t(), list(), T.t()) :: T.t()
+  @spec put_slice(Shared.tensor(), Shared.tensor(), list(), Shared.tensor()) :: Shared.tensor()
   def put_slice(out, tensor, starts, slice) do
     run(out, [tensor, slice | Enum.map(starts, &start_tensor/1)], fn st, [x, s | starts] ->
       {st, rx} = cast(st, x, out.type)
       {st, rs} = cast(st, s, out.type)
-      Lower.push(st, Ops.put_slice(rx, rs, refs(starts), out.type, out.shape))
+      push(st, Ops.put_slice(rx, rs, refs(starts), out.type, out.shape))
     end)
   end
 
-  @spec pad(T.t(), T.t(), T.t(), list()) :: T.t()
+  @spec pad(Shared.tensor(), Shared.tensor(), Shared.tensor(), list()) :: Shared.tensor()
   def pad(out, tensor, value, config) do
     run(out, [tensor, value], fn st, [x, v] ->
       {st, rx} = cast(st, x, out.type)
       {st, rv} = cast(st, v, out.type)
-      Lower.push(st, Ops.pad(rx, rv, out.type, out.shape, config))
+      push(st, Ops.pad(rx, rv, out.type, out.shape, config))
     end)
   end
 
-  @spec join(:concatenate | :stack, T.t(), [T.t()], non_neg_integer()) :: T.t()
+  @spec join(:concatenate | :stack, Shared.tensor(), [Shared.tensor()], non_neg_integer()) ::
+          Shared.tensor()
   def join(op, out, tensors, axis) do
     run(out, tensors, fn st, operands ->
       {st, refs} = cast_all(st, operands, out.type)
-      Lower.push(st, Ops.join(op, refs, out.type, out.shape, axis))
+      push(st, Ops.join(op, refs, out.type, out.shape, axis))
     end)
   end
 
-  @spec iota(T.t(), non_neg_integer() | nil) :: T.t()
-  def iota(out, axis) do
-    run(out, [], fn st, [] -> Lower.push(st, Ops.iota(out.type, out.shape, axis)) end)
+  # The creation ops take the backend options (`:device`) and build on that device.
+  @spec iota(Shared.tensor(), non_neg_integer() | nil, keyword()) :: Shared.tensor()
+  def iota(out, axis, opts \\ []) do
+    run(out, [], fn st, [] -> push(st, Ops.iota(out.type, out.shape, axis)) end, opts)
   end
 
-  @spec eye(T.t()) :: T.t()
-  def eye(out) do
-    run(out, [], fn st, [] -> Lower.push(st, Ops.eye(out.type, out.shape)) end)
+  @spec eye(Shared.tensor(), keyword()) :: Shared.tensor()
+  def eye(out, opts \\ []) do
+    run(out, [], fn st, [] -> push(st, Ops.eye(out.type, out.shape)) end, opts)
   end
 
   # The number goes up as one scalar; a shape broadcasts it on the device. The
   # program holds no value, so one program serves every number.
-  @spec constant(T.t(), number() | Complex.t() | atom()) :: T.t()
-  def constant(%T{shape: {}} = out, number), do: scalar(out, number)
+  @spec constant(Shared.tensor(), number() | Complex.t() | atom(), keyword()) :: Shared.tensor()
+  def constant(out, number, opts \\ [])
 
-  def constant(out, number) do
-    run(out, [scalar(%{out | shape: {}, names: []}, number)], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.broadcast(ref, out.type, out.shape, []))
-    end)
+  def constant(%T{shape: {}} = out, number, opts) do
+    scalar = scalar(out, number)
+    NxCL.Backend.from_binary(out, Nx.to_binary(scalar), device_opts([], opts))
   end
 
-  defp scalar(out, number) do
-    binary =
-      %{out | shape: {}, names: []}
-      |> then(&Nx.tensor(number, type: &1.type, backend: Nx.BinaryBackend))
-      |> Nx.to_binary()
-
-    NxCL.Backend.from_binary(out, binary, [])
+  def constant(out, number, opts) do
+    run(
+      out,
+      [scalar(out, number)],
+      fn st, [{ref, _}] -> push(st, Ops.broadcast(ref, out.type, out.shape, [])) end,
+      opts
+    )
   end
+
+  # The number as a scalar tensor on the host; `run/4` uploads it with the other operands.
+  defp scalar(out, number), do: Nx.tensor(number, type: out.type, backend: Nx.BinaryBackend)
 
   # -- Reductions, scans, windows, sort -----------------------------------------
 
-  @spec reduce(atom(), T.t(), T.t(), keyword()) :: T.t()
+  @spec reduce(atom(), Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def reduce(op, out, tensor, opts) do
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(
+      push(
         st,
-        Ops.reduce(op, ref, out.type, out.shape, Lower.axes(tensor, opts[:axes]))
+        Ops.reduce(op, ref, out.type, out.shape, axes(tensor, opts[:axes]))
       )
     end)
   end
 
-  @spec arg_reduce(atom(), T.t(), T.t(), keyword()) :: T.t()
+  @spec arg_reduce(atom(), Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def arg_reduce(op, out, tensor, opts) do
-    axes = Lower.axes(tensor, opts[:axis] && [opts[:axis]])
+    axes = axes(tensor, opts[:axis] && [opts[:axis]])
 
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.arg_reduce(op, ref, out.type, out.shape, opts[:tie_break], axes))
+      push(st, Ops.arg_reduce(op, ref, out.type, out.shape, opts[:tie_break], axes))
     end)
   end
 
   # A generic `reduce`: the function body is read as steps, as in the lowering.
-  @spec reduce_fun(T.t(), T.t(), T.t(), keyword(), function()) :: T.t()
+  @spec reduce_fun(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword(), function()) ::
+          Shared.tensor()
   def reduce_fun(out, tensor, acc, opts, fun) do
     steps = Steps.trace(fun, out.type, :reduce)
-    axes = Lower.axes(tensor, opts[:axes])
+    axes = axes(tensor, opts[:axes])
 
     run(out, [tensor, acc], fn st, [{x, _}, {init, _} = acc_operand] ->
-      if Lower.monoid?(steps) do
+      if monoid?(steps) do
         # The initial accumulator folds in afterwards: `fun(total, init)`.
         {st, total} =
-          Lower.push(st, Ops.reduce_steps([x], out.type, out.shape, steps, axes))
+          push(st, Ops.reduce_steps([x], out.type, out.shape, steps, axes))
 
         {st, init} = conform(st, acc_operand, out.shape)
         fold(st, steps, [total, init], out)
       else
-        Lower.push(st, Ops.reduce_steps([x, init], out.type, out.shape, steps, axes))
+        push(st, Ops.reduce_steps([x, init], out.type, out.shape, steps, axes))
       end
     end)
   end
@@ -338,21 +400,22 @@ defmodule NxCL.Compiler.Evaluator do
     {st, refs} =
       Enum.reduce(steps, {st, refs}, fn {op, a, b}, {st, refs} ->
         instr = Ops.binary(op, Enum.at(refs, a), Enum.at(refs, b), out.type, out.shape)
-        {st, ref} = Lower.push(st, instr)
+        {st, ref} = push(st, instr)
         {st, refs ++ [ref]}
       end)
 
     {st, List.last(refs)}
   end
 
-  @spec scan(atom(), T.t(), T.t(), non_neg_integer(), boolean()) :: T.t()
+  @spec scan(atom(), Shared.tensor(), Shared.tensor(), non_neg_integer(), boolean()) ::
+          Shared.tensor()
   def scan(op, out, tensor, axis, reverse) do
     run(out, [tensor], fn st, [{ref, _}] ->
-      Lower.push(st, Ops.scan(op, ref, out.type, out.shape, axis, reverse))
+      push(st, Ops.scan(op, ref, out.type, out.shape, axis, reverse))
     end)
   end
 
-  @spec window(atom(), T.t(), T.t(), tuple(), keyword()) :: T.t()
+  @spec window(atom(), Shared.tensor(), Shared.tensor(), tuple(), keyword()) :: Shared.tensor()
   def window(op, out, tensor, dims, opts) do
     run(out, [tensor], fn st, [{ref, _}] ->
       instr =
@@ -367,74 +430,97 @@ defmodule NxCL.Compiler.Evaluator do
           opts[:padding]
         )
 
-      Lower.push(st, instr)
+      push(st, instr)
     end)
   end
 
-  @spec window_reduce(T.t(), T.t(), T.t(), tuple(), keyword(), function()) :: T.t()
+  @spec window_reduce(
+          Shared.tensor(),
+          Shared.tensor(),
+          Shared.tensor(),
+          tuple(),
+          keyword(),
+          function()
+        ) :: Shared.tensor()
   def window_reduce(out, tensor, acc, dims, opts, fun) do
     steps = Steps.trace(fun, out.type, :window_reduce)
     window = {dims, opts[:strides], opts[:window_dilations], opts[:padding]}
 
     run(out, [tensor, acc], fn st, [{x, _}, {init, _}] ->
-      Lower.push(st, Ops.window_reduce(x, init, out.type, out.shape, steps, window))
+      push(st, Ops.window_reduce(x, init, out.type, out.shape, steps, window))
     end)
   end
 
-  @spec window_scatter(atom(), T.t(), T.t(), T.t(), T.t(), tuple(), keyword()) :: T.t()
+  @spec window_scatter(
+          atom(),
+          Shared.tensor(),
+          Shared.tensor(),
+          Shared.tensor(),
+          Shared.tensor(),
+          tuple(),
+          keyword()
+        ) :: Shared.tensor()
   def window_scatter(op, out, tensor, source, init, dims, opts) do
     run(out, [tensor, source, init], fn st, [{x, _}, {s, _}, {i, _}] ->
       window = {dims, opts[:strides], opts[:padding]}
-      Lower.push(st, Ops.window_scatter(op, x, s, i, out.type, out.shape, window))
+      push(st, Ops.window_scatter(op, x, s, i, out.type, out.shape, window))
     end)
   end
 
-  @spec sort(:sort | :argsort, T.t(), T.t(), keyword()) :: T.t()
+  @spec sort(:sort | :argsort, Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def sort(op, out, tensor, opts) do
     run(out, [tensor], fn st, [{ref, _}] ->
       instr = Ops.sort(op, ref, out.type, out.shape, opts[:axis] || 0, opts[:direction])
-      Lower.push(st, instr)
+      push(st, instr)
     end)
   end
 
   # -- Indexing ---------------------------------------------------------------
 
-  @spec gather(T.t(), T.t(), T.t(), keyword()) :: T.t()
+  @spec gather(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def gather(out, tensor, indices, opts) do
     run(out, [tensor, indices], fn st, [{x, _}, {i, _}] ->
-      Lower.push(st, Ops.gather(x, i, out.type, out.shape, opts[:axes]))
+      push(st, Ops.gather(x, i, out.type, out.shape, opts[:axes]))
     end)
   end
 
-  @spec indexed(:indexed_add | :indexed_put, T.t(), T.t(), T.t(), T.t(), keyword()) :: T.t()
+  @spec indexed(
+          :indexed_add | :indexed_put,
+          Shared.tensor(),
+          Shared.tensor(),
+          Shared.tensor(),
+          Shared.tensor(),
+          keyword()
+        ) :: Shared.tensor()
   def indexed(op, out, tensor, indices, updates, opts) do
     run(out, [tensor, indices, updates], fn st, [x, {i, _}, u] ->
       {st, rx} = cast(st, x, out.type)
       {st, ru} = cast(st, u, out.type)
-      Lower.push(st, Ops.indexed(op, {rx, i, ru}, out.type, out.shape, opts[:axes]))
+      push(st, Ops.indexed(op, {rx, i, ru}, out.type, out.shape, opts[:axes]))
     end)
   end
 
   # -- Linear algebra and FFT ---------------------------------------------------
 
-  @spec triangular_solve(T.t(), T.t(), T.t(), keyword()) :: T.t()
+  @spec triangular_solve(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword()) ::
+          Shared.tensor()
   def triangular_solve(out, a, b, opts) do
     run(out, [a, b], fn st, [oa, ob] ->
       {st, ra} = cast(st, oa, out.type)
       {st, rb} = cast(st, ob, out.type)
-      Lower.push(st, Ops.triangular_solve(ra, rb, out.type, out.shape, opts))
+      push(st, Ops.triangular_solve(ra, rb, out.type, out.shape, opts))
     end)
   end
 
   # Nx pads or crops the axis to `:length`; so does the lowering, then one transform.
-  @spec fft(:fft | :ifft, T.t(), T.t(), keyword()) :: T.t()
+  @spec fft(:fft | :ifft, Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def fft(op, out, tensor, opts) do
     axis = opts[:axis]
 
     run(out, [tensor], fn st, [x] ->
       {st, rx} = cast(st, x, out.type)
-      {st, rx} = Lower.fit_axis(st, rx, tensor.shape, out.type, out.shape, axis)
-      Lower.push(st, Ops.fft(op, rx, out.type, out.shape, axis))
+      {st, rx} = fit_axis(st, rx, tensor.shape, out.type, out.shape, axis)
+      push(st, Ops.fft(op, rx, out.type, out.shape, axis))
     end)
   end
 
@@ -444,17 +530,18 @@ defmodule NxCL.Compiler.Evaluator do
   Runs an `Nx.Block`. The decision table of `NxCL.Compiler.Lower.Block` picks the way: a
   native instruction or the block's default.
   """
-  @spec block(struct(), Nx.Container.t(), [T.t()], function()) :: Nx.Container.t()
+  @spec block(struct(), Nx.Container.t(), [Shared.tensor()], function()) :: Nx.Container.t()
   def block(struct, out, args, fun) do
     case Block.decision(struct) do
       :native -> native_block(struct, out, args)
-      :default -> with_device_default(fn -> apply(fun, [struct | args]) end)
+      :default -> with_device_default(device_opts(args), fn -> apply(fun, [struct | args]) end)
     end
   end
 
   # The default may build constants and loop state (a `while` init, an `iota`). They
   # must live on the device with the arguments, not on the caller's default backend.
-  defp with_device_default(fun), do: Nx.with_default_backend(NxCL.Backend, fun)
+  defp with_device_default(device_opts, fun),
+    do: Nx.with_default_backend({NxCL.Backend, device_opts}, fun)
 
   defp native_block(%Nx.Block.LogicalNot{}, out, [x]), do: unary_block(:logical_not, out, x)
   defp native_block(%Nx.Block.Phase{}, out, [x]), do: unary_block(:phase, out, x)
@@ -462,12 +549,12 @@ defmodule NxCL.Compiler.Evaluator do
   defp native_block(%Nx.Block.LinAlg.Cholesky{}, out, [x]) do
     run(out, [x], fn st, [x] ->
       {st, rx} = cast(st, x, out.type)
-      Lower.push(st, Ops.cholesky(rx, out.type, out.shape))
+      push(st, Ops.cholesky(rx, out.type, out.shape))
     end)
   end
 
   defp native_block(%{__struct__: mod, axis: axis, reverse: reverse}, out, [x]) do
-    case Map.fetch(Lower.scan_blocks(), mod) do
+    case Map.fetch(Shared.scan_blocks(), mod) do
       {:ok, op} -> scan(op, out, x, axis, reverse)
       :error -> raise ArgumentError, "does not yet lower op #{inspect(mod)} (a native block)"
     end
@@ -476,7 +563,7 @@ defmodule NxCL.Compiler.Evaluator do
   defp unary_block(op, out, x) do
     run(out, [x], fn st, [x] ->
       {st, [rx]} = conform_all(st, [x], out.shape)
-      Lower.push(st, Ops.unary(op, rx, out.type, out.shape))
+      push(st, Ops.unary(op, rx, out.type, out.shape))
     end)
   end
 end

@@ -220,7 +220,6 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
   describe "device registry" do
     test "one context per device, shared by every caller" do
-      assert Devices.ctx() == NxCL.Compiler.Executor.ctx()
       assert {:ok, %{ctx: ctx, key: {nil, 0}}} = Devices.fetch(device: 0)
       assert ctx == Devices.ctx()
       assert %{key: {nil, 0}} = Devices.for_ctx(ctx)

@@ -5,9 +5,9 @@ defmodule NxCL.Compiler do
   Receives a computation graph from `defn`, lowers it to an `NxCL.Compiler.Program`
   (`NxCL.Compiler.Lower`), and runs the program on the GPU.
 
-  Unlike the eager backend (`NxCL.Backend`) which dispatches one op at
-  a time, the compiler sees the entire computation graph up front. This
-  enables optimisations like buffer reuse via liveness analysis.
+  Unlike the eager backend (`NxCL.Backend`), which runs one op at a time, the
+  compiler sees the whole graph up front. Results stay on the device between
+  ops, and each buffer is freed after its last reader.
 
   ## Usage
 
@@ -99,6 +99,8 @@ defmodule NxCL.Compiler do
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
     program = %Program{program | signature: Program.signature(program)}
+    # Captured tensors go up once here; each run reuses the buffers.
+    program = Executor.with_resident_captures(program, run_opts)
 
     fn [args] ->
       [Executor.run(program, args, run_opts)]

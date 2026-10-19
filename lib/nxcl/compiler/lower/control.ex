@@ -18,18 +18,20 @@ defmodule NxCL.Compiler.Lower.Control do
   with a tuple type maps to `{:tuple, refs}`.
   """
 
-  alias Nx.Defn.Composite
+  import NxCL.Compiler.Lower.Shared, only: [leaves: 1]
+
   alias Nx.Defn.Tree
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Instruction
   alias NxCL.Compiler.Lower
+  alias NxCL.Compiler.Lower.Shared
 
   @doc """
   Dependencies of a node for `NxCL.Compiler.Tree.post_order/2`. A node the scope has a
   ref for stops the walk. A `cond` depends on the outer values its clauses read,
   not on its clause bodies.
   """
-  @spec scope_deps(map(), map()) :: {:ok, [map()]} | :default
+  @spec scope_deps(Shared.tensor(), Lower.state()) :: {:ok, [Shared.tensor()]} | :default
   def scope_deps(%T{data: %Nx.Defn.Expr{id: id}}, %{refs: refs}) when is_map_key(refs, id),
     do: {:ok, []}
 
@@ -39,7 +41,7 @@ defmodule NxCL.Compiler.Lower.Control do
   def scope_deps(_node, _state), do: :default
 
   @doc "Lowers a `cond` node: one instruction, nested clause bodies, explicit operands."
-  @spec cond_node(map(), map()) :: map()
+  @spec cond_node(Lower.state(), Shared.tensor()) :: Lower.state()
   def cond_node(state, %T{data: %Nx.Defn.Expr{id: id, args: [clauses, last]}} = node) do
     {operands, seeds} = bind(state, free_nodes(node, state.avail))
 
@@ -64,7 +66,7 @@ defmodule NxCL.Compiler.Lower.Control do
   end
 
   @doc "Lowers a `while` node: one instruction with nested `cond` and `body` instruction lists."
-  @spec while_node(map(), map()) :: map()
+  @spec while_node(Lower.state(), Shared.tensor()) :: Lower.state()
   def while_node(
         state,
         %T{data: %Nx.Defn.Expr{id: id, args: [initial, arg, pred, block]}} = node
@@ -99,19 +101,11 @@ defmodule NxCL.Compiler.Lower.Control do
   end
 
   defp put_outputs(state, id, node, instr) do
-    index = length(state.instrs)
-    refs = for k <- 0..(length(instr.out_type) - 1)//1, do: {:result, index, k}
-
-    ref =
-      case node.type do
-        {:tuple, _} -> {:tuple, refs}
-        _ -> hd(refs)
-      end
+    refs = Shared.result_refs(length(state.instrs), length(instr.out_type))
+    ref = Shared.node_ref(node, refs)
 
     %{state | instrs: [instr | state.instrs], refs: Map.put(state.refs, id, ref)}
   end
-
-  defp leaves(container), do: Composite.flatten_list([container])
 
   # -- Outer values of a cond ------------------------------------------------
 

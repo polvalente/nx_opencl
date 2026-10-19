@@ -15,9 +15,13 @@ defmodule NxCL.TestHelpers do
 
   @spec assert_floats_close([float()], [float()], float()) :: :ok
   def assert_floats_close(actual, expected, atol \\ 1.0e-5) do
-    pairs = Enum.zip(actual, expected)
+    if length(actual) != length(expected) do
+      raise ExUnit.AssertionError,
+        message:
+          "Float lists differ in length: #{length(actual)} actual, #{length(expected)} expected"
+    end
 
-    for {a, e} <- pairs do
+    for {a, e} <- Enum.zip(actual, expected) do
       diff = abs(a - e)
 
       unless diff <= atol do

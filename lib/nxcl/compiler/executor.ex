@@ -11,25 +11,13 @@ defmodule NxCL.Compiler.Executor do
   # Compiled programs and plans live in `NxCL.Compiler.ProgramCache`. A run uses the device and
   # queue its options name (`NxCL.Devices`).
   #
-  # Wire term sent to `NxCL.Native.compile_program/2`:
-  #
-  #     {[input], [capture], [const], [instr], [out_ref]}
-  #     input = {type, shape} | nil        (nil: the function never reads it)
-  #     capture = {type, shape}
-  #     const = {type, value}              (value: a number, :nan, :infinity, :neg_infinity,
-  #                                         or a {re, im} pair for a complex type)
-  #     instr = {op, [ref], out_type, out_shape, [attr]}
-  #     ref = {:input | :capture | :const | :result, index}
-  #
-  # A `batched_gemm` carries `[b, m, n, k]` as attrs. Buffers go to `eval_program/2` in the
-  # order inputs, captures, constants; constants go as `nil`, because Rust holds
-  # their values. The native side generates the kernel for each instruction from
-  # the op, the types and the shapes.
+  # The wire term sent to `NxCL.Native.compile_program/2` is built by
+  # `NxCL.Compiler.Executor.Wire`.
 
   alias Nx.Defn.Composite
   alias NxCL.Compiler.Executor.Host
   alias NxCL.Compiler.Executor.Plan
-  alias NxCL.Compiler.Instruction
+  alias NxCL.Compiler.Executor.Wire
   alias NxCL.Compiler.Program
   alias NxCL.Compiler.ProgramCache
   alias NxCL.Devices
@@ -54,6 +42,7 @@ defmodule NxCL.Compiler.Executor do
   @spec run_buffers(Program.t(), [(-> Nx.Tensor.t()) | {:buffer, reference()}], keyword()) ::
           [reference()]
   def run_buffers(%Program{} = program, args, opts \\ []) do
+    check_arg_count!(program, args)
     dev = Devices.fetch!(opts)
 
     case plan_for(dev, program) do
@@ -62,21 +51,53 @@ defmodule NxCL.Compiler.Executor do
     end
   end
 
+  defp check_arg_count!(%Program{inputs: inputs}, args) do
+    if length(args) != length(inputs) do
+      raise NxCL.CompilerError,
+        message: "expected #{length(inputs)} arguments, got #{length(args)}"
+    end
+  end
+
   defp run_simple(%{ctx: ctx} = dev, program, native, args) do
-    inputs =
-      program.inputs
-      |> Enum.with_index()
-      |> Enum.map(fn
-        {nil, _i} -> nil
-        {{_type, _shape}, i} -> to_buffer(ctx, Enum.at(args, i))
-      end)
-
-    captures = Enum.map(program.captures, &upload(ctx, &1))
-
     consts = Enum.map(program.constants, fn _ -> nil end)
 
-    eval!(dev, native, inputs ++ captures ++ consts)
+    eval!(
+      dev,
+      native,
+      input_buffers(ctx, program, args) ++ capture_buffers(ctx, program) ++ consts
+    )
   end
+
+  # One slot per program input, in order: the device buffer, or `nil` when the
+  # function never reads that argument.
+  defp input_buffers(ctx, %Program{inputs: inputs}, args) do
+    inputs
+    |> Enum.zip(args)
+    |> Enum.map(fn
+      {nil, _arg} -> nil
+      {_slot, arg} -> to_buffer(ctx, arg)
+    end)
+  end
+
+  defp capture_buffers(ctx, %Program{captures: captures}),
+    do: Enum.map(captures, &tensor_buffer(ctx, &1))
+
+  @doc """
+  Returns `program` with each captured tensor moved to the device `opts` name, so
+  a run reads the same buffer instead of uploading it again. A tensor already on
+  that device stays.
+  """
+  @spec with_resident_captures(Program.t(), keyword()) :: Program.t()
+  def with_resident_captures(%Program{} = program, opts \\ []) do
+    dev = Devices.fetch!(opts)
+
+    %Program{program | captures: Enum.map(program.captures, &resident(dev, &1))}
+  end
+
+  defp resident(%{ctx: ctx}, %Nx.Tensor{data: %NxCL.Backend{ctx: ctx}} = tensor), do: tensor
+
+  defp resident(%{key: key}, tensor),
+    do: NxCL.Backend.from_binary(tensor, Nx.to_binary(tensor), device: key)
 
   # One wait for all outputs: each blocking read costs a device round trip.
   defp read_outputs(program, ctx, outputs) do
@@ -104,27 +125,12 @@ defmodule NxCL.Compiler.Executor do
     container
   end
 
-  @doc "The context of the default device."
-  @spec ctx() :: reference()
-  def ctx(), do: Devices.ctx()
-
-  @doc """
-  Encodes a program as the term `NxCL.Native.compile_program/2` reads. Exposed
-  for tests of the native decoder.
-  """
-  @spec encode(Program.t()) :: tuple()
-  def encode(%Program{} = program) do
-    {Enum.map(program.inputs, &encode_slot/1), Enum.map(program.captures, &{&1.type, &1.shape}),
-     Enum.map(program.constants, &encode_const/1),
-     Enum.map(program.instructions, &encode_instruction/1), program.outputs}
-  end
-
   # The decoded program stays in `NxCL.Compiler.ProgramCache`, so a repeat call skips decoding
   # and kernel lookups. The key is the program's signature, so the wire term is
   # only built on a miss.
   defp compiled(dev, program) do
     key = {:program, dev.key, Program.signature(program)}
-    cached(dev, key, fn -> encode(program) end)
+    cached(dev, key, fn -> Wire.program(program) end)
   end
 
   defp cached(%{ctx: ctx}, key, wire) do
@@ -152,22 +158,21 @@ defmodule NxCL.Compiler.Executor do
 
   defp run_plan(%{ctx: ctx} = dev, plan, program, args) do
     captures =
-      for {t, i} <- Enum.with_index(program.captures),
-          into: %{},
-          do: {{:capture, i}, upload(ctx, t)}
+      ctx
+      |> capture_buffers(program)
+      |> Enum.with_index()
+      |> Map.new(fn {buf, i} -> {{:capture, i}, buf} end)
 
     shared = Map.merge(captures, const_buffers(dev, plan))
     env = %{dev: dev, ctx: ctx, shared: shared, host_calls: program.host_calls}
 
     table =
-      program.inputs
+      ctx
+      |> input_buffers(program, args)
       |> Enum.with_index()
       |> Enum.reduce(shared, fn
-        {nil, _i}, table ->
-          table
-
-        {{_type, _shape}, i}, table ->
-          Map.put(table, {:input, i}, to_buffer(ctx, Enum.at(args, i)))
+        {nil, _i}, table -> table
+        {buf, i}, table -> Map.put(table, {:input, i}, buf)
       end)
 
     run_scope(plan.scope, table, env)
@@ -265,6 +270,7 @@ defmodule NxCL.Compiler.Executor do
       |> NxCL.Native.buffer_read(div(bits, 8))
       |> NxCL.Native.ok!("could not read a predicate")
 
+    # Integer kinds compare the raw bytes with zero; `Nx.from_binary/2` is for floats.
     if kind in [:s, :u] do
       bytes != :binary.copy(<<0>>, byte_size(bytes))
     else
@@ -287,42 +293,13 @@ defmodule NxCL.Compiler.Executor do
     end
   end
 
-  defp encode_slot(nil), do: nil
-  defp encode_slot({type, shape}), do: {type, shape}
-
-  @doc false
-  @spec encode_const({term(), Nx.Type.t()}) :: {Nx.Type.t(), term()}
-  def encode_const({value, type})
-      when is_number(value) or value in [:nan, :infinity, :neg_infinity],
-      do: {type, value}
-
-  # A complex constant goes as a `{re, im}` pair.
-  def encode_const({%Complex{re: re, im: im}, type})
-      when (is_number(re) or re in [:nan, :infinity, :neg_infinity]) and
-             (is_number(im) or im in [:nan, :infinity, :neg_infinity]),
-      do: {type, {re, im}}
-
-  def encode_const({value, type}) do
-    raise NxCL.CompilerError,
-      message: "constant #{inspect(value)} of type #{inspect(type)} is not supported yet"
-  end
-
-  @doc false
-  @spec encode_instruction(Instruction.t()) :: tuple()
-  def encode_instruction(%Instruction{} = instr),
-    do: {instr.op, instr.operands, instr.out_type, instr.out_shape, instr.attrs}
-
   defp to_buffer(_ctx, {:buffer, ref}), do: ref
+  defp to_buffer(ctx, arg), do: tensor_buffer(ctx, arg.())
 
   # A tensor already on this device goes in as it is: no read back, no new upload.
-  defp to_buffer(ctx, arg) do
-    case arg.() do
-      %Nx.Tensor{data: %NxCL.Backend{ref: ref, ctx: ^ctx}} -> ref
-      tensor -> upload(ctx, tensor)
-    end
-  end
+  defp tensor_buffer(ctx, %Nx.Tensor{data: %NxCL.Backend{ref: ref, ctx: ctx}}), do: ref
 
-  defp upload(ctx, tensor),
+  defp tensor_buffer(ctx, tensor),
     do:
       ctx
       |> NxCL.Native.buffer_write(Nx.to_binary(tensor))

@@ -49,7 +49,10 @@ defmodule NxCL.Compiler.ProgramCache do
     end
   end
 
-  @doc "Drops every entry. A running call keeps what it uses."
+  @doc """
+  Drops every entry and the cache's hold on their device memory. A running call
+  keeps what it uses. Tests call it to start from an empty cache.
+  """
   @spec clear() :: :ok
   def clear() do
     :ets.select_delete(__MODULE__, [{{:_, :_, :_}, [], [true]}])

@@ -11,7 +11,7 @@ defmodule NxCL.Compiler.Evaluator.Steps do
   # and the trace turns that into the lowering's "does not yet lower op" error.
 
   alias Nx.Tensor, as: T
-  alias NxCL.Compiler.Lower
+  alias NxCL.Compiler.Lower.Shared
 
   defstruct [:var]
 
@@ -48,7 +48,7 @@ defmodule NxCL.Compiler.Evaluator.Steps do
 
   defp var(n, type), do: %T{type: type, shape: {}, names: [], data: %__MODULE__{var: n}}
 
-  for op <- Lower.step_ops() do
+  for op <- Shared.step_ops() do
     @doc false
     @spec unquote(op)(map(), map(), map()) :: map()
     # credo:disable-for-next-line Credo.Check.Readability.Specs

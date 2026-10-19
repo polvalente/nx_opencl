@@ -4,10 +4,11 @@ defmodule NxCL.Compiler.CompileCache do
   closure per `{key, input templates, device}`, so a repeat `Nx.Defn.jit/2` call
   of the same function skips the trace and the lowering.
 
-  Both limits default to `:infinity`:
+  `:max_items` defaults to 1024 and `:ttl` to `:infinity`. Either takes a
+  positive integer or `:infinity`:
 
       config :nx_opencl, NxCL.Compiler.CompileCache,
-        max_items: 1024,
+        max_items: 4096,
         ttl: :timer.minutes(30)
 
   Overflow evicts the oldest insert first. An entry that outlives `:ttl` counts
@@ -18,6 +19,8 @@ defmodule NxCL.Compiler.CompileCache do
   """
 
   use GenServer
+
+  @default_max_items 1024
 
   @doc false
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -102,13 +105,13 @@ defmodule NxCL.Compiler.CompileCache do
   defp now(), do: System.monotonic_time(:millisecond)
 
   defp ttl(%{ttl: ttl}) when ttl != nil, do: bound!(ttl, :ttl)
-  defp ttl(_state), do: bound!(config(:ttl), :ttl)
+  defp ttl(_state), do: bound!(config(:ttl, :infinity), :ttl)
 
   defp max_items(%{max_items: n}) when n != nil, do: bound!(n, :max_items)
-  defp max_items(_state), do: bound!(config(:max_items), :max_items)
+  defp max_items(_state), do: bound!(config(:max_items, @default_max_items), :max_items)
 
-  defp config(key) do
-    :nx_opencl |> Application.get_env(__MODULE__, []) |> Keyword.get(key, :infinity)
+  defp config(key, default) do
+    :nx_opencl |> Application.get_env(__MODULE__, []) |> Keyword.get(key, default)
   end
 
   defp bound!(:infinity, _key), do: :infinity

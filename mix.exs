@@ -69,7 +69,7 @@ defmodule NxOpencl.MixProject do
       {:nx, "~> 1.0"},
       {:axon, "~> 0.9", only: [:test]},
       {:rustler, "~> 0.36"},
-      {:nstandard, "~> 0.1"},
+      {:nstandard, "~> 0.1", only: [:dev, :test], runtime: false},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:ex_doc, "~> 0.31", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.0", only: [:dev, :test], runtime: false},

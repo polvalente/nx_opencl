@@ -9,12 +9,13 @@ defmodule NxCL.Compiler.Executor.Host do
   # outputs, with no copy and no upload.
 
   alias Nx.Defn.Composite
+  alias NxCL.Compiler.Program
 
   @doc """
   Runs `entry` (a `:host_calls` table entry) on `buffers`, the device buffers of
   its operands, and returns one buffer per output leaf.
   """
-  @spec run(map(), reference(), [reference()]) :: [reference()]
+  @spec run(Program.host_call(), reference(), [reference()]) :: [reference()]
   def run(%{kind: :io_call, fun: nil}, _ctx, buffers), do: buffers
 
   def run(%{kind: :io_call, fun: fun} = entry, _ctx, buffers) do
@@ -63,6 +64,6 @@ defmodule NxCL.Compiler.Executor.Host do
   defp actual_template(result) do
     Composite.traverse(result, &(&1 |> Nx.to_tensor() |> Nx.to_template()))
   rescue
-    _ -> result
+    _ in [ArgumentError, Protocol.UndefinedError] -> result
   end
 end

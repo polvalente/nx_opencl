@@ -19,12 +19,17 @@ defmodule NxCL.Compiler.Lower do
   `"does not yet lower op"`. It never falls back to another path.
   """
 
+  import NxCL.Compiler.Lower.Shared,
+    only: [axes: 2, check_complex: 3, fit_axis: 6, monoid?: 1, push: 2, put_const: 3]
+
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
+  alias NxCL.Compiler.Instruction
   alias NxCL.Compiler.Lower.Block
   alias NxCL.Compiler.Lower.Contract
   alias NxCL.Compiler.Lower.Control
   alias NxCL.Compiler.Lower.HostCall
+  alias NxCL.Compiler.Lower.Shared
   alias NxCL.Compiler.Ops
   alias NxCL.Compiler.Program
   alias NxCL.Compiler.Tree
@@ -33,34 +38,33 @@ defmodule NxCL.Compiler.Lower do
   @arg_ops [:argmax, :argmin]
   @window_ops [:window_sum, :window_product, :window_max, :window_min]
   @scatter_ops [:window_scatter_max, :window_scatter_min]
-  @scan_blocks %{
-    Nx.Block.CumulativeSum => :cumulative_sum,
-    Nx.Block.CumulativeProduct => :cumulative_product,
-    Nx.Block.CumulativeMin => :cumulative_min,
-    Nx.Block.CumulativeMax => :cumulative_max
-  }
-
-  @doc false
-  @spec scan_blocks() :: %{module() => atom()}
-  def scan_blocks(), do: @scan_blocks
-
-  # Binary ops a `reduce` body may hold: the result has the operand type.
-  @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
-               bitwise_or bitwise_xor left_shift right_shift)a
-
-  @doc false
-  @spec step_ops() :: [atom()]
-  def step_ops(), do: @step_ops
+  @scan_blocks Shared.scan_blocks()
+  @step_ops Shared.step_ops()
 
   @unary_ops Ops.unary_ops()
   @binary_ops Ops.binary_ops()
 
-  # Ops Nx rejects on complex tensors (probed against Nx 1.0 on `c64`). Nx raises
-  # while tracing, so these raise here only for a graph built another way.
-  @complex_rejected ~w(atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
-                       count_leading_zeros erf erf_inv erfc floor greater greater_equal
-                       left_shift less less_equal max min population_count quotient remainder
-                       right_shift round)a
+  @typedoc "What a node id maps to: a ref, or the refs of a tuple-typed node."
+  @type node_ref :: Instruction.ref() | {:tuple, [node_ref()]}
+
+  @typedoc """
+  The lowering state. `:inputs` maps argument positions to `{type, shape}`;
+  `:captures`, `:constants`, `:instrs` and `:host_calls` are built in reverse;
+  `:refs` maps node ids to refs; `:avail` and `:outer` hold the node ids of the
+  current and parent scopes; `:depth` counts nested bodies.
+  """
+  @type state :: %{
+          inputs: %{non_neg_integer() => {Nx.Type.t(), tuple()}},
+          captures: [Nx.Tensor.t()],
+          constants: [{term(), Nx.Type.t()}],
+          instrs: [Instruction.t()],
+          host_calls: [Program.host_call()],
+          refs: %{reference() => node_ref()},
+          avail: %{reference() => term()},
+          outer: %{reference() => term()},
+          depth: non_neg_integer(),
+          scope: :root | :sub
+        }
 
   @doc """
   Lowers `output`, the result of tracing a function with `num_inputs`
@@ -106,21 +110,22 @@ defmodule NxCL.Compiler.Lower do
       host_calls: Enum.reverse(state.host_calls),
       outputs: outputs,
       output_template: Composite.traverse(output, &Nx.to_template/1),
-      ref_counts: ref_counts(instructions, outputs)
+      ref_counts: Shared.ref_counts(instructions, outputs)
     }
   end
 
   # `while` and `cond` bodies nest; a deeper graph raises instead of exhausting the stack.
   @max_depth 64
 
-  @doc false
-  # Lowers `roots` as a body of `parent`: `{instructions, outputs}`. `seeds` maps
-  # node ids to the refs (`{:carry, i}`) the scope starts with. Captures and
-  # constants stay shared with the parent. A `:while` scope reads nothing else
-  # from the parent; a `:cond` scope reads the parent through its seeds only, so
-  # both get the same check.
-  @spec lower_scope(map(), [map()], map(), :while | :cond) ::
-          {NxCL.Compiler.Instruction.body(), map()}
+  @doc """
+  Lowers `roots` as a body of `parent`. Returns the body (`{instructions,
+  outputs}`) and the parent with the captures, constants and host calls the
+  body added. `seeds` maps node ids to the refs (`{:carry, i}`) the scope starts
+  with. A `:while` scope reads nothing else from the parent; a `:cond` scope reads
+  the parent through its seeds only, so both get the same check.
+  """
+  @spec lower_scope(state(), [Shared.tensor()], %{reference() => node_ref()}, :while | :cond) ::
+          {Instruction.body(), state()}
   def lower_scope(parent, roots, seeds, kind) do
     if parent.depth >= @max_depth do
       raise ArgumentError, "cond and while nest more than #{@max_depth} levels deep"
@@ -171,16 +176,6 @@ defmodule NxCL.Compiler.Lower do
     raise ArgumentError,
           "an inner scope reads #{inspect(op)} from its parent scope; " <>
             "pass the value in as an argument of the while or cond"
-  end
-
-  @doc false
-  @spec ref_counts([NxCL.Compiler.Instruction.t()], [NxCL.Compiler.Instruction.ref()]) ::
-          %{NxCL.Compiler.Instruction.ref() => non_neg_integer()}
-  def ref_counts(instructions, outputs) do
-    instructions
-    |> Enum.flat_map(& &1.operands)
-    |> Enum.concat(outputs)
-    |> Enum.frequencies()
   end
 
   # -- Leaves -------------------------------------------------------------
@@ -296,14 +291,14 @@ defmodule NxCL.Compiler.Lower do
     {state, rr} = cast(state, r, node.type)
 
     sides = {{l.shape, contract_l, batch_l}, {r.shape, contract_r, batch_r}}
-    {state, ref} = Contract.dot(state, &push/2, node, {rl, rr}, sides)
+    {state, ref} = Contract.dot(state, node, {rl, rr}, sides)
     put_ref(state, id, ref)
   end
 
   defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :conv, args: [x, w, opts]}} = node, state) do
     {state, rx} = cast(state, x, node.type)
     {state, rw} = cast(state, w, node.type)
-    {state, ref} = Contract.conv(state, &push/2, node, {{rx, x.shape}, {rw, w.shape}}, opts)
+    {state, ref} = Contract.conv(state, node, {{rx, x.shape}, {rw, w.shape}}, opts)
     put_ref(state, id, ref)
   end
 
@@ -584,32 +579,9 @@ defmodule NxCL.Compiler.Lower do
     put_ref(state, id, ref)
   end
 
-  # Adds an instruction that no node owns, such as a broadcast or a cast.
-  @doc false
-  @spec push(map(), NxCL.Compiler.Instruction.t()) :: {map(), NxCL.Compiler.Instruction.ref()}
-  def push(state, instruction) do
-    ref = {:result, length(state.instrs)}
-    {%{state | instrs: [instruction | state.instrs]}, ref}
-  end
-
-  @doc false
-  @spec put_const(map(), term(), Nx.Type.t()) :: {map(), NxCL.Compiler.Instruction.ref()}
-  def put_const(state, value, type) do
-    ref = {:const, length(state.constants)}
-    {%{state | constants: [{value, type} | state.constants]}, ref}
-  end
-
   defp put_ref(state, id, ref), do: %{state | refs: Map.put(state.refs, id, ref)}
 
   defp ref(state, %T{data: %Nx.Defn.Expr{id: id}}), do: Map.fetch!(state.refs, id)
-
-  @doc false
-  @spec check_complex(atom(), map(), [map()]) :: nil
-  def check_complex(op, node, operands) do
-    if op in @complex_rejected and Enum.any?([node | operands], &Nx.Type.complex?(&1.type)) do
-      raise ArgumentError, "#{inspect(op)} does not support complex tensors"
-    end
-  end
 
   # Every operand of an elementwise op has the output shape, except a scalar
   # constant, which the kernel takes by value. Any other operand gets a
@@ -668,54 +640,10 @@ defmodule NxCL.Compiler.Lower do
     {state, Enum.reverse(refs)}
   end
 
-  # Crops or zero-pads `axis` of the operand `ref` (shape `shape`, type `type`)
-  # to the length of `out` on that axis.
-  @doc false
-  @spec fit_axis(
-          map(),
-          NxCL.Compiler.Instruction.ref(),
-          tuple(),
-          Nx.Type.t(),
-          tuple(),
-          non_neg_integer()
-        ) ::
-          {map(), NxCL.Compiler.Instruction.ref()}
-  def fit_axis(state, ref, shape, type, out, axis) do
-    have = elem(shape, axis)
-    want = elem(out, axis)
-    fitted = put_elem(shape, axis, want)
-
-    cond do
-      have == want -> {state, ref}
-      have > want -> crop_axis(state, ref, type, fitted)
-      true -> pad_axis(state, ref, type, {shape, fitted, axis})
-    end
-  end
-
-  defp crop_axis(state, ref, type, fitted) do
-    rank = tuple_size(fitted)
-    {state, starts} = start_refs(state, List.duplicate(0, rank))
-    strides = List.duplicate(1, rank)
-    push(state, Ops.slice(ref, starts, type, fitted, Tuple.to_list(fitted), strides))
-  end
-
-  defp pad_axis(state, ref, type, {shape, fitted, axis}) do
-    {state, zero} = put_const(state, 0, type)
-    extra = elem(fitted, axis) - elem(shape, axis)
-    config = for a <- 0..(tuple_size(shape) - 1), do: {0, if(a == axis, do: extra, else: 0), 0}
-    push(state, Ops.pad(ref, zero, type, fitted, config))
-  end
-
   defp scalar_const?(state, %T{shape: {}} = operand),
     do: match?({:const, _}, ref(state, operand))
 
   defp scalar_const?(_state, _operand), do: false
-
-  # The reduced axes, sorted; `nil` means every axis.
-  @doc false
-  @spec axes(map(), [non_neg_integer()] | nil) :: [non_neg_integer()]
-  def axes(%T{shape: shape}, nil), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
-  def axes(_x, axes), do: Enum.sort(axes)
 
   # Lowers the body of a `reduce` or `window_reduce` function to steps over
   # two variables (the parameters) and the result of each earlier step. A body
@@ -754,15 +682,6 @@ defmodule NxCL.Compiler.Lower do
 
     steps
   end
-
-  # A body of one `add`, `multiply`, `max` or `min` over the two parameters is
-  # associative and commutative, so the device may fold it in a tree.
-  @doc false
-  @spec monoid?(list()) :: boolean()
-  def monoid?([{op, a, b}]) when op in [:add, :multiply, :max, :min],
-    do: {a, b} in [{0, 1}, {1, 0}]
-
-  def monoid?(_steps), do: false
 
   # A body that is one `add` or `multiply` with its identity as the initial
   # accumulator is `sum` or `product`; nothing is left to fold in.

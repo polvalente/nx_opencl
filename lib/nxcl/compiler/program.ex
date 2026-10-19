@@ -8,8 +8,9 @@ defmodule NxCL.Compiler.Instruction do
     * `:operands` - the `t:ref/0` values the op reads.
     * `:out_type` - the Nx type of the result, for example `{:f, 32}`.
     * `:out_shape` - the shape of the result, a tuple.
-    * `:attrs` - op-specific extras (`t:attr/0`). A `:launch` instruction carries
-      kernel source here as a binary (see `NxCL.Compiler.Ops.launch/6`).
+    * `:attrs` - op-specific extras (`t:attr/0`). Mostly integers and atoms that
+      the builders in `NxCL.Compiler.Ops` document per op. The raw `:launch` op
+      carries kernel source as a binary (`NxCL.Compiler.Ops.launch/6`).
 
   A `host_call` runs an Elixir function on host copies of its operands. Its one
   attr indexes `NxCL.Compiler.Program`'s `:host_calls` table (see
@@ -53,7 +54,13 @@ defmodule NxCL.Compiler.Instruction do
 
   @type body :: {[t()], [ref()]}
 
-  @type attr :: integer() | atom() | binary() | {atom(), term()}
+  @type attr ::
+          integer()
+          | atom()
+          | binary()
+          | {:cond | :body | :else, body()}
+          | {:clauses, [{body(), body()}]}
+          | {:static, non_neg_integer()}
 
   @type t :: %__MODULE__{
           op: atom(),
@@ -107,11 +114,23 @@ defmodule NxCL.Compiler.Program do
     signature: nil
   ]
 
+  @typedoc """
+  A `:host_calls` entry; see `NxCL.Compiler.Lower.HostCall`. `:fun` is `nil`
+  for an `:io_call` with no callback.
+  """
+  @type host_call :: %{
+          kind: :io_call | :runtime_call,
+          fun: function() | nil,
+          opts: keyword(),
+          in_template: Nx.Container.t(),
+          out_template: Nx.Container.t()
+        }
+
   @type t :: %__MODULE__{
           inputs: [{Nx.Type.t(), tuple()} | nil],
           captures: [Nx.Tensor.t()],
-          constants: [{number() | atom(), Nx.Type.t()}],
-          host_calls: [map()],
+          constants: [{number() | :nan | :infinity | :neg_infinity | Complex.t(), Nx.Type.t()}],
+          host_calls: [host_call()],
           instructions: [Instruction.t()],
           outputs: [Instruction.ref()],
           output_template: Nx.Container.t(),

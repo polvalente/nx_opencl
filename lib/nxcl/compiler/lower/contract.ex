@@ -10,23 +10,23 @@ defmodule NxCL.Compiler.Lower.Contract do
   `[o, n, spatial...]` result to the layout the caller asked for. The native side
   expands `conv` to im2col plus `batched_gemm`; Elixir builds no kernel source.
 
-  Both functions take the lowering state and `push`, a function
-  `(state, instruction) -> {state, ref}` that appends an instruction. They return
+  Both functions take a builder (see `NxCL.Compiler.Lower.Shared`) and return
   `{state, ref}` for the node's result. The operand refs already have the node's type.
   """
 
-  alias NxCL.Compiler.Ops
+  import NxCL.Compiler.Lower.Shared, only: [identity?: 1, push: 2]
 
-  @type push :: (map(), NxCL.Compiler.Instruction.t() ->
-                   {map(), NxCL.Compiler.Instruction.ref()})
+  alias NxCL.Compiler.Instruction
+  alias NxCL.Compiler.Lower.Shared
+  alias NxCL.Compiler.Ops
 
   @doc """
   Lowers `dot` over operand refs `{left, right}`. `sides` holds
   `{shape, contract_axes, batch_axes}` for each operand.
   """
-  @spec dot(map(), push(), map(), tuple(), tuple()) ::
-          {map(), NxCL.Compiler.Instruction.ref()}
-  def dot(state, push, node, {rl, rr}, {{ls, cl, bl}, {rs, cr, br}}) do
+  @spec dot(Shared.builder(), Shared.tensor(), {Instruction.ref(), Instruction.ref()}, tuple()) ::
+          {Shared.builder(), Instruction.ref()}
+  def dot(state, node, {rl, rr}, {{ls, cl, bl}, {rs, cr, br}}) do
     free_l = axes_without(ls, cl ++ bl)
     free_r = axes_without(rs, cr ++ br)
 
@@ -35,24 +35,24 @@ defmodule NxCL.Compiler.Lower.Contract do
     k = size(ls, cl)
     n = size(rs, free_r)
 
-    {state, left_ref} = to_matrix(state, push, rl, ls, bl ++ free_l ++ cl, {b, m, k}, node.type)
-    {state, right_ref} = to_matrix(state, push, rr, rs, br ++ cr ++ free_r, {b, k, n}, node.type)
+    {state, left_ref} = to_matrix(state, rl, ls, bl ++ free_l ++ cl, {b, m, k}, node.type)
+    {state, right_ref} = to_matrix(state, rr, rs, br ++ cr ++ free_r, {b, k, n}, node.type)
 
     {state, gemm} =
-      push.(state, Ops.batched_gemm(left_ref, right_ref, node.type, {b, m, n}, k))
+      push(state, Ops.batched_gemm(left_ref, right_ref, node.type, {b, m, n}, k))
 
-    reshape(state, push, gemm, node.type, {b, m, n}, node.shape)
+    reshape(state, gemm, node.type, {b, m, n}, node.shape)
   end
 
   @doc """
   Lowers `conv` over `{{input, input_shape}, {kernel, kernel_shape}}`. `opts` are the
   Expr options (`Nx.conv/3` after normalization).
   """
-  @spec conv(map(), push(), map(), tuple(), keyword()) ::
-          {map(), NxCL.Compiler.Instruction.ref()}
-  def conv(state, push, node, {{rx, xs}, {rw, ws}}, opts) do
-    {state, input_ref, _} = permute(state, push, rx, xs, opts[:input_permutation], node.type)
-    {state, kernel_ref, _} = permute(state, push, rw, ws, opts[:kernel_permutation], node.type)
+  @spec conv(Shared.builder(), Shared.tensor(), tuple(), keyword()) ::
+          {Shared.builder(), Instruction.ref()}
+  def conv(state, node, {{rx, xs}, {rw, ws}}, opts) do
+    {state, input_ref, _} = permute(state, rx, xs, opts[:input_permutation], node.type)
+    {state, kernel_ref, _} = permute(state, rw, ws, opts[:kernel_permutation], node.type)
 
     out_perm = opts[:output_permutation]
 
@@ -71,14 +71,14 @@ defmodule NxCL.Compiler.Lower.Contract do
     raw_shape = List.to_tuple([o, n | spatial])
 
     {state, raw} =
-      push.(state, Ops.conv(input_ref, kernel_ref, node.type, raw_shape, options))
+      push(state, Ops.conv(input_ref, kernel_ref, node.type, raw_shape, options))
 
     axes = out_perm |> invert() |> Enum.map(&swap_leading/1)
 
-    if axes == Enum.to_list(0..(length(axes) - 1)//1) do
+    if identity?(axes) do
       {state, raw}
     else
-      push.(state, Ops.transpose(raw, node.type, node.shape, axes))
+      push(state, Ops.transpose(raw, node.type, node.shape, axes))
     end
   end
 
@@ -103,26 +103,26 @@ defmodule NxCL.Compiler.Lower.Contract do
   defp size(shape, axes), do: Enum.reduce(axes, 1, &(elem(shape, &1) * &2))
 
   # Transposes `ref` by `axes` (skipped for the identity) and reshapes to `target`.
-  defp to_matrix(state, push, ref, shape, axes, target, type) do
-    {state, ref, permuted} = permute(state, push, ref, shape, axes, type)
-    {state, ref} = reshape(state, push, ref, type, permuted, target)
+  defp to_matrix(state, ref, shape, axes, target, type) do
+    {state, ref, permuted} = permute(state, ref, shape, axes, type)
+    {state, ref} = reshape(state, ref, type, permuted, target)
     {state, ref}
   end
 
-  defp permute(state, push, ref, shape, axes, type) do
+  defp permute(state, ref, shape, axes, type) do
     permuted = shape |> Tuple.to_list() |> permute_list(axes) |> List.to_tuple()
 
-    if axes == Enum.to_list(0..(tuple_size(shape) - 1)//1) do
+    if identity?(axes) do
       {state, ref, shape}
     else
-      {state, ref} = push.(state, Ops.transpose(ref, type, permuted, axes))
+      {state, ref} = push(state, Ops.transpose(ref, type, permuted, axes))
       {state, ref, permuted}
     end
   end
 
-  defp reshape(state, _push, ref, _type, shape, shape), do: {state, ref}
+  defp reshape(state, ref, _type, shape, shape), do: {state, ref}
 
-  defp reshape(state, push, ref, type, _from, to) do
-    push.(state, Ops.alias_op(:reshape, ref, type, to))
+  defp reshape(state, ref, type, _from, to) do
+    push(state, Ops.alias_op(:reshape, ref, type, to))
   end
 end

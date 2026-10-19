@@ -113,29 +113,34 @@ defmodule NxCL.Backend do
     range = if repeat?, do: 0..full, else: 0..(full - 1)//1
     binary = to_binary(tensor, Nx.flat_size(tensor))
     bytes = Nx.byte_size(out)
+    # The batches go back to the device the tensor lives on.
+    device_opts = Evaluator.device_opts([tensor])
 
     Stream.map(range, fn
       ^full ->
         before = full * bytes
         available = byte_size(binary) - before
         rest = binary_part(binary, before, available) <> binary_part(binary, 0, bytes - available)
-        from_binary(out, rest, [])
+        from_binary(out, rest, device_opts)
 
       i ->
-        from_binary(out, binary_part(binary, i * bytes, bytes), [])
+        from_binary(out, binary_part(binary, i * bytes, bytes), device_opts)
     end)
   end
 
   # ── Creation ───────────────────────────────────────
 
   @impl true
-  def constant(%Nx.Tensor{} = out, number, _backend_opts), do: Evaluator.constant(out, number)
+  def constant(%Nx.Tensor{} = out, number, backend_opts),
+    do: Evaluator.constant(out, number, Keyword.take(backend_opts, [:device]))
 
   @impl true
-  def eye(%Nx.Tensor{} = out, _backend_opts), do: Evaluator.eye(out)
+  def eye(%Nx.Tensor{} = out, backend_opts),
+    do: Evaluator.eye(out, Keyword.take(backend_opts, [:device]))
 
   @impl true
-  def iota(%Nx.Tensor{} = out, axis, _backend_opts), do: Evaluator.iota(out, axis)
+  def iota(%Nx.Tensor{} = out, axis, backend_opts),
+    do: Evaluator.iota(out, axis, Keyword.take(backend_opts, [:device]))
 
   # ── Elementwise ────────────────────────────────────
 

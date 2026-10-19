@@ -3,25 +3,22 @@ defmodule NxCL.Compiler.Options do
   # Checks the options `NxCL.Compiler` takes. An unknown key raises
   # `ArgumentError` and names the key.
 
-  @keys [:device, :command_queue, :max_concurrency, :hooks]
+  @keys [:device, :command_queue, :max_concurrency]
 
   @doc "Validates `opts` and returns them. Raises on an unknown key or a non-empty `:hooks`."
   @spec validate!(keyword()) :: keyword()
   def validate!(opts) do
-    opts = Keyword.validate!(opts, @keys)
-    check_hooks!(Keyword.get(opts, :hooks, %{}))
-    opts
+    # Nx passes an empty `:hooks` to every compiler; the named-override map is not wired through.
+    {hooks, opts} = Keyword.pop(opts, :hooks, %{})
+
+    if hooks not in [%{}, []] do
+      named = if is_map(hooks), do: Map.keys(hooks), else: hooks
+
+      raise ArgumentError,
+            "NxCL.Compiler does not support the :hooks option (got callbacks for " <>
+              "#{inspect(named)}); io_call nodes run their own callback"
+    end
+
+    Keyword.validate!(opts, @keys)
   end
-
-  # The named-override map is not wired through.
-  defp check_hooks!(hooks) when hooks == %{} or hooks == [], do: :ok
-
-  defp check_hooks!(hooks) do
-    raise ArgumentError,
-          "NxCL.Compiler does not support the :hooks option (got callbacks for " <>
-            "#{inspect(hooks_keys(hooks))}); io_call nodes run their own callback"
-  end
-
-  defp hooks_keys(hooks) when is_map(hooks), do: Map.keys(hooks)
-  defp hooks_keys(hooks), do: hooks
 end

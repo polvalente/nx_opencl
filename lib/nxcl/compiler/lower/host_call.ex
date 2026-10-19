@@ -15,16 +15,17 @@ defmodule NxCL.Compiler.Lower.HostCall do
     * `:in_template` - the input container with template tensors.
     * `:out_template` - the output container with template tensors.
 
-  `emit/4` is also the entry for a later stage that runs an op on the host
-  because no device kernel exists.
   """
 
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Instruction
+  alias NxCL.Compiler.Lower
+  alias NxCL.Compiler.Lower.Shared
+  alias NxCL.Compiler.Program
 
   @doc "Lowers an `io_call` or `runtime_call` node."
-  @spec node(map(), map()) :: map()
+  @spec node(Lower.state(), Shared.tensor()) :: Lower.state()
   def node(state, %T{data: %Nx.Defn.Expr{op: :io_call, args: [input, spec, template, _ref]}} = n) do
     entry = %{
       kind: :io_call,
@@ -52,22 +53,16 @@ defmodule NxCL.Compiler.Lower.HostCall do
     emit(state, n, input, entry)
   end
 
-  @doc """
-  Emits a `:host_call` for `entry` reading the leaves of `input`, and binds the
-  node's id to its result. A tuple-typed node maps to `{:tuple, refs}`.
-  """
-  @spec emit(map(), map(), Nx.Container.t(), map()) :: map()
-  def emit(state, %T{data: %Nx.Defn.Expr{id: id}} = n, input, entry) do
+  # Emits a `:host_call` for `entry` reading the leaves of `input`, and binds the
+  # node's id to its result. A tuple-typed node maps to `{:tuple, refs}`.
+  @spec emit(Lower.state(), Shared.tensor(), Nx.Container.t(), Program.host_call()) ::
+          Lower.state()
+  defp emit(state, %T{data: %Nx.Defn.Expr{id: id}} = n, input, entry) do
     operands =
       [input] |> Composite.flatten_list() |> Enum.map(&Map.fetch!(state.refs, &1.data.id))
 
     {instr, refs} = instruction(entry, operands, length(state.host_calls), length(state.instrs))
-
-    ref =
-      case n.type do
-        {:tuple, _} -> {:tuple, refs}
-        _ -> hd(refs)
-      end
+    ref = Shared.node_ref(n, refs)
 
     %{
       state
@@ -77,14 +72,17 @@ defmodule NxCL.Compiler.Lower.HostCall do
     }
   end
 
-  @doc """
-  The `:host_call` instruction for `entry` over `operands`, and its result refs.
-  `index` is the entry's place in the program's `:host_calls`; `at` is the
-  instruction's place in the instruction list. The eager backend uses this too.
-  """
-  @spec instruction(map(), [Instruction.ref()], non_neg_integer(), non_neg_integer()) ::
+  # The `:host_call` instruction for `entry` over `operands`, and its result refs.
+  # `index` is the entry's place in the program's `:host_calls`; `at` is the
+  # instruction's place in the instruction list.
+  @spec instruction(
+          Program.host_call(),
+          [Instruction.ref()],
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           {Instruction.t(), [Instruction.ref()]}
-  def instruction(entry, operands, index, at) do
+  defp instruction(entry, operands, index, at) do
     leaves = Composite.flatten_list([entry.out_template])
 
     instr = %Instruction{
@@ -95,10 +93,13 @@ defmodule NxCL.Compiler.Lower.HostCall do
       attrs: [index]
     }
 
-    {instr, for(k <- 0..(length(leaves) - 1)//1, do: {:result, at, k})}
+    {instr, Shared.result_refs(at, length(leaves))}
   end
 
-  # A named `io_call` runs its callback; the `:hooks` option that overrides it is rejected.
+  # A named `io_call` runs its own callback (`nil` for none); the `:hooks` option that overrides it is rejected.
   defp callback({:fn, fun}), do: fun
-  defp callback({:named, _name, fun}), do: fun
+  defp callback({:named, _name, fun}) when is_function(fun) or is_nil(fun), do: fun
+
+  defp callback(spec),
+    do: raise(ArgumentError, "unsupported io_call callback spec: #{inspect(spec)}")
 end
