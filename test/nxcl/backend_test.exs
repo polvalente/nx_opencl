@@ -165,7 +165,7 @@ defmodule NxCL.BackendTest do
     test "an op with no lowering raises ArgumentError" do
       t = Nx.tensor([1.0, 2.0, 3.0]) |> Nx.backend_transfer(NxCL.Backend)
 
-      assert_raise ArgumentError, ~r/^does not yet lower op :exp/, fn ->
+      assert_raise ArgumentError, ~r/^does not lower op :exp/, fn ->
         Nx.reduce(t, 0.0, fn a, b -> Nx.add(Nx.exp(a), b) end)
       end
     end
@@ -316,13 +316,13 @@ defmodule NxCL.BackendTest do
       a = Nx.iota({n}, type: :f32, backend: NxCL.Backend)
       b = Nx.iota({n}, type: :f32, backend: NxCL.Backend)
       # A full cache evicts as it adds, so start empty.
-      NxCL.Compiler.ProgramCache.clear()
-      size = NxCL.Compiler.ProgramCache.size()
+      NxCL.TestSupport.reset_program_cache()
+      size = NxCL.TestSupport.program_cache_size()
 
       Nx.add(a, b)
-      assert NxCL.Compiler.ProgramCache.size() == size + 1
+      assert NxCL.TestSupport.program_cache_size() == size + 1
       Nx.add(a, b)
-      assert NxCL.Compiler.ProgramCache.size() == size + 1
+      assert NxCL.TestSupport.program_cache_size() == size + 1
     end
   end
 

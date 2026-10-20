@@ -9,7 +9,7 @@ defmodule NxCL.Compiler.Lower do
 
   A `cond` or `while` becomes one instruction with nested bodies. An `io_call`
   or `runtime_call` becomes one `:host_call` instruction. An op it cannot lower
-  raises `ArgumentError` ("does not yet lower op ...").
+  raises `ArgumentError` ("does not lower op ...").
 
   ## Scopes
 
@@ -73,8 +73,8 @@ defmodule NxCL.Compiler.Lower do
   arguments. The input list has `num_inputs` entries, so an ignored argument
   keeps the positions of the others.
   """
-  @spec lower(Nx.Container.t(), non_neg_integer() | nil) :: Program.t()
-  def lower(output, num_inputs \\ nil) do
+  @spec lower(Nx.Container.t(), non_neg_integer()) :: Program.t()
+  def lower(output, num_inputs) when is_integer(num_inputs) and num_inputs >= 0 do
     state = %{
       inputs: %{},
       captures: [],
@@ -92,7 +92,7 @@ defmodule NxCL.Compiler.Lower do
     state = Enum.reduce(ordered, state, &expand/2)
 
     max_pos = state.inputs |> Map.keys() |> Enum.max(fn -> -1 end)
-    arity = max(num_inputs || 0, max_pos + 1)
+    arity = max(num_inputs, max_pos + 1)
     inputs = for pos <- 0..(arity - 1)//1, do: Map.get(state.inputs, pos)
 
     outputs =
@@ -576,6 +576,6 @@ defmodule NxCL.Compiler.Lower do
 
   defp unsupported(op, detail) do
     suffix = if detail, do: " " <> detail, else: ""
-    raise ArgumentError, "does not yet lower op #{inspect(op)}#{suffix}"
+    raise ArgumentError, "does not lower op #{inspect(op)}#{suffix}"
   end
 end

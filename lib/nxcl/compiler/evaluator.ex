@@ -510,7 +510,7 @@ defmodule NxCL.Compiler.Evaluator do
   defp native_block(%{__struct__: mod, axis: axis, reverse: reverse}, out, [x]) do
     case Map.fetch(Shared.scan_blocks(), mod) do
       {:ok, op} -> scan(op, out, x, axis, reverse)
-      :error -> raise ArgumentError, "does not yet lower op #{inspect(mod)} (a native block)"
+      :error -> raise ArgumentError, "does not lower op #{inspect(mod)} (a native block)"
     end
   end
 

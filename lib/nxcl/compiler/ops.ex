@@ -463,33 +463,6 @@ defmodule NxCL.Compiler.Ops do
     do: Tuple.to_list(dims) ++ strides ++ dilations ++ Enum.flat_map(padding, &Tuple.to_list/1)
 
   @doc """
-  A generic kernel launch. `source` is OpenCL C, `entry` the kernel name.
-
-  The kernel takes the operand buffers, then the output buffer, then each
-  scalar as an `int`. `global` and `local` are work sizes, one per dimension
-  (1 to 3); pass `[]` for `local` to let the driver pick.
-  """
-  @spec launch(
-          [Instruction.ref()],
-          Nx.Type.t(),
-          tuple(),
-          binary(),
-          binary(),
-          keyword()
-        ) :: Instruction.t()
-  def launch(operands, type, shape, source, entry, opts) do
-    global = Keyword.fetch!(opts, :global)
-    local = Keyword.get(opts, :local, [])
-    local = if local == [], do: Enum.map(global, fn _ -> 0 end), else: local
-
-    attrs =
-      [source, entry, Keyword.get(opts, :build_options, ""), length(global)] ++
-        global ++ local ++ Keyword.get(opts, :scalars, [])
-
-    %Instruction{op: :launch, operands: operands, out_type: type, out_shape: shape, attrs: attrs}
-  end
-
-  @doc """
   `triangular_solve`: solves `op(a) x = b` (`left_side`) or `x op(a) = b`. The
   attrs are `[left_side, lower, transform_a]`, the flags as 0 or 1 and
   `transform_a` as `:none`, `:transpose` or `:conjugate`.

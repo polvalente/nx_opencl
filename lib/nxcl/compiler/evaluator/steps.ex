@@ -4,8 +4,7 @@ defmodule NxCL.Compiler.Evaluator.Steps do
   # backend gets an Elixir function, not a graph, so it runs the function once
   # on two scalar tensors of this module. Each binary op records `{op, a, b}`
   # over variables 0 and 1 (the arguments) and `2 + k` (the result of step `k`).
-  # Any other op has no function here, so the call raises and the trace turns
-  # that into "does not yet lower op".
+  # Any other op has no function here, so the call raises "does not lower op".
   #
   # `NxCL.Compiler.Lower` reads the same bodies from the expression graph
   # (`NxCL.Compiler.Lower.Shared.reduce_steps/4`). The backend cannot do that:
@@ -53,6 +52,7 @@ defmodule NxCL.Compiler.Evaluator.Steps do
   for op <- Shared.step_ops() do
     @doc false
     @spec unquote(op)(map(), map(), map()) :: map()
+    # Credo cannot match the `@spec` built by `unquote` to the `def` below it.
     # credo:disable-for-next-line Credo.Check.Readability.Specs
     def unquote(op)(out, left, right), do: record(unquote(op), out, left, right)
   end
@@ -75,5 +75,5 @@ defmodule NxCL.Compiler.Evaluator.Steps do
   defp operand(op, what, _other), do: unsupported(op, "(an operand of a #{what} body)")
 
   defp unsupported(op, detail),
-    do: raise(ArgumentError, "does not yet lower op #{inspect(op)} #{detail}")
+    do: raise(ArgumentError, "does not lower op #{inspect(op)} #{detail}")
 end

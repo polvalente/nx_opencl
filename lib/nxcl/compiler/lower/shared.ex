@@ -95,7 +95,7 @@ defmodule NxCL.Compiler.Lower.Shared do
   Reads the body of a `reduce` or `window_reduce` as steps `{op, a, b}`. Variable
   0 and 1 are the two parameters; step `k` makes variable `2 + k`. `what` names
   the op in error messages. Any node but a binary op over earlier variables raises
-  `ArgumentError` ("does not yet lower op ...").
+  `ArgumentError` ("does not lower op ...").
   """
   @spec reduce_steps([tensor()], tensor(), Nx.Type.t(), atom()) ::
           [{atom(), non_neg_integer(), non_neg_integer()}]
@@ -158,7 +158,7 @@ defmodule NxCL.Compiler.Lower.Shared do
   end
 
   defp unsupported(op, detail),
-    do: raise(ArgumentError, "does not yet lower op #{inspect(op)} #{detail}")
+    do: raise(ArgumentError, "does not lower op #{inspect(op)} #{detail}")
 
   @doc "How often each ref is read, by instructions or as an output."
   @spec ref_counts([Instruction.t()], [Instruction.ref()]) :: %{

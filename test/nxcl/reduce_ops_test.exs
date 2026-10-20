@@ -59,20 +59,20 @@ defmodule NxCL.ReduceOpsTest do
     test "a body outside the supported steps raises, naming the op" do
       x = Nx.iota({3, 7}, type: :f32)
 
-      assert_raise ArgumentError, ~r/does not yet lower op :sin/, fn ->
+      assert_raise ArgumentError, ~r/does not lower op :sin/, fn ->
         lower(&Nx.reduce(&1, Nx.tensor(0.0), [axes: [1]], fn a, b -> Nx.add(Nx.sin(a), b) end), [
           x
         ])
       end
 
-      assert_raise ArgumentError, ~r/does not yet lower op :constant/, fn ->
+      assert_raise ArgumentError, ~r/does not lower op :constant/, fn ->
         lower(
           &Nx.reduce(&1, Nx.tensor(0.0), [axes: [1]], fn a, b -> Nx.add(Nx.add(a, b), 1) end),
           [x]
         )
       end
 
-      assert_raise ArgumentError, ~r/does not yet lower op :sin/, fn ->
+      assert_raise ArgumentError, ~r/does not lower op :sin/, fn ->
         lower(
           &Nx.window_reduce(&1, Nx.tensor(0.0), {1, 2}, fn a, b -> Nx.add(Nx.sin(a), b) end),
           [x]

@@ -6,7 +6,7 @@ defmodule NxCL.Compiler.Instruction do
     * `:operands` - the `t:ref/0` values the op reads.
     * `:out_type`, `:out_shape` - type and shape of the result.
     * `:attrs` - op-specific extras (`t:attr/0`), documented per op in
-      `NxCL.Compiler.Ops`. The `:launch` op carries kernel source as a binary.
+      `NxCL.Compiler.Ops`.
 
   A `cond`, `while` or `host_call` has one result per output: `:out_type` and
   `:out_shape` are lists, and the k-th result is `{:result, i, k}`. A

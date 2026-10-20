@@ -57,10 +57,6 @@ defmodule NxCL.Compiler.CompileCache do
   @spec put(term(), term()) :: term()
   def put(key, value), do: GenServer.call(__MODULE__, {:put, key, value})
 
-  @doc "Number of entries, expired ones included until the next sweep."
-  @spec size() :: non_neg_integer()
-  def size(), do: :ets.info(__MODULE__, :size)
-
   @impl true
   def handle_call({:put, key, value}, _from, state) do
     index = state.counter + 1

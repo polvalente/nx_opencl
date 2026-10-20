@@ -68,8 +68,8 @@ Mesa release notes for your version before you rely on one.
 
 ## CPU OpenCL with PoCL
 
-[PoCL](https://portablecl.org/) runs OpenCL on the CPU through LLVM, on any ARM
-device. It is slower than a GPU but works for development and tests. On plain
+[PoCL](https://portablecl.org/) runs OpenCL on the CPU through LLVM, on ARM CPUs that PoCL
+supports. It is slower than a GPU but works for development and tests. On plain
 Linux, `sudo apt install pocl-opencl-icd`, then `clinfo --list` should show
 "Portable Computing Language".
 

@@ -50,7 +50,7 @@ defmodule NxCL.Compiler.Lower.Block do
 
       :native ->
         raise ArgumentError,
-              "does not yet lower op #{inspect(struct.__struct__)} (a native block with no clause)"
+              "does not lower op #{inspect(struct.__struct__)} (a native block with no clause)"
     end
   end
 

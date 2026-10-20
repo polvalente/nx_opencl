@@ -187,7 +187,7 @@ defmodule NxCL.CompilerTest do
 
       jitted = Nx.Defn.jit(unknown, compiler: NxCL.Compiler)
 
-      assert_raise ArgumentError, ~r/^does not yet lower op/, fn ->
+      assert_raise ArgumentError, ~r/^does not lower op/, fn ->
         jitted.(Nx.tensor([1.0, 2.0]))
       end
     end

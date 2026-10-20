@@ -5,19 +5,11 @@ defmodule NxCL.NativeRuntimeTest do
   """
   use ExUnit.Case, async: false
 
-  alias NxCL.Compiler.Ops
   alias NxCL.Native
 
   @moduletag :opencl
 
   @f32 {:f, 32}
-
-  @add_one """
-  __kernel void add_one(__global const float* a, __global float* out, const int n) {
-    int i = get_global_id(0);
-    if (i < n) out[i] = a[i] + 1.0f;
-  }
-  """
 
   defp upload(ctx, floats),
     do: Native.buffer_write(ctx, Nx.to_binary(Nx.tensor(floats, type: :f32)))
@@ -79,23 +71,6 @@ defmodule NxCL.NativeRuntimeTest do
       [out] = run!(ctx, wire(instrs, [{:result, 0}], 2, {1}), [nil, x])
       assert_in_delta hd(read(out, 1)), :math.exp(1.0), 1.0e-5
     end
-
-    test "a generic launch runs caller source" do
-      ctx = Native.device_ctx_create(0)
-      x = upload(ctx, [1.0, 2.0, 3.0])
-
-      launch =
-        Ops.launch([{:input, 0}], @f32, {3}, @add_one, "add_one",
-          global: [64],
-          local: [64],
-          scalars: [3]
-        )
-
-      encoded = {launch.op, launch.operands, @f32, {3}, launch.attrs}
-
-      [out] = run!(ctx, wire([encoded], [{:result, 0}]), [x])
-      assert read(out, 3) == [2.0, 3.0, 4.0]
-    end
   end
 
   describe "bad programs" do
@@ -119,8 +94,6 @@ defmodule NxCL.NativeRuntimeTest do
         prog.([i1.(:negate, [{:input, 0}], [])], [{:result, 3}]),
         prog.([i1.(:add, [{:input, 0}], [])], out0),
         prog.([i1.(:negate, :oops, [])], out0),
-        prog.([i1.(:launch, [{:input, 0}], [<<"not C">>, "k", "", 1, 1, 0])], out0),
-        prog.([i1.(:launch, [{:input, 0}], [1, 2])], out0),
         # a type the table does not have, an unknown kind, a bad shape, a bad constant
         {[{{:s, 4}, {1}}], [], [], [i1.(:negate, [{:input, 0}], [])], [{:result, 0}]},
         {[{{:q, 8}, {1}}], [], [], [], []},
@@ -157,23 +130,7 @@ defmodule NxCL.NativeRuntimeTest do
     end
   end
 
-  describe "launch and buffer checks" do
-    test "a launch whose kernel declares another argument count is an error" do
-      ctx = Native.device_ctx_create(0)
-
-      # `@add_one` has three parameters; this launch passes two.
-      launch =
-        Ops.launch([{:input, 0}], @f32, {3}, @add_one, "add_one",
-          global: [64],
-          local: [64],
-          scalars: []
-        )
-
-      encoded = {launch.op, launch.operands, @f32, {3}, launch.attrs}
-      assert {:error, reason} = Native.compile_program(ctx, wire([encoded], [{:result, 0}]))
-      assert reason =~ "declares 3 arguments"
-    end
-
+  describe "buffer checks" do
     test "a buffer from another context is rejected" do
       ctx = Native.device_ctx_create(0)
       other = Native.device_ctx_create(0)
@@ -200,15 +157,15 @@ defmodule NxCL.NativeRuntimeTest do
       x = Nx.tensor([0.5, 1.0, 1.5])
 
       first = jitted.(x)
-      NxCL.Compiler.ProgramCache.clear()
+      NxCL.TestSupport.reset_program_cache()
       jitted.(x)
-      size = NxCL.Compiler.ProgramCache.size()
+      size = NxCL.TestSupport.program_cache_size()
 
       # The jitted function used the cache; a vacuous zero would pass the check below.
       assert size > 0
 
       for _ <- 1..99, do: assert(jitted.(x) == first)
-      assert NxCL.Compiler.ProgramCache.size() == size
+      assert NxCL.TestSupport.program_cache_size() == size
     end
   end
 

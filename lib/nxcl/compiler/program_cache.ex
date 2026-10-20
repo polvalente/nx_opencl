@@ -9,7 +9,7 @@ defmodule NxCL.Compiler.ProgramCache do
   key at once, the first insert wins. Dropping an entry does not free a program
   a running call still holds; the native side frees it at the last release.
 
-  The bound is `:max_items` (default 1024), oldest first out:
+  The bound is `:max_items` (default 1024). When the cache is full, the oldest entry goes first:
 
       config :nx_opencl, NxCL.Compiler.ProgramCache, max_items: 1024
   """
@@ -43,19 +43,6 @@ defmodule NxCL.Compiler.ProgramCache do
         store(key, build.())
     end
   end
-
-  @doc """
-  Drops every entry. A running call keeps what it uses.
-  """
-  @spec clear() :: :ok
-  def clear() do
-    :ets.select_delete(__MODULE__, [{{:_, :_, :_}, [], [true]}])
-    :ok
-  end
-
-  @doc "Number of entries."
-  @spec size() :: non_neg_integer()
-  def size(), do: :ets.info(__MODULE__, :size) - 1
 
   defp store(key, value) do
     index = :ets.update_counter(__MODULE__, :__index__, 1)

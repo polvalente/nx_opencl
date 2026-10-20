@@ -33,7 +33,7 @@ defmodule NxCL.Compiler do
   ## Unsupported operations
 
   The compiler never falls back to the CPU. An op it cannot lower raises
-  `ArgumentError` ("does not yet lower op ...") at compile time. A dtype the
+  `ArgumentError` ("does not lower op ...") at compile time. A dtype the
   device cannot run (`f64` without `cl_khr_fp64`, or a type with no OpenCL
   mapping) raises `NxCL.CompilerError` when the function runs.
 

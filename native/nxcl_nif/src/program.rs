@@ -28,8 +28,6 @@ use crate::codegen::{self, Attr, Instr, KernelArg, Operand};
 use crate::device_ctx::{cl_error, lock, DeviceCtx};
 use crate::kernel::{self, CompiledKernel};
 
-const MAX_DIMS: usize = 3;
-
 /// One kernel argument.
 enum Arg {
     Slot(usize),
@@ -124,31 +122,6 @@ fn decode_attr(term: Term) -> Result<Attr, String> {
     term.atom_to_string()
         .map(Attr::Atom)
         .map_err(|_| "attr is not an integer, atom or binary".to_string())
-}
-
-fn attr_int(attrs: &[Attr], i: usize, what: &str) -> Result<i64, String> {
-    match attrs.get(i) {
-        Some(Attr::Int(v)) => Ok(*v),
-        _ => Err(format!("attr {} ({}) must be an integer", i, what)),
-    }
-}
-
-fn attr_size(attrs: &[Attr], i: usize, what: &str) -> Result<usize, String> {
-    usize::try_from(attr_int(attrs, i, what)?)
-        .map_err(|_| format!("attr {} ({}) is negative", i, what))
-}
-
-fn attr_str(attrs: &[Attr], i: usize, what: &str) -> Result<String, String> {
-    match attrs.get(i) {
-        Some(Attr::Bin(b)) => {
-            String::from_utf8(b.clone()).map_err(|_| format!("attr {} ({}) is not UTF-8", i, what))
-        }
-        _ => Err(format!("attr {} ({}) must be a binary", i, what)),
-    }
-}
-
-fn to_i32(v: i64, what: &str) -> Result<i32, String> {
-    i32::try_from(v).map_err(|_| format!("{} {} does not fit in 32 bits", what, v))
 }
 
 /// What the decoder knows about a slot: its type and shape, and its value if
@@ -570,8 +543,7 @@ impl Pass {
             // buffer, and for a scalar the bytes of one `long`, `int` or
             // element the parameter declares. Generated kernels have this by
             // construction (codegen writes the parameters and `KernelArg`s
-            // from one table). A `launch` kernel is user code and must match
-            // its signature: `decode_launch` checks only the argument count.
+            // from one table).
             let buf: &DeviceBuffer = match a {
                 Arg::Scalar(bytes) => {
                     unsafe { set_scalar(&mut exec, bytes)? };
@@ -704,7 +676,7 @@ fn decode_step(
     route(ctx, layout, d)
 }
 
-/// Picks the decoder for the op: a codegen family, an alias, or `launch`.
+/// Picks the decoder for the op: a codegen family or an alias.
 fn route(ctx: &DeviceCtx, layout: &Layout, d: Decoded) -> Result<Step, String> {
     let out_bytes = byte_size(d.out_dtype, &d.out_shape)?;
     let expect = |n: usize| -> Result<(), String> {
@@ -758,7 +730,6 @@ fn route(ctx: &DeviceCtx, layout: &Layout, d: Decoded) -> Result<Step, String> {
             expect(1)?;
             alias_of(d.operands[0])
         }
-        "launch" => decode_launch(ctx, &d, out_bytes),
         other => Err(format!("unknown op {}", other)),
     }
 }
@@ -850,59 +821,6 @@ fn plan_step(
     }))
 }
 
-/// Attrs: source, entry, build options, dims, global sizes, local sizes, scalars.
-/// Local sizes all zero means the driver picks. The kernel takes the operand
-/// buffers, then the output buffer, then the scalars as `int`.
-///
-/// The kernel is user code, so only its argument count is checked, against the
-/// attrs. It must declare each parameter with the type given here: a scalar
-/// for a `cl_mem` or a write to an operand corrupts memory the program shares
-/// (constants, aliased inputs). The kernel must write only its output buffer.
-fn decode_launch(ctx: &DeviceCtx, d: &Decoded, out_bytes: usize) -> Result<Step, String> {
-    let attrs = &d.attrs[..];
-    let source = attr_str(attrs, 0, "source")?;
-    let entry = attr_str(attrs, 1, "entry")?;
-    let opts = attr_str(attrs, 2, "build options")?;
-    let dims = attr_size(attrs, 3, "dims")?;
-    if dims == 0 || dims > MAX_DIMS {
-        return Err(format!("dims must be 1 to {}, got {}", MAX_DIMS, dims));
-    }
-    let mut global = Vec::with_capacity(dims);
-    let mut local = Vec::with_capacity(dims);
-    for i in 0..dims {
-        let g = attr_size(attrs, 4 + i, "global size")?;
-        if g == 0 {
-            return Err("global size must be positive".to_string());
-        }
-        global.push(g);
-        local.push(attr_size(attrs, 4 + dims + i, "local size")?);
-    }
-    if local.iter().all(|&l| l == 0) {
-        local.clear();
-    } else if local.contains(&0) {
-        return Err("local sizes must be all zero or all positive".to_string());
-    }
-    let mut args: Vec<Arg> = d.operands.iter().copied().map(Arg::Slot).collect();
-    args.push(Arg::Out);
-    for i in (4 + 2 * dims)..attrs.len() {
-        let v = to_i32(attr_int(attrs, i, "scalar")?, "scalar")?;
-        args.push(Arg::Scalar(v.to_ne_bytes().to_vec()));
-    }
-    let kernel = kernel::cached(ctx, &source, &entry, &opts)?;
-    kernel.expect_args(args.len())?;
-    Ok(Step::Launch(Launch {
-        passes: vec![Pass {
-            kernel,
-            args,
-            global,
-            local,
-        }],
-        scratch: Vec::new(),
-        out: d.out,
-        out_bytes,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,20 +849,5 @@ mod tests {
         assert_eq!(part_value(ConstVal::Int(3)).unwrap(), 3.0);
         assert_eq!(part_value(ConstVal::Float(1.5)).unwrap(), 1.5);
         assert!(part_value(ConstVal::Complex(1.0, 2.0)).is_err());
-    }
-
-    #[test]
-    fn attrs_name_what_they_should_hold() {
-        let attrs = vec![Attr::Int(-1), Attr::Atom("x".to_string())];
-        assert!(attr_size(&attrs, 0, "dims")
-            .unwrap_err()
-            .contains("negative"));
-        assert!(attr_int(&attrs, 1, "scalar")
-            .unwrap_err()
-            .contains("integer"));
-        assert!(attr_str(&attrs, 0, "source")
-            .unwrap_err()
-            .contains("binary"));
-        assert!(to_i32(1 << 40, "scalar").unwrap_err().contains("32 bits"));
     }
 }

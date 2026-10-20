@@ -107,7 +107,7 @@ Both paths run Nx ops through one set of generated kernels.
 - **Elementwise:** unary and binary math, comparison, logic and bitwise ops,
   `select`, `clip` and casts.
 - **Shape:** reshape, transpose, broadcast, slice, `put_slice`, pad, concatenate,
-  reverse and the like.
+  reverse and similar ops.
 - **Reductions:** sums, products, min and max, `all`, `any`, `argmax`, `argmin`,
   `reduce`, scans (`cumulative_*`), windows (`window_*`), `sort` and `argsort`.
 - **Contractions:** `dot` and `conv`, with strides, padding, dilation, groups and
@@ -145,10 +145,9 @@ that raises on host compute.
 
 ## Nerves
 
-`libOpenCL.so` loads at run time, so the build needs no OpenCL library. Nerves sets
-the target and the linker. To choose a target by hand, set `RUSTLER_TARGET`. The
-target needs an OpenCL runtime, which standard Nerves systems lack. See
-[Nerves and Mesa](docs/nerves.md) for the kernel, Buildroot and PoCL setup.
+Nerves sets the Rust target and the linker. The target needs an OpenCL runtime, which
+standard Nerves systems lack. See [Nerves and Mesa](docs/nerves.md) for the build,
+kernel, Buildroot and PoCL setup.
 
 ## Running tests
 

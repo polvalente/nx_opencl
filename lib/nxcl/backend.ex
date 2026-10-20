@@ -7,7 +7,7 @@ defmodule NxCL.Backend do
   operand types, shapes and attributes.
 
   No op runs on `Nx.BinaryBackend`. An op with no lowering raises
-  `ArgumentError` ("does not yet lower op ..."). `from_pointer/5` and
+  `ArgumentError` ("does not lower op ..."). `from_pointer/5` and
   `to_pointer/2` raise, because OpenCL has no portable handle to share.
 
   ## Memory

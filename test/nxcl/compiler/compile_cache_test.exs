@@ -81,20 +81,20 @@ defmodule NxCL.Compiler.CompileCacheTest do
       # A constant no other test uses, so the first call adds an entry.
       c = System.unique_integer([:positive]) / 1000
       # A full cache evicts as it adds, so start empty.
-      ProgramCache.clear()
-      size = ProgramCache.size()
+      TestSupport.reset_program_cache()
+      size = TestSupport.program_cache_size()
 
       {a, %{@lower => lowered_a}} =
         Calls.count([@lower], fn -> jit(fn x -> Nx.exp(Nx.add(x, c)) end).(x) end)
 
-      assert ProgramCache.size() == size + 1
+      assert TestSupport.program_cache_size() == size + 1
 
       {b, %{@lower => lowered_b}} =
         Calls.count([@lower], fn -> jit(fn y -> Nx.exp(Nx.add(y, c)) end).(x) end)
 
       assert a == b
       assert {lowered_a, lowered_b} == {1, 1}
-      assert ProgramCache.size() == size + 1
+      assert TestSupport.program_cache_size() == size + 1
     end
 
     test "the signature holds no expression ids" do
@@ -106,11 +106,11 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
     test "a different shape is a different program" do
       c = System.unique_integer([:positive]) / 1000
-      ProgramCache.clear()
-      size = ProgramCache.size()
+      TestSupport.reset_program_cache()
+      size = TestSupport.program_cache_size()
       jit(fn x -> Nx.add(Nx.sin(x), c) end).(Nx.iota({3}, type: :f32))
       jit(fn x -> Nx.add(Nx.sin(x), c) end).(Nx.iota({4}, type: :f32))
-      assert ProgramCache.size() == size + 2
+      assert TestSupport.program_cache_size() == size + 2
     end
 
     test "the first writer wins a race" do
@@ -141,7 +141,7 @@ defmodule NxCL.Compiler.CompileCacheTest do
       keys = for i <- 1..5, do: {:bound, make_ref(), i}
       for key <- keys, do: ProgramCache.fetch_or_build(key, fn -> :value end)
 
-      assert ProgramCache.size() <= 3
+      assert TestSupport.program_cache_size() <= 3
       [old, newest] = [hd(keys), List.last(keys)]
       assert ProgramCache.fetch_or_build(old, fn -> :rebuilt end) == :rebuilt
       assert ProgramCache.fetch_or_build(newest, fn -> :rebuilt end) == :value
@@ -175,7 +175,7 @@ defmodule NxCL.Compiler.CompileCacheTest do
       assert CompileCache.fetch(:a) == {:error, :cache_miss}
       assert CompileCache.fetch(:b) == {:ok, 2}
       assert CompileCache.fetch(:c) == {:ok, 3}
-      assert CompileCache.size() == 2
+      assert TestSupport.compile_cache_size() == 2
     end
 
     test "an entry past its ttl misses on read, and the sweep removes it later" do
@@ -189,10 +189,10 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
       TestSupport.wait_until(fn -> CompileCache.fetch(:a) == {:error, :cache_miss} end)
 
-      assert CompileCache.size() == 1
+      assert TestSupport.compile_cache_size() == 1
 
       :sys.resume(pid)
-      TestSupport.wait_until(fn -> CompileCache.size() == 0 end)
+      TestSupport.wait_until(fn -> TestSupport.compile_cache_size() == 0 end)
     end
 
     test "a bad bound raises when the cache starts" do
@@ -283,8 +283,8 @@ defmodule NxCL.Compiler.CompileCacheTest do
     test "restarts the caches with it and opens a fresh context" do
       old_ctx = Devices.fetch!().ctx
       jit(fn x -> Nx.negate(x) end).(Nx.tensor([1.0]))
-      assert ProgramCache.size() > 0
-      assert CompileCache.size() > 0
+      assert TestSupport.program_cache_size() > 0
+      assert TestSupport.compile_cache_size() > 0
 
       pids = for mod <- [Devices, ProgramCache, CompileCache], do: Process.whereis(mod)
       ref = Process.monitor(hd(pids))
@@ -296,8 +296,8 @@ defmodule NxCL.Compiler.CompileCacheTest do
         Enum.all?(new, &is_pid/1) and Enum.zip(pids, new) |> Enum.all?(fn {a, b} -> a != b end)
       end)
 
-      assert ProgramCache.size() == 0
-      assert CompileCache.size() == 0
+      assert TestSupport.program_cache_size() == 0
+      assert TestSupport.compile_cache_size() == 0
       assert Devices.for_ctx(old_ctx) == nil
 
       new_ctx = Devices.fetch!().ctx
