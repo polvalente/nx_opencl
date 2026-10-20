@@ -1,18 +1,14 @@
-# Splits the time of one model call into transfer, kernel and host time.
-#
-# The split comes from a shim that stands in for libOpenCL (shim.c). It reads
-# CL_QUEUE_PROFILING_ENABLE events for kernel time and times buffer uploads and reads.
-# Nothing in lib/ or native/ changes.
+# Splits the time of one model call into transfer, kernel and host time, with the
+# shim in shim.c (see README.md). macOS only.
 #
 #   Apple:  benchmarks/profile/run.sh
 #   PoCL:   OPENCL_DYLIB_PATH=$(brew --prefix)/opt/opencl-icd-loader/lib/libOpenCL.dylib \
 #           OCL_ICD_VENDORS=$(brew --prefix)/etc/OpenCL/vendors benchmarks/profile/run.sh
 #
-# macOS only. NXCL_PROF_FILE sets where the counters file goes (default /tmp/nxcl_prof.bin).
-#
-# Per call: wall = whole call with output read back; transfer = input uploads and output
-# reads; kernel = device time of launches; host = wall - transfer - kernel (Elixir tracing,
-# lowering, argument setup, enqueue, waiting gaps). Kernel time is also split by entry name.
+# Per call: wall = whole call with output read back; transfer = input uploads and
+# output reads; kernel = device time of launches; host = wall - transfer - kernel
+# (tracing, lowering, argument setup, enqueue, waiting gaps). Kernel time is also
+# split by entry name.
 
 Code.require_file("../bench_helper.exs", __DIR__)
 Code.require_file("../models.exs", __DIR__)

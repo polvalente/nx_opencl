@@ -21,16 +21,13 @@ pub struct DeviceCtx {
     pub caps: Caps,
     /// Workgroup and local-memory limits codegen sizes cooperative kernels from.
     pub limits: Limits,
-    /// Kernels built for this context, by source, entry and options. The cache
-    /// only grows. One context holds one kernel per distinct generated source,
-    /// and a program re-uses those, so the count follows the number of distinct
-    /// ops a session runs, not the number of runs.
+    /// Kernels built for this context, by source, entry and options. It only
+    /// grows, with the number of distinct generated sources.
     pub kernels: Mutex<HashMap<KernelKey, Arc<CompiledKernel>>>,
 }
 
-/// Lock `m`, ignoring poison. A panic while a lock was held (the NIF entry
-/// points catch panics) must not make the queue or the kernel cache unusable;
-/// neither holds data a half-finished panic could leave inconsistent.
+/// Lock `m`, ignoring poison. The NIF entry points catch panics, and neither
+/// the queue nor the kernel cache holds data a panic could leave inconsistent.
 pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }

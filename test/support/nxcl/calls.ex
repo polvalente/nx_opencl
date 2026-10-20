@@ -1,13 +1,10 @@
 defmodule NxCL.TestSupport.Calls do
   @moduledoc """
-  Counts calls of public functions from outside, with Erlang call tracing, so
-  `lib/` carries no counters.
-
-  `count/2` runs a function in the calling process and returns `{result, counts}`,
-  where `counts` maps each `{module, function, arity}` asked for to the number of
-  times the process called it. Tracing follows one process, so the code under test
-  must run in the caller. A process has one tracer: do not nest `count/2` or use it
-  inside `NxCL.TestSupport.Trace.run/1`.
+  Counts calls of public functions with Erlang call tracing, so `lib/` has no
+  counters. `count/2` runs a function in the calling process and returns
+  `{result, counts}`, mapping each `{module, function, arity}` asked for to the
+  number of calls. The code under test must run in the caller. A process has one
+  tracer: do not nest `count/2` or use it inside `NxCL.TestSupport.Trace.run/1`.
   """
 
   @doc "Runs `fun` and returns `{result, counts}` for `mfas`."
@@ -15,7 +12,7 @@ defmodule NxCL.TestSupport.Calls do
   def count(mfas, fun) do
     for {mod, _fun, _arity} = mfa <- mfas do
       Code.ensure_loaded!(mod)
-      # Exactly one function matches, or the count would be zero for the wrong reason.
+      # Exactly one function must match, or a zero count proves nothing.
       1 = :erlang.trace_pattern(mfa, true, [])
     end
 
@@ -31,7 +28,7 @@ defmodule NxCL.TestSupport.Calls do
     end
   end
 
-  # A process does not trace itself, so a second process collects the messages.
+  # A process does not trace itself: a second one collects the messages.
   defp collect(counts) do
     receive do
       {:trace, _pid, :call, {mod, fun, args}} ->

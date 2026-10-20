@@ -1,18 +1,10 @@
 defmodule NxCL.Compiler.Lower.Contract do
-  @moduledoc """
-  Lowers `dot` and `conv` to instructions.
-
-  A `dot` becomes transposes and reshapes of both operands to `[b, m, k]` and
-  `[b, k, n]`, one `batched_gemm`, and a reshape of the result. Rank 1 and
-  scalar-contract cases take the same path. A `conv` becomes transposes to the
-  layout the native `conv` instruction reads (input `[n, c, spatial...]`, kernel
-  `[o, i, kernel spatial...]`), the instruction, and one transpose of its
-  `[o, n, spatial...]` result to the layout the caller asked for. The native side
-  expands `conv` to im2col plus `batched_gemm`; Elixir builds no kernel source.
-
-  Both functions take a builder (see `NxCL.Compiler.Lower.Shared`) and return
-  `{state, ref}` for the node's result. The operand refs already have the node's type.
-  """
+  @moduledoc false
+  # Lowers `dot` and `conv`. A `dot` becomes transposes and reshapes to
+  # `[b, m, k]` and `[b, k, n]`, one `batched_gemm`, and a reshape. A `conv`
+  # becomes transposes to the layout the native `conv` reads, the instruction,
+  # and one transpose of its `[o, n, spatial...]` result. The native side expands
+  # `conv` to im2col plus `batched_gemm`. Operand refs already have the node's type.
 
   import NxCL.Compiler.Lower.Shared, only: [identity?: 1, push: 2]
 
@@ -21,8 +13,8 @@ defmodule NxCL.Compiler.Lower.Contract do
   alias NxCL.Compiler.Ops
 
   @doc """
-  Lowers `dot` over operand refs `{left, right}`. `sides` holds
-  `{shape, contract_axes, batch_axes}` for each operand.
+  Lowers `dot` over `{left, right}` refs. `sides` holds `{shape, contract_axes,
+  batch_axes}` per operand.
   """
   @spec dot(Shared.builder(), Shared.tensor(), {Instruction.ref(), Instruction.ref()}, tuple()) ::
           {Shared.builder(), Instruction.ref()}
@@ -45,8 +37,8 @@ defmodule NxCL.Compiler.Lower.Contract do
   end
 
   @doc """
-  Lowers `conv` over `{{input, input_shape}, {kernel, kernel_shape}}`. `opts` are the
-  Expr options (`Nx.conv/3` after normalization).
+  Lowers `conv` over `{{input, input_shape}, {kernel, kernel_shape}}`. `opts` are
+  the Expr options.
   """
   @spec conv(Shared.builder(), Shared.tensor(), tuple(), keyword()) ::
           {Shared.builder(), Instruction.ref()}
@@ -65,8 +57,7 @@ defmodule NxCL.Compiler.Lower.Contract do
       batch_groups: opts[:batch_group_size]
     }
 
-    # The output is `[n, o, spatial...]` permuted by the inverse of `out_perm`; the
-    # native result is the same with the first two axes swapped.
+    # The native result has the first two axes of `[n, o, spatial...]` swapped.
     [n, o | spatial] = node.shape |> Tuple.to_list() |> permute_list(out_perm)
     raw_shape = List.to_tuple([o, n | spatial])
 
@@ -81,8 +72,6 @@ defmodule NxCL.Compiler.Lower.Contract do
       push(state, Ops.transpose(raw, node.type, node.shape, axes))
     end
   end
-
-  # -- Helpers ------------------------------------------------------------
 
   # Axis `a` of the `[n, o, ...]` layout is axis `swap_leading(a)` of `[o, n, ...]`.
   defp swap_leading(0), do: 1
@@ -102,7 +91,6 @@ defmodule NxCL.Compiler.Lower.Contract do
 
   defp size(shape, axes), do: Enum.reduce(axes, 1, &(elem(shape, &1) * &2))
 
-  # Transposes `ref` by `axes` (skipped for the identity) and reshapes to `target`.
   defp to_matrix(state, ref, shape, axes, target, type) do
     {state, ref, permuted} = permute(state, ref, shape, axes, type)
     {state, ref} = reshape(state, ref, type, permuted, target)

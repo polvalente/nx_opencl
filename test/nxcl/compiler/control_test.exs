@@ -1,15 +1,10 @@
 defmodule NxCL.ControlTest do
   @moduledoc """
-  Differential rows for `cond` and `while` through `NxCL.TestSupport.Compare` against
-  `Nx.Defn.Evaluator` on `Nx.BinaryBackend`.
-
-  `cond` rows cover one, two and three predicates, every predicate dtype, and
-  tensor, tuple, map and nested outputs. `while` rows cover scalar, tuple, map and
-  nested carries, trip counts 0, 1, 10 and 1000 (a counter against a tensor bound,
-  so the loop is dynamic; a literal bound gives a static loop), nesting depths 1 to
-  3, and a loop whose body uses `slice` and `put_slice` at the loop index.
-
-  `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
+  Differential rows for `cond` and `while` against `Nx.Defn.Evaluator`: one to
+  three predicates, every predicate dtype, tuple, map and nested outputs and
+  carries, trip counts 0, 1, 10 and 1000 (a counter against a tensor bound gives a
+  dynamic loop; a literal bound gives a static one), nesting depths 1 to 3, and a
+  body that uses `slice` and `put_slice` at the loop index.
   """
   use ExUnit.Case, async: false
 
@@ -54,8 +49,6 @@ defmodule NxCL.ControlTest do
     {:c, 64}
   ]
 
-  # -- cond -----------------------------------------------------------------
-
   defn cond1(p, x, y) do
     cond do
       p -> x + y
@@ -94,7 +87,6 @@ defmodule NxCL.ControlTest do
     end
   end
 
-  # The first predicate reads a value that only the cond uses.
   defn cond_inner_pred(a, x, y) do
     cond do
       Nx.sum(a) > 3 -> x + y
@@ -194,9 +186,6 @@ defmodule NxCL.ControlTest do
     end
   end
 
-  # -- while ----------------------------------------------------------------
-
-  # A counter against a tensor bound: the trip count is known only at run time.
   defn while_scalar(x, n) do
     {_i, acc, _x, _n} =
       while {i = 0, acc = x, x, n}, i < n do
@@ -266,7 +255,6 @@ defmodule NxCL.ControlTest do
     acc
   end
 
-  # `while` with a literal bound has a static trip count.
   defn while_static(x) do
     {_i, acc, _x} =
       while {i = 0, acc = x, x}, i < 10 do
@@ -297,7 +285,6 @@ defmodule NxCL.ControlTest do
     acc
   end
 
-  # Writes into `x` at the loop index.
   defn fill(x, n) do
     {_i, acc, _n} =
       while {i = 0, acc = x, n}, i < n do
@@ -338,7 +325,6 @@ defmodule NxCL.ControlTest do
     end
   end
 
-  # A loop whose condition reads a carry that the body changes after a few steps.
   defn while_data_dependent(x) do
     {acc, _n} =
       while {acc = x, n = 0}, Nx.sum(acc) < 20 and n < 50 do

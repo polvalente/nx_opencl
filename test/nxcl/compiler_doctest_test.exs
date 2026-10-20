@@ -1,12 +1,10 @@
 defmodule NxCL.CompilerDoctestTest do
   @moduledoc """
   Doctests of the Nx modules whose functions are `defn`, run through
-  `NxCL.Compiler`: `Nx.Defn.default_options/1` names it, so each `defn` call
-  compiles and runs on the device. The eager ops inside run on `NxCL.Backend`.
-  The functions left out are in `NxCL.DoctestSkips`. No trace here: the default
-  compiler also reaches the inner calls of a host function (`svd`), which run on
-  `Nx.BinaryBackend` by design and make the trace very slow. `NxCL.NoFallbackTest` checks
-  that the compiler runs ops on the device.
+  `NxCL.Compiler` (`Nx.Defn.default_options/1` names it). Functions left out are in
+  `NxCL.DoctestSkips`. There is no trace here: the default compiler also reaches
+  the inner calls of a host function (`svd`), which run on `Nx.BinaryBackend` and
+  make the trace very slow. `NxCL.NoFallbackTest` checks that ops run on the device.
   """
   use ExUnit.Case, async: false
 

@@ -1,19 +1,14 @@
 defmodule NxCL.Compiler.ProgramCache do
   @moduledoc """
-  Bounded cache of compiled program resources and executor plans, shared by
-  every call site. A key is an id-free signature of the lowered program (see
-  `NxCL.Compiler.Program.signature/1`) plus the device, so two functions that lower to
-  the same program share one resource.
+  Bounded cache of compiled programs and executor plans. The key is
+  `NxCL.Compiler.Program.signature/1` plus the device, so functions that lower
+  alike share one entry.
 
-  The table is public. Readers and writers use ETS directly; this process only
-  owns the tables. When two processes build the same key at once, the first
-  insert wins and the other uses the winner's value.
+  Callers use the public ETS table directly. If two processes build the same
+  key at once, the first insert wins. Dropping an entry does not free a program
+  a running call still holds; the native side frees it at the last release.
 
-  Dropping an entry only drops the cache's hold on the resource. A call that
-  runs it keeps its own hold, and the native side frees the program, its kernels
-  and its buffers when the last holder lets go.
-
-  The bound is `:max_items`, default 1024, FIFO:
+  The bound is `:max_items` (default 1024), oldest first out:
 
       config :nx_opencl, NxCL.Compiler.ProgramCache, max_items: 1024
   """
@@ -35,8 +30,7 @@ defmodule NxCL.Compiler.ProgramCache do
   end
 
   @doc """
-  The value under `key` (a hit), or what `build` returns (a miss), stored first
-  come first kept.
+  The value under `key`, or what `build` returns on a miss.
   """
   @spec fetch_or_build(term(), (-> term())) :: term()
   def fetch_or_build(key, build) do
@@ -50,8 +44,7 @@ defmodule NxCL.Compiler.ProgramCache do
   end
 
   @doc """
-  Drops every entry and the cache's hold on their device memory. A running call
-  keeps what it uses. Tests call it to start from an empty cache.
+  Drops every entry. A running call keeps what it uses.
   """
   @spec clear() :: :ok
   def clear() do

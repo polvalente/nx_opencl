@@ -1,27 +1,18 @@
 defmodule NxCL.Compiler.Executor.Plan do
   @moduledoc false
-  # Cuts a program that holds `cond`, `while` or `host_call` into steps for `NxCL.Compiler.Executor`.
+  # Cuts a program with `cond`, `while` or `host_call` into steps for
+  # `NxCL.Compiler.Executor`. A scope (the program or a nested body) becomes:
   #
-  # A scope (the program, or one nested body) becomes a list of steps:
+  #   * `:segment` - straight-line instructions, run natively as a small program
+  #   * `:cond`, `:while` - run by the executor, which reads the predicate
+  #   * `:host_call` - holds only an index into `:host_calls`, so a cached plan
+  #     never holds a function. It always runs, even with unused results.
   #
-  #   * `:segment` - a run of straight-line instructions, sent to the native
-  #     executor as its own small program. Its inputs are the values it reads
-  #     from the scope's table; its outputs are the results a later step reads.
-  #   * `:cond` and `:while` - run by the executor, which reads the predicate
-  #     and runs the nested scopes it needs.
-  #   * `:host_call` - a callback. The executor reads the operands back, calls
-  #     the function and uploads the results. The step holds only the index of
-  #     its entry in the program's side table, so cached plans never hold a function.
-  #     A host call is never dropped for unused results: it always runs.
+  # Each step lists the table keys to drop after its last reader. Captures and
+  # constants stay until the run ends, because nested bodies share them.
   #
-  # Each step lists the table keys to drop once its last reader has run.
-  # Captures and constants stay in the table until the run ends, because
-  # nested bodies share them.
-  #
-  # The plan and every segment's compiled program share the bounded
-  # `NxCL.Compiler.ProgramCache` with all other programs, so one program with many
-  # segments can push older entries out. An evicted segment compiles again on its
-  # next run.
+  # Segments share the bounded `NxCL.Compiler.ProgramCache`; an evicted segment
+  # compiles again on its next run.
 
   alias NxCL.Compiler.Executor.Wire
   alias NxCL.Compiler.Instruction
@@ -126,8 +117,8 @@ defmodule NxCL.Compiler.Executor.Plan do
 
   defp const_slot(constants, c), do: Wire.const(Enum.at(constants, c))
 
-  # Returns `{scope, needed_consts}`. A const is needed as a buffer when a
-  # control step or a scope output reads it; segments hold their own consts.
+  # Returns `{scope, needed_consts}`: constants a control step or output reads as
+  # a buffer. Segments hold their own constants.
   defp scope(instructions, outputs, types, constants) do
     indexed = Enum.with_index(instructions)
     types = Enum.reduce(indexed, types, &result_types/2)
@@ -176,8 +167,6 @@ defmodule NxCL.Compiler.Executor.Plan do
 
   defp const_refs(refs), do: refs |> Enum.filter(&match?({:const, _}, &1)) |> MapSet.new()
 
-  # -- Raw steps ---------------------------------------------------------------
-
   defp step_chunk([{%Instruction{op: op}, _} | _] = chunk, types, constants, needed)
        when op in @control do
     Enum.map_reduce(chunk, needed, fn {instr, i}, needed ->
@@ -207,7 +196,6 @@ defmodule NxCL.Compiler.Executor.Plan do
     {[step], needed}
   end
 
-  # A const or a result of the same segment needs no input slot.
   defp external_free?({:const, _}, _local), do: true
   defp external_free?({:result, m}, local), do: MapSet.member?(local, m)
   defp external_free?(_ref, _local), do: false
@@ -243,8 +231,7 @@ defmodule NxCL.Compiler.Executor.Plan do
     {step, needed}
   end
 
-  # The bodies a control instruction holds, flat, in run order: a `while` has
-  # `[cond, body]`; a `cond` has `[pred_1, body_1, ..., pred_n, body_n, else]`.
+  # A `while` has `[cond, body]`; a `cond` has `[pred_1, body_1, ..., else]`.
   defp bodies(%Instruction{op: :while, attrs: attrs}),
     do: [Keyword.fetch!(attrs, :cond), Keyword.fetch!(attrs, :body)]
 
@@ -254,8 +241,6 @@ defmodule NxCL.Compiler.Executor.Plan do
   end
 
   defp bodies(%Instruction{op: :host_call}), do: []
-
-  # -- Final steps -------------------------------------------------------------
 
   defp finish(%{kind: :segment} = step, live_defs, free, types, constants) do
     local = MapSet.new(for {_, i} <- step.chunk, do: i)

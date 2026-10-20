@@ -1,28 +1,25 @@
 //! `batched_gemm`: `C[b] = A[b] x B[b]` for row-major `A: [B, M, K]` and
-//! `B: [B, K, N]`. Elixir turns every `dot` into this form; the conv expansion
-//! in `conv.rs` calls it with groups as the batch axis.
+//! `B: [B, K, N]`. Every `dot` and the conv expansion (`conv.rs`, groups as the
+//! batch) use it.
 //!
-//! The main kernel is register tiled. A work group computes a `BM x BN` block
-//! of one batch entry. Each thread owns a `TM x TN` block of it, strided by the
-//! group shape so that neighbouring threads touch neighbouring columns. The
-//! group walks `K` in steps of `BK`, stages the `A` and `B` tiles in local
-//! memory, and bounds-checks every load and store, so `M` and `N` need not be
-//! multiples of the tile. Out-of-range tile cells load as zero.
+//! The main kernel is register tiled. A work group computes a `BM x BN` block of
+//! one batch entry; each thread owns a `TM x TN` block, strided by the group
+//! shape so neighbouring threads touch neighbouring columns. The group walks `K`
+//! in steps of `BK`, stages the `A` and `B` tiles in local memory, and
+//! bounds-checks every load and store. Out-of-range tile cells load as zero.
 //!
-//! The tile comes from a table that is keyed on device limits (work group size
-//! and local memory), not on a device name. A tile that does not fit the limits
-//! is skipped for the next smaller one. `NXCL_GEMM_TILE=bm,bn,bk,tm,tn`
-//! replaces the table when the tile is valid and fits. The tile goes into the
-//! build options, so it is part of the kernel cache key.
+//! The tile comes from a table keyed on device limits (work group size, local
+//! memory), not a device name; a tile that does not fit is skipped for the next
+//! smaller. `NXCL_GEMM_TILE=bm,bn,bk,tm,tn` replaces the table when valid and
+//! fitting. The tile is in the build options, so it is part of the cache key.
 //!
-//! Two shapes get their own kernels: `N == 1` (a work group folds each row of
-//! `A` against the vector with a local tree) and `M == 1` (one thread per
-//! output column). `K == 0`, or an empty output, writes zeros with a fill
-//! kernel and runs no GEMM kernel.
+//! `N == 1` (a work group folds each row of `A` against the vector with a local
+//! tree) and `M == 1` (one thread per output column) have their own kernels.
+//! `K == 0` or an empty output writes zeros and runs no GEMM kernel.
 //!
-//! Accumulation: floats accumulate in the math type (`f32` for `f16` and
-//! `bf16`); integers wrap in an unsigned type of at least 32 bits, so `s32`
-//! stays `s32`; complex values use the helpers of `complex.rs`.
+//! Floats accumulate in the math type (`f32` for `f16` and `bf16`). Integers wrap
+//! in an unsigned type of at least 32 bits, so `s32` stays `s32`. Complex values
+//! use the helpers of `complex.rs`.
 
 use super::complex;
 use super::movement::pragmas;
@@ -210,7 +207,6 @@ fn tile_from(value: Result<String, std::env::VarError>) -> Result<Option<Tile>, 
     }
 }
 
-/// The sizes of one product.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Gemm {
     pub dtype: DType,
@@ -220,7 +216,6 @@ pub(super) struct Gemm {
     pub k: usize,
 }
 
-/// Which buffers a GEMM kernel reads and writes.
 #[derive(Clone, Debug)]
 pub(super) struct Binding {
     pub a: KernelArg,
@@ -228,10 +223,8 @@ pub(super) struct Binding {
     pub out: KernelArg,
 }
 
-/// Types and helper source for one dtype.
 struct Code {
     info: TypeInfo,
-    /// C type a value is computed and staged in.
     t: &'static str,
     head: String,
     load: String,
@@ -286,7 +279,6 @@ fn code(dtype: DType) -> Result<Code, String> {
     })
 }
 
-/// The shared helpers: load, multiply-add, add, store.
 fn helpers(c: &Code) -> String {
     format!(
         "{head}\

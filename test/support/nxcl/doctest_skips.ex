@@ -1,24 +1,19 @@
 defmodule NxCL.DoctestSkips do
   @moduledoc """
-  The doctests of Nx that the suite leaves out, one reason per entry.
+  The Nx doctests the suite leaves out, with one reason per entry.
 
-  `@skips` lists functions that every device skips; `@needs` lists functions
-  that a device skips only when it lacks the extension (their examples use
-  `f64`, or an `s64` scatter). A device with the extension runs them. Each
-  entry is `{{function, arity}, reason}`; `@needs` entries carry the capability
-  first. Doctests skip a whole function, since `ExUnit.DocTest` cannot skip one
-  example.
+  `@skips` lists functions every device skips. `@needs` lists functions a device
+  skips only when it lacks the extension (their examples use `f64` or an `s64`
+  scatter). Doctests skip a whole function, since `ExUnit.DocTest` cannot skip one
+  example. The reasons:
 
-  The reasons fall in four groups:
-
-    * the expected text prints more digits than a device result keeps (the last
-      digit of an `f64`, rounding noise in a `c64` transform). The differential
-      rows for the op compare within a tolerance;
+    * the expected text prints more digits than a device result keeps; the
+      differential rows for the op compare within a tolerance;
     * the reference text is not the true value (`erf_inv` on `f64`);
     * the example needs a dtype that is out of scope (see the README);
     * the example needs `f64` or 64-bit atomics, and the device has neither.
 
-  An entry never loosens a tolerance: it means the example does not run.
+  An entry never loosens a tolerance: the example does not run.
   """
 
   @f64_digits "The f64 example prints 16 digits of a libm result; the device differs in the last digit. The differential rows for the op compare within a tolerance."

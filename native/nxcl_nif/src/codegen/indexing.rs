@@ -1,27 +1,26 @@
-//! Indexing kernels: `gather`, `indexed_add` and `indexed_put`.
-//!
-//! Index rules (the reference is `Nx.BinaryBackend`):
+//! Indexing kernels: `gather`, `indexed_add` and `indexed_put`. The reference is
+//! `Nx.BinaryBackend`.
 //!
 //! * An index outside `[0, dim)` is an error there. A kernel cannot raise, so it
-//!   sets the program's error flag and keeps going with a clamped index (`gather`)
+//!   sets the program's error flag and goes on with a clamped index (`gather`)
 //!   or skips the update (`indexed_*`); the run then fails with
-//!   `index out of bounds`. No result of such a run reaches the caller.
-//! * `indexed_put` with repeated indices: the reference keeps the last update (the
-//!   highest row). Here three passes give the same answer on every device: fill a
-//!   winner scratch with -1, `atomic_max` the row number of each update into the
-//!   winner of every target element it covers, then one thread per target element
-//!   reads the update of its winner. No two threads write the same output.
+//!   `index out of bounds`.
+//! * `indexed_put` with repeated indices keeps the last update (the highest row).
+//!   Three passes give that on every device: fill a winner scratch with -1;
+//!   `atomic_max` the row of each update into the winner of every target element
+//!   it covers; one thread per target element reads its winner's update. No two
+//!   threads write the same output.
 //! * `indexed_add`: `s32`/`u32` use `atomic_add`; `f32` and each `c64` part use an
-//!   `atomic_cmpxchg` loop on the bit pattern. `s64`/`u64`/`f64`/`c128` do the same
-//!   on `ulong` and need `cl_khr_int64_base_atomics`; a device without it gets an
-//!   error that names the extension, before any launch. `s8`/`s16`/`u8`/`u16`/`f16`/
-//!   `bf16` have no atomics of their width: they widen into a 32-bit scratch, add
-//!   there, and narrow once in a last pass. Float sums depend on the order the
-//!   threads run, so repeated indices give results that differ in the last bits.
+//!   `atomic_cmpxchg` loop on the bit pattern. `s64`/`u64`/`f64`/`c128` do the
+//!   same on `ulong` and need `cl_khr_int64_base_atomics`; without it the error
+//!   names the extension, before any launch. `s8`/`s16`/`u8`/`u16`/`f16`/`bf16`
+//!   have no atomics of their width: they widen into a 32-bit scratch, add
+//!   there, and narrow in a last pass. Float sums depend on thread order, so
+//!   repeated indices differ in the last bits.
 //!
-//! Layout: the target's gathered `axes` act as the leading axes. The other (rest)
-//! axes keep their order. `gather` writes `[indices batch..., rest...]`; an update
-//! row is a window over the rest axes that starts at 0.
+//! The target's gathered `axes` act as leading axes; the rest keep their order.
+//! `gather` writes `[indices batch..., rest...]`. An update row is a window over
+//! the rest axes that starts at 0.
 
 use super::index::{self, dims, strides};
 use super::movement::{ints, type_names, Kernel};
@@ -38,7 +37,6 @@ pub fn handles(op: &str) -> bool {
     OPS.contains(&op)
 }
 
-/// The error text for a nonzero error flag.
 pub fn error_message(code: i32) -> String {
     let op = match code {
         CODE_GATHER => "gather",
@@ -48,8 +46,6 @@ pub fn error_message(code: i32) -> String {
     };
     format!("index out of bounds in {}", op)
 }
-
-// ── Geometry ────────────────────────────────────────────
 
 /// The target and its split into gathered and rest axes.
 struct Geo {
@@ -122,13 +118,11 @@ fn expect(instr: &Instr, n: usize) -> Result<(), String> {
     }
 }
 
-/// Declares the error flag argument as `err`.
 fn flag(k: &mut Kernel) {
     k.params.push("__global int* err".to_string());
     k.args.push(KernelArg::ErrorFlag);
 }
 
-/// Declares the scratch buffer `n` as `name` of C type `ty`.
 fn scratch(k: &mut Kernel, ty: &str, name: &str, n: usize) {
     k.params.push(format!("volatile __global {ty}* {name}"));
     k.args.push(KernelArg::Scratch(n));
@@ -154,14 +148,11 @@ fn index_reads(k: &Kernel, ix: usize, row: &str, count: usize) -> Result<String,
     Ok(s)
 }
 
-/// Adds `off += v{a} * gs{a}` for each gathered axis.
 fn index_offset(count: usize) -> String {
     (0..count)
         .map(|a| format!("  off += v{a} * gs{a};\n"))
         .collect()
 }
-
-// ── gather ──────────────────────────────────────────────
 
 /// Operands: the tensor, the indices `[batch..., k]`. Attrs: the gathered axes.
 fn gather(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
@@ -226,14 +217,10 @@ fn gather(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     Ok(Plan::single(spec))
 }
 
-// ── Shared by indexed_add and indexed_put ───────────────
-
 /// Checked shapes of an indexed op: operands `[target, indices {n, k}, updates {n, window...}]`.
 struct Indexed {
     geo: Geo,
-    /// Elements per update row.
     row_len: usize,
-    /// Elements in all the updates: `rows * row_len`.
     updates: usize,
     window: Vec<usize>,
 }
@@ -379,8 +366,6 @@ fn window_offset(ix: &Indexed) -> String {
         .collect()
 }
 
-// ── indexed_put ─────────────────────────────────────────
-
 fn indexed_put(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let ix = indexed(instr)?;
     let tc = element_count(&ix.geo.shape);
@@ -442,8 +427,6 @@ fn indexed_put(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     })
 }
 
-// ── indexed_add ─────────────────────────────────────────
-
 const ATOMICS64: &str = "#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable\n";
 
 const ADD_F32: &str = "\
@@ -462,7 +445,6 @@ static void atomic_add_f64(volatile __global ulong* p, double v) {
 }
 ";
 
-/// How a type adds into memory.
 enum Adder {
     /// Atomics on the output buffer itself.
     Direct,
@@ -666,8 +648,6 @@ fn indexed_add(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
         }
     }
 }
-
-// ── Entry point ─────────────────────────────────────────
 
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     match instr.op.as_str() {

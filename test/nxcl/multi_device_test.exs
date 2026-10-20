@@ -1,7 +1,7 @@
 defmodule NxCL.MultiDeviceTest do
   @moduledoc """
   The eager backend runs on the device its operands live on. `device: {0, 0}`
-  opens a second context on the same GPU, so the checks need no second device.
+  opens a second context on the same GPU, so no second device is needed.
   """
   use ExUnit.Case, async: false
 
@@ -22,7 +22,6 @@ defmodule NxCL.MultiDeviceTest do
       assert ctx_of(Nx.tensor(2.0, backend: @other)) == other
       assert ctx_of(Nx.broadcast(Nx.tensor(2.0, backend: @other), {3})) == other
 
-      # A shaped constant goes through the backend callback with the option.
       out = %Nx.Tensor{shape: {2}, type: {:f, 32}, names: [nil], data: nil}
       shaped = NxCL.Backend.constant(out, 3.0, device: {0, 0})
       assert ctx_of(shaped) == other

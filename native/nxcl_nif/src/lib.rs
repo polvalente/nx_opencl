@@ -11,10 +11,8 @@ use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc, Term};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
-// Error convention: a fallible NIF returns `{:error, message}` and never
-// raises. The NIFs that build a handle or read bytes return the bare value on
-// success; the program NIFs return `{:ok, value}`. Elixir callers turn an error
-// into an exception.
+// A fallible NIF returns `{:error, message}` and never raises. Handle and read
+// NIFs return the bare value on success; program NIFs return `{:ok, value}`.
 
 /// An error the NIF returns as `{:error, message}`.
 fn term_err(message: impl Into<String>) -> rustler::Error {
@@ -25,8 +23,8 @@ pub struct NifDeviceCtx {
     inner: Arc<DeviceCtx>,
 }
 
-/// A device buffer handle. `buffer_free` empties the handle; the device memory
-/// goes when the last handle (an aliasing result shares it) lets go.
+/// A device buffer handle. The device memory goes when the last handle to it
+/// (an aliasing result shares it) is freed or dropped.
 pub struct NifDeviceBuffer {
     buffer: Mutex<Option<Arc<DeviceBuffer>>>,
     ctx: Arc<DeviceCtx>,
@@ -50,8 +48,7 @@ impl NifDeviceBuffer {
 #[rustler::resource_impl]
 impl rustler::Resource for NifDeviceCtx {}
 
-/// An extra command queue on a device context. Each one runs a program at a
-/// time, and different queues run at the same time.
+/// An extra command queue on a device context. Queues run in parallel; each runs one program at a time.
 pub struct NifQueue {
     queue: Mutex<CommandQueue>,
     ctx: Arc<DeviceCtx>,
@@ -70,8 +67,6 @@ impl rustler::Resource for NifDeviceBuffer {}
 
 #[rustler::resource_impl]
 impl rustler::Resource for NifProgram {}
-
-// ── Device Context ──────────────────────────────────────
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn device_ctx_create(device_id: usize) -> NifResult<ResourceArc<NifDeviceCtx>> {
@@ -122,8 +117,6 @@ fn device_info(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<Vec<(String, String)
         pair("extensions", info.extensions),
     ])
 }
-
-// ── Buffer Operations ───────────────────────────────────
 
 fn new_handle(ctx: &Arc<DeviceCtx>, buf: DeviceBuffer) -> ResourceArc<NifDeviceBuffer> {
     ResourceArc::new(NifDeviceBuffer::new(Arc::new(buf), ctx.clone()))
@@ -179,14 +172,11 @@ fn buffer_read_many<'a>(
         .collect()
 }
 
-/// Drops the handle's hold on the device memory. Reading the handle afterwards is
-/// an error. Returns false when the handle was already empty.
+/// Drops the handle's hold on the device memory. Returns false if already empty.
 #[rustler::nif]
 fn buffer_free(buf: ResourceArc<NifDeviceBuffer>) -> bool {
     lock(&buf.buffer).take().is_some()
 }
-
-// ── Program Execution ───────────────────────────────────
 
 /// Run `f`, turning a panic into an error term so the VM stays up.
 fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -259,27 +249,22 @@ fn wrap_outputs(
         .collect()
 }
 
-/// Makes the child-process exit status reachable again if the VM ignored it.
+/// Resets `SIGCHLD` to `SIG_DFL` when the VM left it at `SIG_IGN`.
 ///
-/// The BEAM sets `SIGCHLD` to `SIG_IGN`, so the kernel reaps a child at once
-/// and `wait4` never sees its exit. PoCL builds a kernel by running `clang` and
-/// `ld` as child processes and waits on them forever. This sets the disposition
-/// to `SIG_DFL` when, and only when, it is `SIG_IGN`; any handler another
-/// library installed stays.
+/// With `SIG_IGN` the kernel reaps a child at once and `wait4` never sees its
+/// exit. PoCL runs `clang` and `ld` as children to build a kernel and would wait
+/// forever. A handler another library installed stays.
 ///
-/// The change is process-wide. A child that any library forks later becomes a
-/// zombie until its parent waits for it. The BEAM starts its own ports through
-/// `erl_child_setup`, a separate process, and does not rely on the ignore.
+/// The change is process-wide: a child forked later by any library stays a
+/// zombie until its parent waits. The BEAM starts its ports through
+/// `erl_child_setup`, which does not rely on the ignore.
 ///
-/// This uses `sigaction` and not `signal`. `sigaction` reads the current
-/// disposition without changing it, so there is no moment where the VM's
-/// setting is replaced and then put back, and no handler loses its flags or
-/// mask. `signal` could only read by setting. The calls take only a pointer to
-/// a struct this function owns.
+/// This uses `sigaction`, which reads the disposition without changing it, so no
+/// handler loses its flags or mask. `signal` can only read by setting.
 ///
-/// Unsafe because `libc::sigaction` is a raw system call over C structs. The
-/// zeroed `sigaction` is valid (all-zero is `SIG_DFL` with no flags and an empty
-/// mask on every platform `libc` supports), and both pointers outlive the call.
+/// Unsafe because `libc::sigaction` is a raw system call over C structs. An
+/// all-zero `sigaction` is valid (`SIG_DFL`, no flags, empty mask) on every
+/// platform `libc` supports, and both pointers outlive the call.
 fn restore_sigchld() {
     // SAFETY: see above.
     unsafe {

@@ -1,15 +1,14 @@
 defmodule NxCL.TestSupport.Compare do
   @moduledoc """
   Runs a function through a candidate compiler and through `Nx.Defn.Evaluator` on
-  `Nx.BinaryBackend`, then compares the results.
+  `Nx.BinaryBackend`, then compares.
 
-  Type, shape, and names must match exactly. Integer values must match
-  exactly. Float values match within a tolerance per type. NaN must match NaN;
-  the sign of zero counts only with `signed_zero: true`.
+  Type, shape and names must match exactly, and so must integer values. Float
+  values match within a tolerance per type. NaN must match NaN; the sign of zero
+  counts only with `signed_zero: true`.
 
-  `NxCL.Compiler` rows run twice: once through the compiler and once eagerly,
-  with the arguments on `NxCL.Backend` and the evaluator walking the graph. Both
-  runs meet the same expected value.
+  `NxCL.Compiler` rows run twice, through the compiler and eagerly (arguments on
+  `NxCL.Backend`, the evaluator walking the graph), against the same expected value.
   """
 
   import ExUnit.Assertions
@@ -67,10 +66,7 @@ defmodule NxCL.TestSupport.Compare do
     :ok
   end
 
-  # The eager path: arguments on `NxCL.Backend`, default backend `NxCL.Backend`, the
-  # evaluator walks the graph and each op runs as a one-op program. `NxCL.Backend`
-  # stays the default so a literal the row's function builds, and the evaluator's
-  # own `iota` and constants, live on it as they would for a user.
+  # `NxCL.Backend` is also the default, so literals the function builds live on it.
   defp assert_backend(fun, args, expected, opts) do
     actual =
       Nx.with_default_backend(NxCL.Backend, fn ->
@@ -92,8 +88,6 @@ defmodule NxCL.TestSupport.Compare do
   @spec seed() :: non_neg_integer()
   def seed, do: ExUnit.configuration()[:seed] || 0
 
-  # -- Reference -----------------------------------------------------------
-
   defp reference(fun, args) do
     binary_args = Enum.map(args, &to_binary_backend/1)
     apply(Nx.Defn.jit(fun, compiler: Nx.Defn.Evaluator), binary_args)
@@ -112,8 +106,6 @@ defmodule NxCL.TestSupport.Compare do
     do: Nx.Defn.Composite.traverse(container, &Nx.backend_copy(&1, NxCL.Backend))
 
   defp to_nxcl_backend(other), do: other
-
-  # -- Comparison ----------------------------------------------------------
 
   defp compare_containers(expected, actual, opts) do
     assert structure(expected) == structure(actual),
@@ -173,7 +165,6 @@ defmodule NxCL.TestSupport.Compare do
     atol = Keyword.get(opts, :atol, tol)
     signed_zero = Keyword.get(opts, :signed_zero, false)
 
-    # NaN positions must match before any value is compared.
     nan_e = Nx.is_nan(e) |> Nx.to_flat_list()
     nan_a = Nx.is_nan(a) |> Nx.to_flat_list()
 

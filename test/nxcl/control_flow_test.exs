@@ -1,9 +1,9 @@
 defmodule NxCL.ControlFlowTest do
   @moduledoc """
-  Checks of the control-flow executor that a differential row cannot state: the
-  value of a `cond` whose other branch would raise, how many predicates the
-  executor reads, the result of a long loop, the zero-iteration result, and the
-  lowering error for a value an inner scope takes from its parent.
+  Control-flow checks a differential row cannot state: a `cond` whose other branch
+  would raise, how many predicates the executor reads, a long loop, the
+  zero-iteration result, and the error for a value an inner scope takes from its
+  parent.
   """
   use ExUnit.Case, async: false
 

@@ -1,13 +1,10 @@
 defmodule NxCL.HostCallbackTest do
   @moduledoc """
-  Differential rows for `runtime_call` and `io_call` through `NxCL.TestSupport.Compare`
-  against `Nx.Defn.Evaluator` on `Nx.BinaryBackend`.
-
-  Each dtype gets a `runtime_call` between device ops (before and after, and
-  feeding a `dot`), and an `io_call` between device ops. The `io_call` rows also
-  check that the callback saw the same tensor on both compilers. Rows for `f64`
-  and `c128` carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
-  Order, counts, errors and transfers are in `NxCL.HostCallTest`.
+  Differential rows for `runtime_call` and `io_call` against `Nx.Defn.Evaluator`.
+  Each dtype gets a `runtime_call` between device ops (before, after, and feeding
+  a `dot`) and an `io_call` between device ops; the `io_call` rows also check that
+  the callback saw the same tensor on both compilers. Order, counts, errors and
+  transfers are in `NxCL.HostCallTest`.
   """
   use ExUnit.Case, async: false
 

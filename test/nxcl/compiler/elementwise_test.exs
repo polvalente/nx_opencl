@@ -1,15 +1,9 @@
 defmodule NxCL.ElementwiseTest do
   @moduledoc """
-  Differential rows for every elementwise op: each op on each dtype Nx accepts
-  for it, through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`. A second group
-  holds one named row per semantic rule (NaN, overflow, zero divisor, shift
-  width, integer division and remainder, casts). Where `BinaryBackend` raises
-  or is wrong, the row states the expected values itself.
-
-  `f64` rows carry `requires: :fp64` and skip on a device without
-  `cl_khr_fp64`. `f16` rows carry `requires: :fp16` and skip without
-  `cl_khr_fp16`. `bf16` needs no extension: the kernels store it as `ushort`
-  and compute in `f32`.
+  Differential rows for every elementwise op on each dtype Nx accepts for it. A
+  second group holds one row per rule (NaN, overflow, zero divisor, shift width,
+  integer division and remainder, casts). Where `BinaryBackend` raises or is wrong,
+  the row states the expected values.
   """
   use ExUnit.Case, async: false
 
@@ -35,10 +29,6 @@ defmodule NxCL.ElementwiseTest do
 
   defp tol(op, type), do: Map.get(@tolerances, {op, type}, [])
 
-  # -- Data ----------------------------------------------------------------
-
-  # Random values plus the edge values: zeros, NaN and infinities for floats,
-  # minimum and maximum for integers.
   defp data(type, shape \\ {65}) do
     Nx.concatenate([Gen.random(shape, type), Gen.edge_values(type)])
   end
@@ -72,7 +62,6 @@ defmodule NxCL.ElementwiseTest do
   defp right_operand(:pow, type), do: Nx.abs(Gen.random({65}, type))
   defp right_operand(_op, type), do: Gen.random({65}, type)
 
-  # Integers across the whole range of the type.
   defp wide(type, n \\ 40) do
     {kind, bits} = type
     :rand.seed(:exsss, {seed(), bits, n})
@@ -96,8 +85,6 @@ defmodule NxCL.ElementwiseTest do
   defp assert_list(tensor, expected) do
     assert Nx.to_flat_list(tensor) == expected
   end
-
-  # -- Unary: float functions ----------------------------------------------
 
   @float_fns ~w(exp expm1 log log1p sin cos tan sinh cosh tanh asin acos atan asinh acosh atanh
                 sqrt rsqrt cbrt erf erfc sigmoid)a
@@ -143,8 +130,6 @@ defmodule NxCL.ElementwiseTest do
       end
     end
   end
-
-  # -- Unary: the rest ------------------------------------------------------
 
   describe "unary" do
     for op <- ~w(abs negate sign ceil floor round)a, type <- @all do
@@ -200,8 +185,6 @@ defmodule NxCL.ElementwiseTest do
       end
     end
   end
-
-  # -- Binary ----------------------------------------------------------------
 
   describe "binary" do
     for op <- ~w(add subtract multiply max min)a, type <- @all do
@@ -355,8 +338,6 @@ defmodule NxCL.ElementwiseTest do
     end
   end
 
-  # -- Mixed types: Nx leaves the operands as they are -------------------------
-
   describe "mixed operand types" do
     # `Nx.add(u8, s8)` reaches the compiler as an `add` of `u8` and `s8` with an
     # `s16` result. No `as_type` node comes first. Codegen reads each operand in
@@ -403,10 +384,7 @@ defmodule NxCL.ElementwiseTest do
     end
   end
 
-  # -- Scalar constants ---------------------------------------------------------
-
   describe "scalar constants" do
-    # A scalar literal reaches the kernel as a scalar argument, not a buffer.
     test "a constant of another type: u8 plus 300 wraps" do
       assert_same(fn x -> Nx.add(x, 300) end, [Nx.tensor([1, 2, 255], type: :u8)])
     end
@@ -462,8 +440,6 @@ defmodule NxCL.ElementwiseTest do
       assert_same(fn x, s -> Nx.add(x, s) end, [Nx.tensor([1.0, 2.0]), Nx.tensor(1.0)])
     end
   end
-
-  # -- select, clip, casts -------------------------------------------------------
 
   describe "select and clip" do
     for type <- @all do
@@ -529,7 +505,6 @@ defmodule NxCL.ElementwiseTest do
       end
     end
 
-    # Casts to the same width keep the bytes.
     for {a, b} <-
           [
             {{:f, 32}, {:s, 32}},
@@ -553,8 +528,6 @@ defmodule NxCL.ElementwiseTest do
       end
     end
   end
-
-  # -- Dtype carriers: parameter, capture, constant, reshape -----------------------
 
   describe "native dtype buffers" do
     for type <- @all do
@@ -591,8 +564,6 @@ defmodule NxCL.ElementwiseTest do
       assert Nx.to_flat_list(run(&Nx.negate/1, [x])) == Nx.to_flat_list(Nx.negate(x))
     end
   end
-
-  # -- Rules: one named row per semantic rule ------------------------------------------
 
   describe "rule: NaN" do
     test "max and min return NaN if either side is NaN" do
@@ -1005,8 +976,6 @@ defmodule NxCL.ElementwiseTest do
       ])
     end
   end
-
-  # -- Device without an extension ----------------------------------------------------
 
   describe "a type the device cannot run" do
     test "an f16 program raises NxCL.CompilerError naming the extension" do

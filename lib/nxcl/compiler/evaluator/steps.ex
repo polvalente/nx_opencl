@@ -1,14 +1,11 @@
 defmodule NxCL.Compiler.Evaluator.Steps do
   @moduledoc false
-  # Reads the body of a `reduce` or `window_reduce` function as steps, for the
-  # eager backend. The backend gets an Elixir function, not an `Nx.Defn.Expr`
-  # graph, so it runs the function once on two scalar tensors of this module.
-  # Each binary op the body calls records one step. The steps have the shape
-  # `NxCL.Compiler.Lower.reduce_steps/3` returns: `{op, a, b}` over variables 0 and 1 (the
-  # two arguments) and `2 + k` (the result of step `k`).
-  #
-  # An op that is not a binary step op has no function here, so the call raises
-  # and the trace turns that into the lowering's "does not yet lower op" error.
+  # Reads the body of a `reduce` or `window_reduce` function as steps. The
+  # backend gets an Elixir function, not a graph, so it runs the function once
+  # on two scalar tensors of this module. Each binary op records `{op, a, b}`
+  # over variables 0 and 1 (the arguments) and `2 + k` (the result of step `k`).
+  # Any other op has no function here, so the call raises and the trace turns
+  # that into "does not yet lower op".
 
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Lower.Shared
@@ -18,8 +15,8 @@ defmodule NxCL.Compiler.Evaluator.Steps do
   @key {__MODULE__, :trace}
 
   @doc """
-  Steps of `fun`, a two-argument function over scalars of `type`. `what` names the
-  caller (`:reduce` or `:window_reduce`) in error messages.
+  Steps of `fun`, a two-argument function over scalars of `type`. `what` is
+  `:reduce` or `:window_reduce`, for error messages.
   """
   @spec trace(function(), Nx.Type.t(), atom()) :: [{atom(), non_neg_integer(), non_neg_integer()}]
   def trace(fun, type, what) do

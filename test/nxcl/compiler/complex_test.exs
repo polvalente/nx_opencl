@@ -1,28 +1,18 @@
 defmodule NxCL.ComplexTest do
   @moduledoc """
   Differential rows for `c64` and `c128`: every elementwise op Nx accepts on a
-  complex tensor, through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`. Rule rows
-  state their expected values where `BinaryBackend` is wrong or raises: the sign
-  of zero on a branch cut, `sign`, and NaN or infinity parts.
+  complex tensor, against `Nx.BinaryBackend`. Rule rows state the expected values
+  where `BinaryBackend` is wrong or raises: the sign of zero on a branch cut,
+  `sign`, and NaN or infinity parts.
 
-  Ops Nx 1.0 accepts on complex input (probed on `c64`; output type in
-  brackets): `abs` [real], `acos acosh asin asinh atan atanh cbrt cos cosh exp expm1
-  log log1p negate rsqrt sigmoid sign sin sinh sqrt tan tanh add subtract multiply
-  divide pow conjugate` [complex], `real imag` [real], `equal not_equal logical_and
-  logical_or logical_xor logical_not is_nan is_infinity` [`u8`], `select`, and
-  `as_type` in both directions. A complex value is true when either part is not
-  zero; `is_nan` and `is_infinity` look at both parts.
+  Nx 1.0 raises on `atan2 bitwise_* bitcast ceil clip count_leading_zeros erf
+  erf_inv erfc floor greater* left_shift less* max min population_count quotient
+  remainder right_shift round` for complex input, and the lowering rejects them
+  too. A complex value is true when either part is not zero.
 
-  Ops Nx raises on for complex input, which `NxCL.Compiler.Lower` also rejects:
-  `atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
-  count_leading_zeros erf erf_inv erfc floor greater greater_equal left_shift less
-  less_equal max min population_count quotient remainder right_shift round`. EMLX
-  rejects nothing in its lowering; it relies on Nx to raise while tracing, as here.
-
-  `c128` rows carry `requires: :fp64` and skip on a device without
-  `cl_khr_fp64` (the Apple GPU). The device runs `c64` in `float`, so `c64`
-  results differ from the `f64` reference by single-precision rounding; the
-  default `f32` tolerance covers that, and the rows that need more say why.
+  The device runs `c64` in `float`, so `c64` results differ from the `f64`
+  reference by single-precision rounding; the default `f32` tolerance covers
+  that, and rows that need more say why.
   """
   use ExUnit.Case, async: false
 
@@ -60,8 +50,6 @@ defmodule NxCL.ComplexTest do
       # values: `mpmath` 1.3 at 60 digits, rounded to `f64`; on the cuts the `-0.0` row is
       # the conjugate of the `+0.0` row (C99). The generator is
       # `mp.dps = 60; log(1 + mpc(x, y))` for `log1p`, `mp.atanh(mpc(x, y))` for `atanh`.
-      # The old `log1p` gave -inf (or an error of 1e-3) near -1 in `f32`; the old
-      # `atanh` lost every digit of its real part for x < 0 near -1.
       {{-0.9998779296875, 0.0}, {-9.010913347279288, 0.0}},
       {{-0.9998779296875, -0.0}, {-9.010913347279288, -0.0}},
       {{-1.0001220703125, 0.0}, {-9.010913347279288, 3.141592653589793}},
@@ -241,8 +229,6 @@ defmodule NxCL.ComplexTest do
 
   defp tol(op, type), do: Map.get(@tolerances, {op, type}, [])
 
-  # -- Data ----------------------------------------------------------------
-
   defp part({:c, 64}), do: {:f, 32}
   defp part({:c, 128}), do: {:f, 64}
 
@@ -259,13 +245,11 @@ defmodule NxCL.ComplexTest do
     Nx.concatenate([Gen.random({65}, type), zeros])
   end
 
-  # `data` with the zeros replaced by 1, for divisors.
   defp nonzero(type) do
     z = data(type)
     Nx.select(Nx.equal(z, Nx.tensor(0, type: type)), Nx.tensor(1, type: type), z)
   end
 
-  # Values with NaN and infinity in either part, for the rows that state their result.
   defp specials(type) do
     nan = :nan
     inf = :infinity
@@ -302,7 +286,6 @@ defmodule NxCL.ComplexTest do
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 
-  # The eager path: arguments on `NxCL.Backend`, each op a one-op program.
   defp eager(fun, args) do
     Nx.with_default_backend(NxCL.Backend, fn ->
       apply(
@@ -335,16 +318,14 @@ defmodule NxCL.ComplexTest do
     end
   end
 
-  # -- Unary: complex in, complex out -------------------------------------------
-
   @unary ~w(negate sign exp expm1 log log1p sqrt rsqrt cbrt sin cos tan sinh cosh tanh asin acos
             atan asinh acosh atanh sigmoid conjugate)a
 
   describe "unary" do
     for op <- @unary, type <- @types do
-      # `sign` of a complex value is z / |z|; `BinaryBackend` returns 1 for every
-      # value, so the rule rows below state `sign`. The tag goes inside the `if`: a
-      # tag set with no test after it would land on the next test.
+      # `BinaryBackend` returns 1 for the `sign` of every complex value, so the rule
+      # rows state it. The tag sits inside the `if`: a tag with no test after it
+      # would land on the next test.
       if op != :sign do
         if type == {:c, 128}, do: @tag(requires: :fp64)
 
@@ -422,8 +403,6 @@ defmodule NxCL.ComplexTest do
     end
   end
 
-  # -- Binary --------------------------------------------------------------------
-
   describe "binary" do
     for op <- ~w(add subtract multiply divide pow)a, type <- @types do
       if type == {:c, 128}, do: @tag(requires: :fp64)
@@ -493,8 +472,6 @@ defmodule NxCL.ComplexTest do
     end
   end
 
-  # -- select and casts ---------------------------------------------------------
-
   describe "select and as_type" do
     for type <- @types do
       if type == {:c, 128}, do: @tag(requires: :fp64)
@@ -545,8 +522,6 @@ defmodule NxCL.ComplexTest do
       assert_same(&Nx.as_type(&1, :c128), [Gen.random({65}, {:f, 64})])
     end
   end
-
-  # -- Rules: expected values stated here ---------------------------------------------
 
   describe "rule: upload and readback" do
     for type <- @types do
@@ -741,8 +716,6 @@ defmodule NxCL.ComplexTest do
       test "sign is z over |z| #{Nx.Type.to_string(type)}" do
         type = unquote(Macro.escape(type))
 
-        # Random points against z / |z|, computed on `BinaryBackend`; the compiler and the
-        # eager backend each get the same checks.
         z = nonzero(type)
         want = Nx.divide(z, Nx.as_type(Nx.abs(z), type))
         tol = if type == {:c, 64}, do: 1.0e-5, else: 1.0e-12
@@ -772,8 +745,6 @@ defmodule NxCL.ComplexTest do
       end
     end
   end
-
-  # -- Lowering -------------------------------------------------------------------------
 
   describe "rejected ops" do
     @unary_rejected ~w(bitwise_not ceil count_leading_zeros erf erf_inv erfc floor

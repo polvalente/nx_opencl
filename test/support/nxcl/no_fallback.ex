@@ -3,22 +3,19 @@ defmodule NxCL.TestSupport.NoFallback do
   A backend that raises on every compute callback, to show that a program runs on
   the device and not on the host CPU.
 
-  `guard/1` runs a function with this backend as the default, so code on the
-  compute path that builds an intermediate with the default backend raises
-  `NxCL.TestSupport.NoFallback.Fallback` instead of computing on the CPU. Only
-  data movement works: `from_binary`, `to_binary`, `constant`, `inspect`, the copy
-  and free callbacks, and `reshape` and `squeeze`, which change only the shape of
-  the host copy of a result (the executor reshapes what it reads back from the
-  device).
+  `guard/1` runs a function with this backend as the default. Code on the compute
+  path that builds an intermediate with the default backend raises `Fallback`.
+  Only data movement works: `from_binary`, `to_binary`, `constant`, `inspect`, the
+  copy and free callbacks, and `reshape` and `squeeze`, which change only the shape
+  of the host copy of a result.
 
-  The one allowed crossing is a host call. A callback that `Nx.runtime_call/4` or
-  `Nx.io_call/2` runs computes on the host by design, so a compute callback that
-  runs inside `NxCL.Compiler.Executor.Host` goes to `Nx.BinaryBackend` instead of raising.
+  A host call may compute on the host: a compute callback that runs inside
+  `NxCL.Compiler.Executor.Host` goes to `Nx.BinaryBackend` instead of raising.
 
-  `guard/1` also traces calls into `Nx.BinaryBackend` made by the running process
-  (an op that names `Nx.BinaryBackend` itself, bypassing the default). Such a
-  call is a fallback, also when the function made a host call: the trace goes silent
-  while a callback runs, so every call it still sees was made outside a callback.
+  `guard/1` also traces calls into `Nx.BinaryBackend` by the running process (an
+  op that names `Nx.BinaryBackend` itself). Such a call is a fallback, also after
+  a host call: the trace goes silent while a callback runs, so every call it sees
+  was made outside a callback.
   """
 
   @behaviour Nx.Backend
@@ -32,7 +29,7 @@ defmodule NxCL.TestSupport.NoFallback do
 
   @collector {__MODULE__, :collector}
 
-  # Callbacks that move data or change a shape; every other callback computes.
+  # Callbacks that move data or change a shape.
   @data [
     :init,
     :from_binary,
@@ -89,9 +86,8 @@ defmodule NxCL.TestSupport.NoFallback do
   end
 
   @doc """
-  Drops the calls `Nx.Defn.Expr` makes while it traces: it folds an op on scalar
-  constants at once, on `Nx.BinaryBackend`. That is Nx's own work before any
-  compiler runs, not the compute path.
+  Drops the calls `Nx.Defn.Expr` makes while it traces: it folds ops on scalar
+  constants on `Nx.BinaryBackend`. That is Nx's work, not the compute path.
   """
   @spec compute_calls([tuple()]) :: [tuple()]
   def compute_calls(calls), do: Enum.reject(calls, &match?({_, _, {Nx.Defn.Expr, _, _}}, &1))
@@ -109,7 +105,7 @@ defmodule NxCL.TestSupport.NoFallback do
     collector
   end
 
-  # Trace patterns are global and slow to set, so set them once per VM.
+  # Trace patterns are global and slow to set: once per VM.
   defp install_patterns do
     if :persistent_term.get(@collector, nil) == nil do
       Code.ensure_loaded!(NxCL.Compiler.Executor)
@@ -126,9 +122,9 @@ defmodule NxCL.TestSupport.NoFallback do
         )
       end
 
-      # A host call computes on `Nx.BinaryBackend` by design and can make millions of
-      # calls. Note it at `run/3`, then go silent once `read/2` has run (the callback
-      # follows) until `put_results/3`, which the executor calls next.
+      # A host call computes on `Nx.BinaryBackend` and can make millions of calls.
+      # Note it at `run/3`, go silent after `read/2` (the callback follows), and
+      # resume at `put_results/3`.
       :erlang.trace_pattern(
         {NxCL.Compiler.Executor.Host, :run, 3},
         [{:_, [], [{:message, {:caller}}]}],
@@ -177,7 +173,6 @@ defmodule NxCL.TestSupport.NoFallback do
     end
   end
 
-  # `Host.run/3` returns an `:io_call` that has no function at once; nothing runs.
   defp ran_function?(%{kind: :io_call, fun: nil}), do: false
   defp ran_function?(_entry), do: true
 
@@ -228,7 +223,6 @@ defmodule NxCL.TestSupport.NoFallback do
   @impl true
   def backend_deallocate(_tensor), do: :ok
 
-  # A scalar built from a number (`Nx.tensor/2` of a number); no tensor is computed.
   @impl true
   def constant(out, number, opts) do
     %Nx.Tensor{data: %Nx.BinaryBackend{state: binary}} =
@@ -237,7 +231,6 @@ defmodule NxCL.TestSupport.NoFallback do
     put_in(out.data, %__MODULE__{binary: binary})
   end
 
-  # Shape-only: no element is read or computed.
   @impl true
   def reshape(out, %Nx.Tensor{data: %__MODULE__{} = data}), do: put_in(out.data, data)
 
@@ -259,7 +252,6 @@ defmodule NxCL.TestSupport.NoFallback do
     end
   end
 
-  # A callback of `Nx.runtime_call/4` or `Nx.io_call/2` runs in `NxCL.Compiler.Executor.Host`.
   defp in_host_call? do
     {:current_stacktrace, frames} = Process.info(self(), :current_stacktrace)
     Enum.any?(frames, &match?({NxCL.Compiler.Executor.Host, _, _, _}, &1))

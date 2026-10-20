@@ -1,7 +1,7 @@
 defmodule NxCL.Compiler.CompileCacheTest do
   @moduledoc """
-  Closure cache, structural cache, options, device registry, queue partitions,
-  eviction and a concurrency stress run.
+  The closure cache, the structural cache, options, the device registry, queue
+  partitions, eviction and a concurrent stress run.
   """
   use ExUnit.Case, async: false
 

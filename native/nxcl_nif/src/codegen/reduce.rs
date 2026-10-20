@@ -1,33 +1,32 @@
 //! Reduction kernels: `sum`, `product`, `reduce_max`, `reduce_min`, `all`,
 //! `any`, `argmax`, `argmin` and the generic `reduce`.
 //!
-//! One template serves every op. The strategy comes from the reduced extent
-//! `R` and the number of outputs:
+//! One template serves every op. The strategy comes from the reduced extent `R`
+//! and the number of outputs:
 //!
 //! - `Thread`: `R` is small. One work item per output loops over the extent.
-//! - `Group`: one workgroup per output. Each item folds a strided share of the
-//!   extent, then the group folds the items in a tree over local memory.
-//! - `Sliced(g)`: few outputs and a long extent. `g` workgroups per output
-//!   each fold a slice and write a partial; a second launch folds the `g`
-//!   partials per output with the same tree.
+//! - `Group`: one workgroup per output. Each item folds a strided share, then
+//!   the group folds the items in a tree over local memory.
+//! - `Sliced(g)`: few outputs, long extent. `g` workgroups per output each fold
+//!   a slice into a partial; a second launch folds the partials with the same tree.
 //!
-//! No atomics. The accumulator has the output type (`s32` stays `s32` and wraps,
-//! `f32` stays `f32`; `bf16` and `f16` accumulate in `f32`). Reduced axes may sit
-//! anywhere: the kernel maps the flat reduced index to an input offset with
-//! strides, so no transpose copy is made. The group size and the local array
-//! sizes come from the device limits.
+//! No atomics. The accumulator has the output type (`s32` wraps, `f32` stays
+//! `f32`; `bf16` and `f16` accumulate in `f32`). Reduced axes may sit anywhere:
+//! the kernel maps the flat reduced index to an input offset with strides, so
+//! there is no transpose copy. Group and local array sizes come from the device
+//! limits.
 //!
 //! `argmax` and `argmin` fold `(value, index)` pairs under a total order: a NaN
-//! beats every number, the later of two NaNs wins (what `Nx.BinaryBackend` does),
+//! beats every number, the later of two NaNs wins (as `Nx.BinaryBackend` does),
 //! and equal values go to the lowest or highest index by `tie_break`.
 //!
-//! A generic `reduce` arrives as a list of semantic steps over the two
-//! accumulator values. A body that is a single `add`, `multiply`, `max` or `min`
-//! is the same combiner as `sum`, `product`, `reduce_max` or `reduce_min`, so it
-//! generates the same source; the lowering folds its initial accumulator in
-//! afterwards. Any other body need not be associative, so a tree would change
-//! the answer. It takes the initial accumulator as a second operand and folds
-//! the extent in order, one work item per output, as `Nx` does.
+//! A generic `reduce` arrives as steps over the two accumulator values. A body
+//! of one `add`, `multiply`, `max` or `min` is the same combiner as `sum`,
+//! `product`, `reduce_max` or `reduce_min` and generates the same source; the
+//! lowering folds the initial accumulator in afterwards. Any other body need not
+//! be associative, so a tree would change the answer: it takes the initial
+//! accumulator as a second operand and folds in order, one work item per output,
+//! as Nx does.
 
 use super::complex;
 use super::elementwise::{scalar_binary, ScalarCode};
@@ -88,8 +87,6 @@ fn strategy(extent: usize, n_out: usize, wg: usize) -> Strategy {
         }
     }
 }
-
-// ── Steps and combiners ─────────────────────────────────
 
 /// One step of a generic `reduce` body: `op(v[a], v[b])`. Variables 0 and 1
 /// are the two accumulator parameters; step `k` defines variable `2 + k`. The
@@ -204,7 +201,6 @@ pub(super) enum CombKind {
 /// combiner has one. Without an identity the kernels track whether a slot
 /// holds a value.
 pub(super) struct Combiner {
-    /// The accumulator type: a math type.
     pub acc: TypeInfo,
     pub code: ScalarCode,
     pub identity: Option<String>,
@@ -350,10 +346,6 @@ pub(super) fn combiner(kind: &CombKind, acc_dtype: DType) -> Result<Combiner, St
     }
 }
 
-// ── Loads and stores ────────────────────────────────────
-
-// ── Geometry ────────────────────────────────────────────
-
 /// The kept and reduced axes of an input, with their sizes and input strides.
 struct Geometry {
     pub kept: Vec<(usize, i64)>,
@@ -454,10 +446,7 @@ impl Geometry {
     }
 }
 
-// ── The op, decoded ─────────────────────────────────────
-
 enum Kind {
-    /// Fold values with a combiner.
     Fold {
         kind: CombKind,
         /// `all` and `any` fold truth values of the input.
@@ -544,9 +533,6 @@ fn decode(instr: &Instr) -> Result<Decoded, String> {
     }
 }
 
-// ── Kernel text ─────────────────────────────────────────
-
-/// Everything the passes share.
 struct Ctx<'a> {
     instr: &'a Instr,
     geo: Geometry,
@@ -614,7 +600,6 @@ fn fold_stmt(has_identity: bool, ty: &str, value: &str, indent: &str) -> String 
     }
 }
 
-/// Source of the fold prologue: declares `acc` (and `has`).
 fn acc_decl(ctx: &Ctx, comb: &Combiner) -> String {
     match &comb.identity {
         Some(id) => format!("  {} acc = {};\n", ctx.acc.math, id),
@@ -644,7 +629,6 @@ fn fold_head(ctx: &Ctx, comb: &Combiner, caps_pragmas: &str) -> String {
     )
 }
 
-/// How a pass that reads the input runs.
 #[derive(Clone, Copy)]
 enum Mode {
     /// One work item per output.
@@ -653,7 +637,6 @@ enum Mode {
     Group { slices: usize },
 }
 
-/// The pass that reads the input.
 fn fold_input_pass(
     ctx: &Ctx,
     comb: &Combiner,
@@ -751,8 +734,6 @@ fn fold_partials_pass(ctx: &Ctx, comb: &Combiner, slices: usize) -> Result<Kerne
     Ok(ctx.spec("p2", k, body, global, vec![wg]))
 }
 
-// ── Argmax and argmin ───────────────────────────────────
-
 fn better_fn(ctx: &Ctx, max: bool, low: bool) -> String {
     let t = ctx.acc.math;
     let cmp = if max { ">" } else { "<" };
@@ -845,8 +826,6 @@ fn arg_partials_pass(ctx: &Ctx, slices: usize) -> Result<KernelSpec, String> {
     let global = checked_product("the reduction launch size", &[ctx.geo.n_out, wg])?;
     Ok(ctx.spec("p2", k, body, global, vec![wg]))
 }
-
-// ── Generation ──────────────────────────────────────────
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
     let decoded = decode(instr)?;

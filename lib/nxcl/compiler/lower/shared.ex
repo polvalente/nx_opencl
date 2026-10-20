@@ -1,13 +1,7 @@
 defmodule NxCL.Compiler.Lower.Shared do
-  @moduledoc """
-  Helpers that the lowering pass (`NxCL.Compiler.Lower`), its parts
-  (`Control`, `HostCall`, `Contract`) and the evaluator
-  (`NxCL.Compiler.Evaluator`) all use.
-
-  Most take a `t:builder/0`: any map with the `:instrs` and `:constants` lists.
-  The lowering state of `NxCL.Compiler.Lower` is one, and so is the evaluator's
-  smaller state.
-  """
+  @moduledoc false
+  # Helpers for `NxCL.Compiler.Lower`, its parts and `NxCL.Compiler.Evaluator`.
+  # A `t:builder/0` is any map with `:instrs` and `:constants` lists.
 
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
@@ -23,7 +17,7 @@ defmodule NxCL.Compiler.Lower.Shared do
           optional(atom()) => term()
         }
 
-  # Binary ops a `reduce` body may hold: the result has the operand type.
+  # Binary ops a `reduce` body may hold; the result has the operand type.
   @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
                bitwise_or bitwise_xor left_shift right_shift)a
 
@@ -34,8 +28,8 @@ defmodule NxCL.Compiler.Lower.Shared do
     Nx.Block.CumulativeMax => :cumulative_max
   }
 
-  # Ops Nx rejects on complex tensors (probed against Nx 1.0 on `c64`). Nx raises
-  # while tracing, so these raise here only for a graph built another way.
+  # Ops Nx 1.0 rejects on complex tensors. Nx raises while tracing; this guards
+  # a graph built another way.
   @complex_rejected ~w(atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
                        count_leading_zeros erf erf_inv erfc floor greater greater_equal
                        left_shift less less_equal max min population_count quotient remainder
@@ -49,7 +43,7 @@ defmodule NxCL.Compiler.Lower.Shared do
   @spec scan_blocks() :: %{module() => atom()}
   def scan_blocks(), do: @scan_blocks
 
-  @doc "Adds an instruction and returns its ref. Nodes with no op of their own use it (a broadcast, a cast)."
+  @doc "Adds an instruction and returns its ref."
   @spec push(builder(), Instruction.t()) :: {builder(), Instruction.ref()}
   def push(state, instruction) do
     ref = {:result, length(state.instrs)}
@@ -63,7 +57,7 @@ defmodule NxCL.Compiler.Lower.Shared do
     {%{state | constants: [{value, type} | state.constants]}, ref}
   end
 
-  @doc "Raises `ArgumentError` when `op` is one Nx rejects on complex and a tensor in `[node | operands]` is complex."
+  @doc "Raises `ArgumentError` for an op Nx rejects on complex when any tensor is complex."
   @spec check_complex(atom(), tensor(), [tensor()]) :: :ok
   def check_complex(op, node, operands) do
     if op in @complex_rejected and Enum.any?([node | operands], &Nx.Type.complex?(&1.type)) do
@@ -84,8 +78,7 @@ defmodule NxCL.Compiler.Lower.Shared do
 
   @doc """
   True for a `reduce` body of one `add`, `multiply`, `max` or `min` over the two
-  parameters. Such a body is associative and commutative, so the device may fold
-  it in a tree.
+  parameters. The op is associative and commutative, so the device may fold in a tree.
   """
   @spec monoid?([{atom(), non_neg_integer(), non_neg_integer()}]) :: boolean()
   def monoid?([{op, a, b}]) when op in [:add, :multiply, :max, :min],
@@ -109,15 +102,13 @@ defmodule NxCL.Compiler.Lower.Shared do
   def leaves(container), do: Composite.flatten_list([container])
 
   @doc """
-  The refs `{:result, at, k}` for the `count` results of the instruction at
-  index `at`.
+  The refs `{:result, at, k}` for the `count` results of instruction `at`.
   """
   @spec result_refs(non_neg_integer(), non_neg_integer()) :: [Instruction.ref()]
   def result_refs(at, count), do: for(k <- 0..(count - 1)//1, do: {:result, at, k})
 
   @doc """
-  The ref a node gets for an instruction with several results: `{:tuple, refs}`
-  for a tuple-typed node, the first ref otherwise.
+  `{:tuple, refs}` for a tuple-typed node, the first ref otherwise.
   """
   @spec node_ref(tensor(), [Instruction.ref()]) ::
           Instruction.ref() | {:tuple, [Instruction.ref()]}
@@ -125,8 +116,7 @@ defmodule NxCL.Compiler.Lower.Shared do
   def node_ref(_node, refs), do: hd(refs)
 
   @doc """
-  Crops or zero-pads `axis` of the operand `ref` (shape `shape`, type `type`)
-  to the length of `out` on that axis.
+  Crops or zero-pads `axis` of `ref` to the length of `out` on that axis.
   """
   @spec fit_axis(
           builder(),

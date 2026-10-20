@@ -1,29 +1,25 @@
 # NxCL
 
-Nx backend and `defn` compiler for OpenCL GPUs. Targets OpenCL 1.2+ devices
-including mobile GPUs (Adreno, Mali, PowerVR) and desktop GPUs via a Rust
-NIF using the `opencl3` crate.
+An Nx backend and `defn` compiler for OpenCL 1.2+ devices, built on a Rust NIF
+that uses the `opencl3` crate.
 
 ## Prerequisites
 
-An OpenCL runtime must be installed:
+You need an OpenCL runtime, a Rust toolchain to build the NIF, Elixir 1.19 or
+newer, and `{:nx, "~> 1.0"}`.
 
 ```bash
-# Ubuntu/Debian - PoCL (CPU OpenCL, good for development/testing)
+# Ubuntu/Debian: PoCL, a CPU OpenCL runtime for development and tests
 sudo apt install pocl-opencl-icd ocl-icd-libopencl1 ocl-icd-opencl-dev
-
-# Verify
 clinfo --list
 ```
 
-NVIDIA, AMD, and Intel GPU drivers typically include OpenCL support.
-A Rust toolchain is required for building the NIF. The library needs Elixir 1.19
-or newer and `{:nx, "~> 1.0"}`.
+NVIDIA, AMD and Intel GPU drivers usually include OpenCL. The library loads
+`libOpenCL` when it first opens a device; set `OPENCL_DYLIB_PATH` to load another
+library.
 
-The library loads `libOpenCL` when it first opens a device. To load a library
-other than the system default, set `OPENCL_DYLIB_PATH` to its path.
-
-Some dtypes and ops need a device extension. `clinfo` shows which the device has.
+Some dtypes and ops need a device extension (`clinfo` lists them). A program that
+needs a missing one raises `NxCL.CompilerError`.
 
 | Extension | Needed for |
 |---|---|
@@ -31,11 +27,7 @@ Some dtypes and ops need a device extension. `clinfo` shows which the device has
 | `cl_khr_int64_base_atomics` | `indexed_add` on `s64`, `u64`, `f64` and `c128` |
 | `cl_khr_fp16` | `f16` (not tested on any device) |
 
-A program that needs a missing extension raises `NxCL.CompilerError`.
-
 ## Installation
-
-Add `nx_opencl` to your dependencies:
 
 ```elixir
 def deps do
@@ -47,16 +39,10 @@ end
 
 ## Usage
 
-NxCL provides two ways to run Nx computations on the GPU: the **eager
-backend** for ad-hoc tensor operations, and the **defn compiler** for
-whole-graph execution of `defn` functions.
-
 ### Eager backend
 
-Set `NxCL.Backend` as the default and use Nx as normal. Each op runs on
-the device as a one-op program, with the same kernels the compiler uses.
-An op with no lowering raises `ArgumentError`; nothing runs on the CPU
-backend behind your back.
+Each op runs on the device as a one-op program, with the kernels the compiler
+uses. An op with no lowering raises `ArgumentError`; nothing runs on the CPU.
 
 ```elixir
 Nx.default_backend(NxCL.Backend)
@@ -64,13 +50,16 @@ Nx.default_backend(NxCL.Backend)
 a = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
 b = Nx.tensor([[5.0, 6.0], [7.0, 8.0]])
 Nx.dot(a, b)
+
+# Move tensors between backends
+gpu_tensor = Nx.backend_transfer(a, NxCL.Backend)
+cpu_tensor = Nx.backend_transfer(gpu_tensor, Nx.BinaryBackend)
 ```
 
 ### Defn compiler
 
-Use `NxCL.Compiler` with `Nx.Defn.jit/2` to trace a `defn` function
-into a program and run the whole graph on the GPU. The compiler caches
-programs and kernels.
+`NxCL.Compiler` runs a whole `defn` graph as one program and caches programs and
+kernels.
 
 ```elixir
 defmodule MyModel do
@@ -78,7 +67,7 @@ defmodule MyModel do
 
   defn predict(x, w1, b1, w2, b2) do
     x
-    |> Nx.dot(w1) |> Nx.add(b1) |> Nx.negate() |> Nx.negate()
+    |> Nx.dot(w1) |> Nx.add(b1)
     |> Nx.dot(w2) |> Nx.add(b2) |> Nx.sigmoid()
   end
 end
@@ -87,139 +76,86 @@ jitted = Nx.Defn.jit(&MyModel.predict/5, compiler: NxCL.Compiler)
 result = jitted.(input, w1, b1, w2, b2)
 ```
 
-### Transfer tensors to and from the device
-
-```elixir
-gpu_tensor = Nx.backend_transfer(cpu_tensor, NxCL.Backend)
-cpu_tensor = Nx.backend_transfer(gpu_tensor, Nx.BinaryBackend)
-```
-
-### With Axon models
-
-Axon is a test dependency only; add it to your own project to use it. An
-Axon model is plain Nx, so `Nx.Defn.jit/2` compiles its predict function:
-
-```elixir
-model =
-  Axon.input("input", shape: {nil, 784})
-  |> Axon.dense(128, activation: :relu)
-  |> Axon.dense(10, activation: :softmax)
-
-{init_fn, predict_fn} = Axon.build(model)
-params = init_fn.(Nx.template({1, 784}, :f32), Axon.ModelState.empty())
-
-predict = Nx.Defn.jit(predict_fn, compiler: NxCL.Compiler)
-output = predict.(params, input)
-```
-
-Training steps work the same way: wrap the loss, `Nx.Defn.value_and_grad/2`
-and the parameter update in one function and jit it.
-
-### Pick a device
-
-`clinfo --list` lists the devices. `device:` takes an index into that list, or a
-`{platform, index}` pair (see "Compiler options").
-
-```elixir
-jitted = Nx.Defn.jit(&MyModel.predict/5, compiler: NxCL.Compiler, device: 1)
-```
+An Axon model is plain Nx, so `Nx.Defn.jit(predict_fn, compiler: NxCL.Compiler)`
+compiles its predict function, and a training step works the same way. Axon is a
+test dependency only.
 
 ### Compiler options
 
-`NxCL.Compiler` takes these options through `Nx.Defn.jit/2`. An unknown key raises
-`ArgumentError`.
+Pass these to `Nx.Defn.jit/2`. An unknown key raises `ArgumentError`.
 
-- `device:` the device to run on. An index counted over all devices (default `0`), or
-  `{platform, index}` counted inside one platform.
-- `command_queue:` a queue from `NxCL.Devices.new_queue/1`. The default is the
-  device's own queue.
-- `max_concurrency:` how many partitions Nx may run at once. Each partition gets its
+- `device:` an index over all devices (default `0`), or `{platform, index}` within
+  one platform. `clinfo --list` lists the devices.
+- `command_queue:` a queue from `NxCL.Devices.new_queue/1`. Default: the device's
   own queue.
-- `hooks:` accepted only when empty. A non-empty value raises `ArgumentError`. An
-  `io_call` runs its own callback.
-
-The `fusion` and `census` options do not exist.
+- `max_concurrency:` how many partitions Nx may run at once, each on its own queue.
+- `hooks:` must be empty.
 
 ## What works
 
-`NxCL.Backend` and `NxCL.Compiler` run Nx ops on the device through one set of
-generated kernels.
+Both paths run Nx ops through one set of generated kernels.
 
 - **Dtypes:** `u8 u16 u32 u64 s8 s16 s32 s64 bf16 f32 f64 c64 c128`. `bf16` is
-  stored as 16 bits and computed in `f32`. `f64` and `c128` need `cl_khr_fp64`.
-- **Elementwise:** unary and binary math, comparison, logic and bitwise ops, `select`,
-  `clip`, casts, on every dtype Nx accepts for the op.
+  stored in 16 bits and computed in `f32`.
+- **Elementwise:** unary and binary math, comparison, logic and bitwise ops,
+  `select`, `clip` and casts, on every dtype Nx accepts for the op.
 - **Shape:** reshape, transpose, broadcast, slice, `put_slice`, pad, concatenate,
-  reverse, as_type and the like.
+  reverse and the like.
 - **Reductions:** sums, products, min and max, `all`, `any`, `argmax`, `argmin`,
-  `reduce`, scans (`cumulative_*`), windows (`window_*`) and `sort`/`argsort`.
-- **Contractions:** general `dot` and `conv`, with strides, padding, dilation, groups
-  and batch axes.
+  `reduce`, scans (`cumulative_*`), windows (`window_*`), `sort` and `argsort`.
+- **Contractions:** `dot` and `conv`, with strides, padding, dilation, groups and
+  batch axes.
 - **Indexing:** `gather`, `take`, `take_along_axis`, `indexed_add`, `indexed_put`.
-- **Control flow:** `cond` and `while`, nested.
+- **Control flow:** nested `cond` and `while`.
 - **Linear algebra and FFT:** Cholesky, triangular solve, determinant, `solve`,
   `qr`, `eigh`, `svd`, `lu`, `fft` and `ifft`. `qr`, `eigh`, `svd` and `lu` lower
-  through Nx's own default implementation, so they run on the device as `while`
-  loops over device kernels. Their factors may differ from `Nx.BinaryBackend`'s in
-  sign and order, so the tests check the defining identities (for `qr`, `Q R == A`
-  and `Q` orthonormal) and not the values. They are slow (about 2 s for a 64 x 64
-  `svd`). On `f16` and `bf16`, the `determinant` tests with n >= 4 use triangular
-  inputs, because the reference truncates and the device rounds to nearest.
-- **Host callbacks:** `Nx.runtime_call/4` and `Nx.io_call/2` read back the tensors the
-  callback takes, run it on the host and upload the result.
-- **Compiler options:** `:device`, `:command_queue`, `:max_concurrency` (see above).
+  through Nx's default implementation and run on the device as `while` loops. They
+  are slow (about 2 s for a 64 x 64 `svd`). Their factors may differ from
+  `Nx.BinaryBackend`'s in sign and order, so the tests check the defining
+  identities (for `qr`, `Q R == A` and `Q` orthonormal), not the values.
+- **Host callbacks:** `Nx.runtime_call/4` and `Nx.io_call/2` read back the tensors
+  the callback takes, run it on the host and upload the result.
 
 Neither path copies an op to the CPU. An op with no lowering raises
-`ArgumentError` ("does not yet lower op ..."). A check in the test suite covers
-this for about 120 representative ops, each through `NxCL.Compiler` and through
-`NxCL.Backend` under a backend that raises on any compute call, and for Nx's
-own doctests. It does not cover every op. `Nx.backend_deallocate/1` frees the
-device buffer at once.
+`ArgumentError` ("does not yet lower op ..."). A test covers about 120 representative
+ops, through both paths, and Nx's own doctests, under a backend that raises on any
+compute call. It does not cover every op.
 
 ## What is not supported
 
 - **Small dtypes:** `s2`, `s4`, `u2`, `u4`, `f8` and `f8_e4m3fn`. OpenCL C has no
   type for them; a program that uses one raises `NxCL.CompilerError`.
-- **`f16`:** needs `cl_khr_fp16`. No device we tested has it, so the `f16` kernels
-  run only in Rust source tests.
-- **`f64` and `c128`:** need `cl_khr_fp64`. A device without it raises
-  `NxCL.CompilerError` when the function runs.
+- **`f16`:** needs `cl_khr_fp16`. No tested device has it, so the `f16` kernels run
+  only in Rust source tests.
+- **`f64` and `c128`:** need `cl_khr_fp64`. Without it the function raises
+  `NxCL.CompilerError` when it runs.
 - **64-bit `indexed_add`** (`s64`, `u64`, `f64`, `c128`): needs
   `cl_khr_int64_base_atomics`. Without it the op raises a named error.
-- **Ops Nx rejects on a dtype**, for example `bitwise_and` on floats, or `max`,
-  `argmax` and `sort` on complex. Nx raises for these, and so does the compiler.
+- **Ops Nx rejects on a dtype**, such as `bitwise_and` on floats, or `max`, `argmax`
+  and `sort` on complex. Nx raises, and so does the compiler.
 - **`quantized_matmul`** and quantization.
 - **Fused attention, rope and norm kernels** such as `EMLX.Fast.*`.
-- **Multi-device sharding** and distributed execution. One device runs a partition.
+- **Multi-device sharding.** One device runs a partition.
 - **`from_pointer` and `to_pointer`:** OpenCL has no portable handle to export.
-- **The `:hooks` option** of `Nx.Defn.jit/2`: `NxCL.Compiler` raises
-  `ArgumentError` when it is not empty. An `io_call` runs its own callback.
-- **`cond`, `while` and the other expression-only forms on `NxCL.Backend`.** Use
-  `NxCL.Compiler` for them.
+- **The `:hooks` option** of `Nx.Defn.jit/2`. An `io_call` runs its own callback.
+- **`cond`, `while` and other expression-only forms on `NxCL.Backend`.** Use
+  `NxCL.Compiler`.
 
-## Cross-Compilation (Nerves)
+## Nerves
 
-NxCL uses dynamic loading (`dlopen`) for `libOpenCL.so` at runtime,
-so **no OpenCL library is needed at compile time**. The Rust target
-and cross-linker are derived automatically from the Nerves environment
-variables (`TARGET_ARCH`, `TARGET_OS`, `TARGET_ABI`, `CC`).
+`libOpenCL.so` loads at run time, so the build needs no OpenCL library. The Rust
+target and linker come from the Nerves variables `TARGET_ARCH`, `TARGET_OS`,
+`TARGET_ABI` and `CC`. `RUSTLER_TARGET` overrides the target.
 
-### Prerequisites
+Before you build:
 
-- The Rust target of the board: `rustup target add aarch64-unknown-linux-gnu` (or the
-  triple of your board).
-- A cross C compiler that Nerves puts in `CC`. The build passes it to Cargo as the
+- Add the Rust target of your board, for example
+  `rustup target add aarch64-unknown-linux-gnu`.
+- Nerves must put a cross C compiler in `CC`. The build passes it to Cargo as the
   linker.
-- No OpenCL library at compile time; it loads on the device.
-
-If you build outside Nerves, set `RUSTLER_TARGET` to the triple and install the
-linker that `native/nxcl_nif/.cargo/config.toml` names for it
-(`aarch64-linux-gnu-gcc` for `aarch64-unknown-linux-gnu`; the file lists the
-others).
-
-### Build
-
-Build your Nerves firmware as usual:
+- Outside Nerves, set `RUSTLER_TARGET` and install the linker that
+  `native/nxcl_nif/.cargo/config.toml` names for it (`aarch64-linux-gnu-gcc` for
+  `aarch64-unknown-linux-gnu`).
 
 ```bash
 export MIX_TARGET=my_custom_target
@@ -227,68 +163,40 @@ mix deps.get
 mix firmware
 ```
 
-NxCL reads the Nerves toolchain variables at compile time to:
-- Derive the Rust target triple (e.g. `aarch64-unknown-linux-gnu`)
-  from `TARGET_ARCH` + `TARGET_OS` + `TARGET_ABI`
-- Set the Cargo linker from `CC`
+The target needs an OpenCL runtime. Standard Nerves systems (rpi4, bbb) have no
+GPU compute support, so you need a custom system for a SoC with an OpenCL GPU.
 
-`RUSTLER_TARGET` overrides the derived triple.
+### GPU on the target
 
-### Nerves system requirements
-
-NxCL needs an OpenCL runtime on the target device. Standard Nerves
-targets (rpi4, bbb) do **not** include GPU compute support. You need
-a custom Nerves system for a SoC with an OpenCL-capable GPU.
-
-#### Linux kernel defconfig
-
-Enable the DRM driver for your GPU:
+Enable the DRM driver in the kernel defconfig:
 
 ```
-# Core (required)
+# Core
 CONFIG_DRM=y
 CONFIG_IOMMU_SUPPORT=y
 CONFIG_PM=y
 
-# Raspberry Pi 4/5 (VideoCore VI/VII)
-CONFIG_DRM_V3D=y
-
-# Qualcomm Adreno (Snapdragon SoCs)
-CONFIG_DRM_MSM=y
-
-# ARM Mali Bifrost/Valhall (e.g. RK3588 Mali-G610)
-CONFIG_DRM_PANFROST=y
-
-# ARM Mali Valhall CSF (newer Mali, requires kernel 6.9+)
-CONFIG_DRM_PANTHOR=y
+CONFIG_DRM_V3D=y        # Raspberry Pi 4/5 (VideoCore VI/VII)
+CONFIG_DRM_MSM=y        # Qualcomm Adreno
+CONFIG_DRM_PANFROST=y   # ARM Mali Bifrost/Valhall (for example RK3588 Mali-G610)
+CONFIG_DRM_PANTHOR=y    # ARM Mali Valhall CSF (kernel 6.9+)
 ```
 
-#### Buildroot / Nerves system config
-
-Enable Mesa with Rusticl (open-source OpenCL via Mesa's Gallium drivers):
+Enable Mesa with Rusticl (OpenCL on Mesa's Gallium drivers) in the Buildroot
+config:
 
 ```
-# Mesa with the appropriate GPU driver
 BR2_PACKAGE_MESA3D=y
 BR2_PACKAGE_MESA3D_OPENCL=y
-
-# Pick your GPU driver:
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_V3D=y        # RPi4/5
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_FREEDRENO=y  # Adreno
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PANFROST=y   # Mali
-
-# ICD loader (dispatches to the Mesa driver)
 BR2_PACKAGE_OPENCL_ICD_LOADER=y
 ```
 
-Rusticl requires LLVM and a Rust toolchain at build time, which
-Buildroot pulls in automatically. Set `RUSTICL_ENABLE=freedreno`
-(or `panfrost`) on the target device to activate the driver.
-
-Alternatively, include vendor-proprietary OpenCL blobs in your rootfs
-if available for your SoC.
-
-#### Supported GPU families
+Rusticl needs LLVM and a Rust toolchain at build time; Buildroot pulls them in.
+On the device, set `RUSTICL_ENABLE=freedreno` (or `panfrost`) to turn the driver
+on. You can also ship a vendor OpenCL library in the rootfs.
 
 | GPU | Kernel driver | Mesa driver | OpenCL status |
 |---|---|---|---|
@@ -298,27 +206,17 @@ if available for your SoC.
 | Mali Bifrost/Valhall | `drm_panfrost` | panfrost | Rusticl, merged Mesa 25.1 |
 | Mali Valhall CSF | `drm_panthor` | panfrost | Rusticl, merged Mesa 25.1 |
 
-#### CPU OpenCL (no GPU required)
+### CPU OpenCL with PoCL
 
-[PoCL](https://portablecl.org/) (Portable Computing Language) provides
-an OpenCL implementation that runs on the CPU via LLVM. This works on
-any ARM device — no GPU needed. It's slower than a real GPU for
-parallel workloads, but it gives you a working OpenCL runtime for
-development, testing, or devices where the GPU isn't available.
+[PoCL](https://portablecl.org/) runs OpenCL on the CPU through LLVM, on any ARM
+device. It is slower than a GPU but works for development and tests. On plain
+Linux, `sudo apt install pocl-opencl-icd`, then `clinfo --list` should show
+"Portable Computing Language".
 
-**On the host (development):**
-
-```bash
-# Ubuntu/Debian
-sudo apt install pocl-opencl-icd ocl-icd-libopencl1 ocl-icd-opencl-dev
-```
-
-**On-device (Nerves):** There is no upstream Buildroot package for
-PoCL. You'll need a custom package in a `br2-external` tree. PoCL
-builds with CMake and depends on LLVM/Clang:
+Buildroot has no PoCL package. Add one to a `br2-external` tree. PoCL builds with
+CMake and needs LLVM and Clang, which add build time and image size.
 
 ```
-# In your br2-external package Config.in
 config BR2_PACKAGE_POCL
     bool "pocl"
     depends on BR2_PACKAGE_LLVM
@@ -328,42 +226,24 @@ config BR2_PACKAGE_POCL
       https://portablecl.org/
 ```
 
-PoCL supports ARM (32-bit and aarch64) and is OpenCL 3.0 conformant
-for CPU targets. Note that LLVM is a heavy dependency — it will
-significantly increase build time and image size.
-
-**On-device (plain Linux):**
-
-```bash
-# Debian/Ubuntu ARM
-sudo apt install pocl-opencl-icd
-
-# Verify
-clinfo --list
-# Should show: Portable Computing Language / pthread-...
-```
-
 ## Running Tests
 
 ```bash
-# All tests (requires an OpenCL runtime)
-mix test
-
-# Skip OpenCL tests
-mix test --exclude opencl
+mix test                    # needs an OpenCL runtime
+mix test --exclude opencl   # skip the OpenCL tests
 ```
 
 The suite runs on device 0. Tests that need `cl_khr_fp64`, `cl_khr_fp16` or
 `cl_khr_int64_base_atomics` are skipped when the device lacks the extension, and
-the run prints which. Run one `mix test` at a time: two runs share the device
-and can fail each other.
+the run says which. Run one `mix test` at a time: two runs share the device and
+can fail each other.
 
-On a Mac, the suite runs on the Apple GPU with no setup. It has neither
-`cl_khr_fp64` nor `cl_khr_int64_base_atomics`, so the tests that need them are
-skipped. The full suite takes about 15 minutes.
+On a Mac, the suite runs on the Apple GPU with no setup. That GPU has neither
+`cl_khr_fp64` nor `cl_khr_int64_base_atomics`, so those tests are skipped. The
+full suite takes about 15 minutes.
 
-To run on PoCL on macOS, install PoCL and the ICD loader from Homebrew
-(`brew install pocl opencl-icd-loader`) and run the suite through the loader:
+For PoCL on macOS, install it with Homebrew (`brew install pocl opencl-icd-loader`)
+and run through the loader:
 
 ```bash
 OPENCL_DYLIB_PATH="$(brew --prefix)/opt/opencl-icd-loader/lib/libOpenCL.dylib" \
@@ -371,8 +251,12 @@ OCL_ICD_VENDORS="$(brew --prefix)/etc/OpenCL/vendors" \
 mix test
 ```
 
-On Linux with `pocl-opencl-icd` installed, `mix test` finds PoCL with no
-overrides. PoCL has `cl_khr_fp64` and 64-bit atomics, so it runs every test except
-the ones that need `cl_khr_fp16`. The full suite takes about 30 minutes there.
+On Linux with `pocl-opencl-icd`, `mix test` finds PoCL with no overrides. PoCL has
+`cl_khr_fp64` and 64-bit atomics, so it runs every test except those that need
+`cl_khr_fp16`. The full suite takes about 30 minutes there.
 
 `.github/workflows/ci.yml` runs the suite on PoCL. It has not run on GitHub yet.
+
+## License
+
+Apache-2.0. See `LICENSE.md`.

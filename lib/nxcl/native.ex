@@ -1,9 +1,8 @@
 defmodule NxCL.Native do
   @moduledoc false
 
-  # Derive Rust target triple from Nerves environment variables.
-  # Nerves sets TARGET_ARCH, TARGET_OS, TARGET_ABI during cross-compilation.
-  # RUSTLER_TARGET overrides if set explicitly.
+  # Rust target triple from the Nerves variables TARGET_ARCH, TARGET_OS and
+  # TARGET_ABI. RUSTLER_TARGET overrides.
   rust_target =
     cond do
       target = System.get_env("RUSTLER_TARGET") ->
@@ -24,7 +23,7 @@ defmodule NxCL.Native do
         nil
     end
 
-  # When cross-compiling, tell Cargo to use Nerves' CC as the linker.
+  # When cross-compiling, link with the Nerves CC.
   linker_env =
     case {rust_target, System.get_env("CC")} do
       {nil, _} ->
@@ -69,50 +68,47 @@ defmodule NxCL.Native do
   def buffer_read(_buf, _size), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Reads several buffers with one wait on the device. Each item is `{buffer, size}`;
-  the result lists the binaries in the same order.
+  Reads several buffers with one wait. Items are `{buffer, size}`; the result
+  has the binaries in the same order.
   """
   @spec buffer_read_many(reference(), [{reference(), non_neg_integer()}]) ::
           [binary()] | {:error, String.t()}
   def buffer_read_many(_ctx, _items), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Drops the handle's hold on the device memory. The memory goes when no other
-  handle shares it. Reading a freed handle returns `{:error, message}`. Returns
-  `false` when the handle was already free.
+  Drops the handle's hold on the device memory, which goes when no other handle
+  shares it. Reading a freed handle returns `{:error, message}`. Returns `false`
+  if the handle was already free.
   """
   @spec buffer_free(reference()) :: boolean()
   def buffer_free(_buf), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Decodes and validates a program wire term and builds its kernels. See
-  `NxCL.Compiler.Executor` for the term layout.
+  Decodes and validates a program wire term and builds its kernels.
   """
   @spec compile_program(reference(), tuple()) :: {:ok, reference()} | {:error, String.t()}
   def compile_program(_ctx, _wire), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Runs a compiled program on a list of buffers (inputs, captures, constants in
-  slot order; `nil` for an unread input). On the default queue it returns before the
-  device is done and the first read of an output waits; a program that can report an
-  error code waits at the end.
+  Runs a compiled program on buffers (inputs, captures, constants in slot order;
+  `nil` for an unread input). On the default queue it returns before the device
+  finishes and the first read waits, except a program that can report an error
+  code, which waits at the end.
   """
   @spec eval_program(reference(), [reference() | nil]) ::
           {:ok, [reference()]} | {:error, String.t()}
   def eval_program(_program, _buffers), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Like `eval_program/2`, on a queue from `queue_create/1`. The queue must belong
-  to the program's device context.
+  Like `eval_program/2`, on a queue from `queue_create/1` of the same context.
   """
   @spec eval_program_on(reference(), [reference() | nil], reference()) ::
           {:ok, [reference()]} | {:error, String.t()}
   def eval_program_on(_program, _buffers, _queue), do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """
-  Returns the value of a NIF call, or raises when the call returned
-  `{:error, message}`. Every fallible NIF reports failure that way and never
-  raises on its own.
+  Returns the value of a NIF call, or raises on `{:error, message}`. Fallible
+  NIFs report failure that way and never raise.
   """
   @spec ok!(value | {:error, String.t()}, String.t()) :: value when value: term()
   def ok!({:error, message}, what) when is_binary(message),

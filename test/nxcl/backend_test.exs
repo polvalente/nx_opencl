@@ -1,4 +1,8 @@
 defmodule NxCL.BackendTest do
+  @moduledoc """
+  `NxCL.Backend`: transfers, elementwise ops, `dot`, reductions, memory, caching and batching, with a check against the CPU.
+  """
+
   use ExUnit.Case, async: false
   import NxCL.TestHelpers
 
@@ -306,14 +310,12 @@ defmodule NxCL.BackendTest do
       key = Nx.Random.key(42)
       {input, _key} = Nx.Random.uniform(key, shape: {4, 4})
 
-      # CPU reference
       cpu_result =
         input
         |> Nx.multiply(Nx.tensor(2.0))
         |> Nx.add(Nx.tensor(1.0))
         |> Nx.negate()
 
-      # GPU computation
       gpu_input = Nx.backend_transfer(input, NxCL.Backend)
 
       gpu_result =

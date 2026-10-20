@@ -1,8 +1,8 @@
 defmodule NxCL.GemmWireTest do
   @moduledoc """
   `batched_gemm` and `conv` through the native wire: sizes `Nx.BinaryBackend` cannot
-  reach in reasonable time (answers stated), `K == 0` and zero-size products (Nx 1.0
-  builds no zero-size tensors), and the `NXCL_GEMM_TILE` override.
+  reach in reasonable time (answers stated), `K == 0` and zero-size products (Nx
+  1.0 builds no zero-size tensors), and the `NXCL_GEMM_TILE` override.
   """
   use ExUnit.Case, async: false
 

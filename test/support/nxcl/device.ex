@@ -1,7 +1,7 @@
 defmodule NxCL.TestSupport.Device do
   @moduledoc """
   What device 0 can do. Tests tagged `requires: :fp64 | :fp16 | :int64_atomics`
-  are excluded when the device lacks the extension (see `test/test_helper.exs`).
+  are excluded when the device lacks the extension.
   """
 
   @capabilities %{

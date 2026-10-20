@@ -1,16 +1,11 @@
-//! The Nx-to-OpenCL type table. One entry per supported dtype: C type of the
-//! buffer element, C type of the math value, byte width, class, and the device
-//! extension it needs.
+//! The Nx-to-OpenCL type table: per dtype, the C type of the buffer element and
+//! of the math value, byte width, class, and the device extension it needs.
 //!
-//! `bf16` is stored as `ushort` and computed as `float`; the kernel helpers
-//! `bf16_to_f32` and `f32_to_bf16` convert (round to nearest even on store). It
-//! needs no device extension. `f16` is stored as `half` and computed as `float`;
-//! it needs `cl_khr_fp16`, and codegen returns a missing-extension error on a
-//! device without it. Bool is `u8`.
-//!
-//! `c64` is `float2` and `c128` is `double2` (needs `cl_khr_fp64`), in Nx's
-//! binary layout: real part, then imaginary part. A complex type carries a
-//! `Preamble`: the math helpers `codegen/complex.rs` writes. Real types carry none.
+//! `bf16` is stored as `ushort` and computed as `float` (round to nearest even
+//! on store). `f16` is stored as `half`, computed as `float`, and needs
+//! `cl_khr_fp16`; a device without it gets a missing-extension error. Bool is
+//! `u8`. `c64` is `float2` and `c128` is `double2` (needs `cl_khr_fp64`), real
+//! part first, with the helpers of `complex.rs` as a `Preamble`.
 
 use std::fmt;
 
@@ -109,9 +104,7 @@ impl Ext {
 #[derive(Clone, Copy, Debug)]
 pub struct TypeInfo {
     pub dtype: DType,
-    /// C type of a buffer element.
     pub storage: &'static str,
-    /// C type of the value an expression computes with.
     pub math: &'static str,
     pub bytes: usize,
     pub class: Class,
@@ -261,13 +254,11 @@ pub fn type_info(dtype: DType) -> Result<TypeInfo, String> {
     })
 }
 
-/// The complex dtypes.
 #[cfg(test)]
 pub fn complex_types() -> [DType; 2] {
     [DType::new(Kind::C, 64), DType::new(Kind::C, 128)]
 }
 
-/// Every real dtype the table covers, in a fixed order.
 #[cfg(test)]
 pub fn supported() -> Vec<DType> {
     let mut all = Vec::new();
@@ -281,8 +272,6 @@ pub fn supported() -> Vec<DType> {
     all.push(DType::new(Kind::F, 64));
     all
 }
-
-// ── Helpers the kernel templates share ──────────────────
 
 pub const BF16_HELPERS: &str = "\
 static float bf16_to_f32(ushort x) { return as_float(((uint)x) << 16); }
@@ -364,8 +353,6 @@ pub fn c_type_bytes(c: &str) -> Result<usize, String> {
     }
 }
 
-// ── Constants ───────────────────────────────────────────
-
 /// A scalar constant as the wire sends it: an integer, a float, or one of the
 /// atoms `nan`, `infinity`, `neg_infinity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -428,8 +415,6 @@ pub fn encode_const(dtype: DType, value: ConstVal) -> Result<Vec<u8>, String> {
     #[cfg(target_endian = "big")]
     return Ok(bytes[bytes.len() - n..].to_vec());
 }
-
-// ── Half-width conversions (host side; the kernels carry the same logic) ──
 
 pub fn f32_to_bf16_bits(f: f32) -> u16 {
     let u = f.to_bits();

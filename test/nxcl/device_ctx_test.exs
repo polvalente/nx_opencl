@@ -1,4 +1,8 @@
 defmodule NxCL.DeviceCtxTest do
+  @moduledoc """
+  `NxCL.Native` device context creation and device info.
+  """
+
   use ExUnit.Case, async: false
 
   @moduletag :opencl

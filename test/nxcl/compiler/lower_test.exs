@@ -1,4 +1,8 @@
 defmodule NxCL.Compiler.LowerTest do
+  @moduledoc """
+  The programs `NxCL.Compiler.Lower` builds for small functions.
+  """
+
   use ExUnit.Case, async: true
   import Nx.Defn
   import NxCL.TestSupport, only: [lower: 2]

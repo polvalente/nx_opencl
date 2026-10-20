@@ -1,17 +1,12 @@
 defmodule NxCL.Compiler do
   @moduledoc """
-  `Nx.Defn.Compiler` implementation for OpenCL.
+  `Nx.Defn.Compiler` for OpenCL.
 
-  Receives a computation graph from `defn`, lowers it to an `NxCL.Compiler.Program`
-  (`NxCL.Compiler.Lower`), and runs the program on the GPU.
-
-  Unlike the eager backend (`NxCL.Backend`), which runs one op at a time, the
-  compiler sees the whole graph up front. Results stay on the device between
-  ops, and each buffer is freed after its last reader.
+  It lowers the whole `defn` graph to an `NxCL.Compiler.Program` and runs it on
+  the device. Results stay on the device between ops, and each buffer is freed
+  after its last reader. `NxCL.Backend` runs one op at a time instead.
 
   ## Usage
-
-  Use with `Nx.Defn.jit/2`:
 
       defn predict(x, w, b) do
         x |> Nx.dot(w) |> Nx.add(b) |> Nx.sigmoid()
@@ -20,43 +15,39 @@ defmodule NxCL.Compiler do
       jitted = Nx.Defn.jit(&predict/3, compiler: NxCL.Compiler)
       result = jitted.(input, weights, bias)
 
-  Or set as the default compiler:
-
-      Nx.Defn.default_options(compiler: NxCL.Compiler)
-
-  Arguments and results can be containers (tuples, maps, nested).
+  Or set it as the default: `Nx.Defn.default_options(compiler: NxCL.Compiler)`.
+  Arguments and results can be containers (tuples, maps).
 
   ## Options
 
-    * `:device` - the device index (or `{platform, index}`) to run on. See
-      `NxCL.Devices`. The default is 0.
-    * `:command_queue` - a queue from `NxCL.Devices.new_queue/1`. The default is
-      the device's own queue. `__partitions_options__/1` gives each partition
-      its own.
-    * `:max_concurrency` - the partition count `__partitions_options__/1` reads.
+    * `:device` - device index or `{platform, index}` (see `NxCL.Devices`).
+      Default 0.
+    * `:command_queue` - a queue from `NxCL.Devices.new_queue/1`. Default: the
+      device's own queue.
+    * `:max_concurrency` - how many queues `__partitions_options__/1` opens.
     * `:hooks` - must be empty.
+
+  An unknown option raises `ArgumentError` that names the key.
 
   ## Unsupported operations
 
-  The compiler never falls back to the CPU. An op that `NxCL.Compiler.Lower` cannot
-  lower raises `ArgumentError` ("does not yet lower op ...") when the function
-  is compiled. A dtype the device cannot run (`f64` without `cl_khr_fp64`, or a type
-  with no OpenCL mapping yet) raises `NxCL.CompilerError` when the function runs.
+  The compiler never falls back to the CPU. An op it cannot lower raises
+  `ArgumentError` ("does not yet lower op ...") at compile time. A dtype the
+  device cannot run (`f64` without `cl_khr_fp64`, or a type with no OpenCL
+  mapping) raises `NxCL.CompilerError` when the function runs.
 
   ## Host callbacks
 
   `Nx.runtime_call/4`, `Nx.io_call/2` and `Nx.Defn.Kernel.print_value/2` run
-  Elixir code in the calling process, between device steps. The executor reads
-  back only the tensors the callback takes. The `:hooks` option raises `ArgumentError`.
+  Elixir code in the calling process, between device steps. Only the tensors the
+  callback takes are read back.
 
   ## Caches
 
-  `NxCL.Compiler.CompileCache` keeps the compiled closure of each function, keyed by the
-  function, its input templates and the device. A repeat call does not trace or
-  lower. `NxCL.Compiler.ProgramCache` keeps compiled programs by structure, so two
-  functions that lower alike share one.
-
-  An unknown option raises `ArgumentError` naming the key.
+  `NxCL.Compiler.CompileCache` keeps the compiled closure per function, input
+  templates and device, so a repeat call does not trace or lower.
+  `NxCL.Compiler.ProgramCache` keeps programs by structure, so functions that
+  lower alike share one.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -92,14 +83,14 @@ defmodule NxCL.Compiler do
   end
 
   defp build_closure(vars, fun, run_opts) do
-    # Fail on a bad device when the function compiles, not when it first runs.
+    # Fail on a bad device at compile time.
     Devices.fetch!(run_opts)
 
     expr = fun.(vars)
     num_inputs = vars |> Composite.flatten_list() |> length()
     program = Lower.lower(expr, num_inputs)
     program = %Program{program | signature: Program.signature(program)}
-    # Captured tensors go up once here; each run reuses the buffers.
+    # Captured tensors upload once; each run reuses the buffers.
     program = Executor.with_resident_captures(program, run_opts)
 
     fn [args] ->

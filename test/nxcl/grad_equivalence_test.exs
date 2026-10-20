@@ -1,13 +1,9 @@
 defmodule NxCL.GradEquivalenceTest do
   @moduledoc """
-  `Nx.Defn.grad` and `value_and_grad` under `NxCL.Compiler` and under
-  `NxCL.Backend` match the evaluator on `Nx.BinaryBackend`, after
-  `emlx/test/emlx/grad_equivalence_test.exs`. Each function runs through
-  `NxCL.TestSupport.Compare`, in `f32`.
-
-  The functions: polynomials, an elementwise chain, softmax cross-entropy, layer
-  norm, a matrix product, a convolution, a pooling window, a reduction and sort,
-  a `cond` and a `while`.
+  `Nx.Defn.grad` and `value_and_grad` under `NxCL.Compiler` and `NxCL.Backend`
+  match the evaluator on `Nx.BinaryBackend`, in `f32`. The functions: polynomials,
+  an elementwise chain, softmax cross-entropy, layer norm, a matrix product, a
+  convolution, a pooling window, a reduction and sort, a `cond` and a `while`.
   """
   use ExUnit.Case, async: false
 
@@ -31,8 +27,6 @@ defmodule NxCL.GradEquivalenceTest do
     assert_same(fun, args, opts)
   end
 
-  # -- Smooth elementwise --------------------------------------------------------
-
   defn(polynomial(x), do: Nx.sum(x * x * x + 2 * x * x - 5 * x + 3))
   defn(polynomial_grad(x), do: grad(x, &polynomial/1))
 
@@ -41,8 +35,6 @@ defmodule NxCL.GradEquivalenceTest do
 
   defn(division(x, y), do: Nx.sum(x / (y * y + 1.0) + Nx.sqrt(x * x + 1.0)))
   defn(division_grad(x, y), do: grad({x, y}, fn {x, y} -> division(x, y) end))
-
-  # -- Softmax cross-entropy and layer norm ---------------------------------------
 
   defn softmax_xent(logits, labels) do
     shifted = logits - Nx.reduce_max(logits, axes: [1], keep_axes: true)
@@ -64,8 +56,6 @@ defmodule NxCL.GradEquivalenceTest do
   defn(layer_norm_grad(x, gamma, beta),
     do: grad({x, gamma, beta}, fn {x, gamma, beta} -> layer_norm(x, gamma, beta) end)
   )
-
-  # -- Dot, conv, windows, reductions ---------------------------------------------
 
   defn(dot_loss(a, b), do: Nx.sum(Nx.tanh(Nx.dot(a, b))))
   defn(dot_grad(a, b), do: grad({a, b}, fn {a, b} -> dot_loss(a, b) end))
@@ -91,8 +81,6 @@ defmodule NxCL.GradEquivalenceTest do
   defn(cumsum_loss(x), do: Nx.sum(Nx.cumulative_sum(x, axis: 1) ** 2))
   defn(cumsum_grad(x), do: grad(x, &cumsum_loss/1))
 
-  # -- Control flow ---------------------------------------------------------------
-
   defn cond_loss(x) do
     s = Nx.sum(x)
 
@@ -115,8 +103,6 @@ defmodule NxCL.GradEquivalenceTest do
   end
 
   defn(while_grad(x), do: grad(x, &while_loss/1))
-
-  # -- Rows -----------------------------------------------------------------------
 
   test "polynomial" do
     for shape <- [{}, {4}, {2, 3}],

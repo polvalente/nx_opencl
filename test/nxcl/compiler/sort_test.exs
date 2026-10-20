@@ -1,13 +1,9 @@
 defmodule NxCL.SortTest do
   @moduledoc """
-  Differential rows for `sort` and `argsort` through `NxCL.TestSupport.Compare` against
-  `Nx.BinaryBackend`, on every dtype Nx accepts for them (Nx raises on `c64`
-  and `c128`). Lines of up to 9000 elements cover the single-group sort and
-  the multi-pass sort, whose local capacity depends on the device. A second
-  group sorts 1M elements and states the answer, since the reference is too
-  slow there.
-
-  `f64` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
+  Differential rows for `sort` and `argsort` on every dtype Nx accepts (not `c64`
+  or `c128`). Lines of up to 9000 elements cover the single-group sort and the
+  multi-pass sort, whose local capacity depends on the device. A second group sorts
+  1M elements and states the answer, since the reference is too slow.
   """
   use ExUnit.Case, async: false
 
@@ -54,7 +50,6 @@ defmodule NxCL.SortTest do
           assert_same(&Nx.argsort(&1, axis: axis, direction: dir), [t])
         end
 
-        # Lines past the local capacity: block sorts, then global and local merge passes.
         for shape <- [{9000}, {3, 9000}, {9000, 2}], axis <- [0, 1], dir <- [:asc, :desc] do
           if axis < tuple_size(shape) do
             t = Gen.random(shape, type)
@@ -63,7 +58,6 @@ defmodule NxCL.SortTest do
           end
         end
 
-        # NaN, infinities, signed zero and the integer extremes.
         for n <- [7, 70, 4097, 9000], dir <- [:asc, :desc] do
           t = with_edges(type, n)
           assert_same(&Nx.sort(&1, direction: dir), [t])
@@ -93,7 +87,6 @@ defmodule NxCL.SortTest do
         expected = if dir == :asc, do: Enum.sort(sorted), else: Enum.sort(sorted, :desc)
         assert sorted == expected
 
-        # Within one key the indices rise.
         for {_key, group} <- Enum.group_by(idx, &rem(&1, 4)) do
           assert group == Enum.sort(group)
         end

@@ -1,9 +1,8 @@
 defmodule NxCL.ShapeOpsTest do
   @moduledoc """
-  Lowering and runtime behaviour of the shape ops that the differential rows
-  cannot show: which instructions lowering emits, the values that reshape,
-  squeeze, metadata and elem pass on, zero-size inputs (Nx 1.0 cannot build them,
-  so they go through the native wire), and the rank cap.
+  What the differential rows cannot show for shape ops: the lowered instructions,
+  the values `reshape`, `squeeze`, `metadata` and `elem` pass on, zero-size inputs
+  through the native wire, and the rank cap.
   """
   use ExUnit.Case, async: false
 
@@ -184,7 +183,6 @@ defmodule NxCL.ShapeOpsTest do
       empty = Native.buffer_write(ctx, <<>>)
       full = Native.buffer_write(ctx, NxCL.TestHelpers.floats_to_binary([1.0, 2.0]))
 
-      # concatenate of {0} and {2}
       out =
         exec(
           ctx,

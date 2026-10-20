@@ -1,8 +1,6 @@
 defmodule NxCL.Compiler.CompileCache do
   @moduledoc """
-  Bounded cache of compiled closures. `NxCL.Compiler.__compile__/4` stores one
-  closure per `{key, input templates, device}`, so a repeat `Nx.Defn.jit/2` call
-  of the same function skips the trace and the lowering.
+  Bounded cache of compiled closures, one per `{key, input templates, device}`.
 
   `:max_items` defaults to 1024 and `:ttl` to `:infinity`. Either takes a
   positive integer or `:infinity`:
@@ -11,11 +9,9 @@ defmodule NxCL.Compiler.CompileCache do
         max_items: 4096,
         ttl: :timer.minutes(30)
 
-  Overflow evicts the oldest insert first. An entry that outlives `:ttl` counts
-  as a miss on read, and the process sweeps it out every half `:ttl`.
-
-  Reads go straight to the ETS table; only writes and the sweep run in this
-  process.
+  Overflow evicts the oldest insert first. An entry older than `:ttl` is a
+  miss on read, and a sweep removes it every half `:ttl`. Reads use the ETS
+  table directly; writes and the sweep run in this process.
   """
 
   use GenServer

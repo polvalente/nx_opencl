@@ -1,30 +1,19 @@
 defmodule NxCL.Compiler.Tree do
-  @moduledoc """
-  Post-order traversal of `Nx.Defn.Expr` graphs.
-
-  Nx 1.0 ships no post-order walker (`Nx.Defn.Tree` has `apply_args/3,4`,
-  `put_args/2` and `scope_ids/1,2` only), so this module ports
-  the walker of the MLX compiler. It depends only on `Nx.Defn.{Tree, Composite}`.
-
-  ## Scope model
-
-  `while`, `fun` and `block` nodes each open an inner scope. `post_order/2`
-  returns them as opaque nodes: their inner sub-graphs do not appear in the
-  result. `cond` clauses share the parent scope and are walked normally.
-  """
+  @moduledoc false
+  # Post-order traversal of `Nx.Defn.Expr` graphs. `while`, `fun` and `block`
+  # nodes open an inner scope and come back as opaque nodes. `cond` clauses
+  # share the parent scope and are walked.
 
   alias Nx.Defn.Composite
   alias Nx.Defn.Tree
   alias Nx.Tensor, as: T
 
   @doc """
-  Returns the `%Nx.Tensor{}` nodes reachable from `output` in post-order.
+  Returns the nodes reachable from `output` in post-order, each once (by
+  `node.data.id`) and after its same-scope operands.
 
-  `output` is any `Nx.Container`. Each node appears once, keyed by
-  `node.data.id`, and after all of its same-scope operands.
-
-  `scope_dependencies` is called as `scope_dependencies.(node)` and returns
-  `{:ok, deps}` to replace the node's own operands with `deps`, or `:default`.
+  `scope_dependencies.(node)` returns `{:ok, deps}` to replace the node's
+  operands, or `:default`.
   """
   @spec post_order(Nx.Container.t(), (Nx.Tensor.t() -> {:ok, [Nx.Tensor.t()]} | :default)) ::
           [Nx.Tensor.t()]
@@ -38,7 +27,6 @@ defmodule NxCL.Compiler.Tree do
     if MapSet.member?(visited, id) do
       {visited, output}
     else
-      # Mark the node before recursing so shared subexpressions are visited once.
       visited = MapSet.put(visited, id)
       {visited, output} = visit_scope_deps(node, {visited, output}, scope_dependencies)
       {visited, [node | output]}

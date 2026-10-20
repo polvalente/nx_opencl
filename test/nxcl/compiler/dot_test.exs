@@ -1,19 +1,14 @@
 defmodule NxCL.DotTest do
   @moduledoc """
-  Differential rows for `dot` through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`, on
-  every dtype Nx accepts: vector with vector, matrix with vector, vector with
-  matrix, matrix with matrix, batch axes, an outer product (no contracted axis),
-  and three contracted axes. Sizes 1, 7, 33, 128 and 513 appear on every axis role.
-  Square products stay below 513 on all three axes together, since the reference
-  is slow.
+  Differential rows for `dot` on every dtype Nx accepts: vector and matrix
+  combinations, batch axes, an outer product and three contracted axes. Sizes 1, 7,
+  33, 128 and 513 appear on every axis role; square products stay below 513 on all
+  three axes together, since the reference is slow.
 
   Float and complex inputs hold small integers, so every partial sum is exact and
-  the order of accumulation cannot change the answer. Integer rows use the small
-  range of `Gen.random/3` and a full-range row that wraps. `f64` and `c128` rows
-  carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
-
-  The `K == 0` and zero-size rows go through the native wire, since Nx 1.0 builds
-  no zero-size tensors.
+  accumulation order cannot change the answer. Integer rows use the small range of
+  `Gen.random/3` and a full-range row that wraps. `K == 0` and zero-size rows go
+  through the native wire, since Nx 1.0 builds no zero-size tensors.
   """
   use ExUnit.Case, async: false
 
@@ -43,7 +38,6 @@ defmodule NxCL.DotTest do
 
   @needs %{{:f, 64} => :fp64, {:c, 128} => :fp64, {:f, 16} => :fp16}
 
-  # Small integers held in `type`, so sums are exact.
   defp exact({:c, size}, shape, seed) do
     part = {:f, div(size, 2)}
     re = exact(part, shape, seed)
@@ -58,7 +52,6 @@ defmodule NxCL.DotTest do
     Nx.as_type(t, type)
   end
 
-  # A pair of operands for `x` and `y` shapes.
   defp pair(type, xs, ys), do: [exact(type, xs, 1), exact(type, ys, 7)]
 
   for type <- @types do
@@ -118,7 +111,6 @@ defmodule NxCL.DotTest do
           )
         end
 
-        # Vectors per batch entry, and two batch axes.
         assert_same(&Nx.dot(&1, [1], [0], &2, [1], [0]), pair(type, {4, 33}, {4, 33}))
 
         assert_same(

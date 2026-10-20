@@ -1,23 +1,20 @@
 //! `conv`: a convolution as im2col followed by `batched_gemm`.
 //!
-//! Elixir normalizes the layouts, so the instruction reads an input
-//! `[N, C, spatial...]` and a kernel `[O, I, kernel spatial...]` and writes
-//! `[O, N', output spatial...]` (`N' = N / batch_groups`). Elixir transposes
-//! that to the permutation the caller asked for.
+//! The instruction reads an input `[N, C, spatial...]` and a kernel
+//! `[O, I, kernel spatial...]` and writes `[O, N', output spatial...]`
+//! (`N' = N / batch_groups`); Elixir permutes the layouts. Groups are the GEMM
+//! batch axis. With `G` groups (`feature_group_size` or `batch_group_size`; Nx
+//! allows only one above 1) and `Og = O / G`:
 //!
-//! Groups are the batch axis of the GEMM. With `G` groups (`feature_group_size`
-//! or `batch_group_size`; Nx allows only one of them above 1) and `Og = O / G`:
+//! * pass 1 gathers `cols[G][K][NP]` into scratch, with `K = I * prod(kernel
+//!   spatial)` and `NP = N' * prod(output spatial)`. A cell is zero where the
+//!   position is padding or between dilated input cells;
+//! * pass 2 is `out[G][Og][NP] = kernel[G][Og][K] x cols[G][K][NP]`, reading the
+//!   kernel in place.
 //!
-//! * pass 1 gathers `cols[G][K][NP]` into a scratch buffer, where
-//!   `K = I * prod(kernel spatial)` and `NP = N' * prod(output spatial)`. A cell
-//!   reads the input at the strided, dilated, padded position and holds zero
-//!   where the position is padding or between dilated input cells;
-//! * pass 2 is `out[G][Og][NP] = kernel[G][Og][K] x cols[G][K][NP]`. The kernel
-//!   buffer already has that layout, so it is read in place.
-//!
-//! `expand` is a pure function from the conv sizes to the GEMM sizes and
-//! the scratch size; `Expansion::source` is the matching index map. Neither
-//! needs a device, so `cargo test` checks the expansion against a direct convolution.
+//! `expand` maps conv sizes to GEMM sizes and scratch size; `Expansion::source`
+//! is the matching index map. Neither needs a device, so `cargo test` checks
+//! them against a direct convolution.
 
 use super::gemm::{self, Binding, Gemm};
 use super::index::MAX_RANK;
@@ -70,7 +67,6 @@ struct Expansion {
 }
 
 impl Expansion {
-    /// Elements in the `cols` scratch buffer.
     pub fn cols_len(&self) -> usize {
         self.cols
     }

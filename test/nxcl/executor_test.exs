@@ -46,7 +46,6 @@ defmodule NxCL.ExecutorTest do
     resident = Executor.with_resident_captures(program)
     assert [%Nx.Tensor{data: %NxCL.Backend{ref: ref}}] = resident.captures
 
-    # A second call keeps the buffers it has.
     assert Executor.with_resident_captures(resident).captures == resident.captures
 
     args = [fn -> Nx.tensor([1.0, 2.0]) end]

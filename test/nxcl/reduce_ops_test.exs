@@ -1,10 +1,9 @@
 defmodule NxCL.ReduceOpsTest do
   @moduledoc """
-  Lowering and runtime behaviour of reductions, scans, windows and sort that the
-  differential rows cannot show: which instructions lowering emits, that
-  `reduce` with an add body gives the result of `sum`, which bodies raise,
-  softmax on a batch, and zero-size inputs, which go through the native wire
-  because Nx 1.0 cannot build them.
+  What the differential rows cannot show for reductions, scans, windows and sort:
+  the lowered instructions, that `reduce` with an add body gives the result of
+  `sum`, which bodies raise, softmax on a batch, and zero-size inputs through the
+  native wire.
   """
   use ExUnit.Case, async: false
 
@@ -95,12 +94,10 @@ defmodule NxCL.ReduceOpsTest do
       x = Nx.iota({1, 20}, type: :f32)
       assert Nx.to_number(run(&Nx.sum/1, [x])) == 190.0
 
-      # Two long lines.
       y = Nx.broadcast(Nx.tensor(1.0), {2, 100_000})
       out = run(&Nx.sum(&1, axes: [1]), [y])
       assert Nx.to_flat_list(out) == [100_000.0, 100_000.0]
 
-      # Many lines.
       z = Nx.broadcast(Nx.tensor(1.0), {128, 1000})
       out = run(&Nx.sum(&1, axes: [1]), [z])
       assert Nx.to_flat_list(out) == List.duplicate(1000.0, 128)

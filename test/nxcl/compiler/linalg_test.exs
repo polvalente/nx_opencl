@@ -6,30 +6,26 @@ end
 defmodule NxCL.LinalgTest do
   @moduledoc """
   Differential rows for `cholesky`, `triangular_solve`, `solve`, `determinant`,
-  `qr`, `eigh`, `svd`, `lu`, `all_close`, `top_k` and a user block. Rows use
-  `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`, except `qr`, `eigh`, `svd`
-  and `lu`, whose factors may differ from the reference in sign and order; those
-  rows use the invariant checks of `NxCL.TestSupport.Factors`.
+  `qr`, `eigh`, `svd`, `lu`, `all_close`, `top_k` and a user block. `qr`, `eigh`,
+  `svd` and `lu` have factors that may differ from the reference in sign and
+  order, so they use the invariant checks of `NxCL.TestSupport.Factors`.
 
-  Inputs are well conditioned: a Cholesky input is `L L^H` for a lower factor `L`
-  with a diagonal of about 2 and small off-diagonal entries; a triangular solve
-  gets a dense matrix with a diagonal of about 2, so a solver that read the wrong
-  triangle would show. Integer types use fixed small matrices. Sizes are 1, 3, 64
-  and 257 for `f32`, `f64`, `c64` and `c128`; the half types and the integers stop
-  at 3 (a `bf16` factorization rounds at every step, so the two sides drift apart
-  at 64 by more than the type's tolerance, and 64 integer rows would overflow).
+  Inputs are well conditioned: a Cholesky input is `L L^H` for a lower factor with a
+  diagonal of about 2; a triangular solve gets a dense matrix with a diagonal of
+  about 2, so a solver that read the wrong triangle shows. Integer types use fixed
+  small matrices. Sizes are 1, 3, 64 and 257 for `f32`, `f64`, `c64` and `c128`.
+  Half types and integers stop at 3: a `bf16` factorization rounds at every step,
+  so the two sides drift apart at 64 by more than the tolerance, and 64 integer
+  rows would overflow.
 
-  `Nx.BinaryBackend` is wrong, or raises, in these cases (probed on Nx 1.0), so those
-  rows state the answer:
+  `Nx.BinaryBackend` is wrong or raises in two cases, so those rows state the
+  answer:
 
-    * `cholesky` on `f64` and `c128`: the reference divides by `l_jj + 1.0e-10`, an
-      error of 1e-10 against a tolerance of 1e-12. The answer is the factor `L`
-      the input was built from.
-    * `solve` and `triangular_solve` on a singular matrix: the reference raises
-      "can't solve for singular matrix". The compiler returns infinities and NaN, as
-      a device does; the row checks that.
-
-  `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
+    * `cholesky` on `f64` and `c128`: the reference divides by `l_jj + 1.0e-10`,
+      an error of 1e-10 against a tolerance of 1e-12. The answer is the factor the
+      input was built from.
+    * `solve` and `triangular_solve` on a singular matrix: the reference raises.
+      The compiler returns infinities and NaN, as a device does.
   """
   use ExUnit.Case, async: false
 
@@ -65,14 +61,10 @@ defmodule NxCL.LinalgTest do
   defp wide?(type), do: type in [{:f, 32}, {:f, 64}, {:c, 64}, {:c, 128}]
   defp double?(type), do: type in [{:f, 64}, {:c, 128}]
 
-  # Sizes a type takes; integers use their own fixed matrices.
   defp sizes(type), do: if(wide?(type), do: [1, 3, 64, 257], else: [1, 3])
-
-  # -- Inputs ---------------------------------------------------------------
 
   defp wide_type(type), do: if(complex?(type), do: {:c, 128}, else: {:f, 64})
 
-  # A dense matrix with a diagonal of about 2, in the wide type of `type`.
   defp dense(n, type, seed) do
     wide = wide_type(type)
     r = Gen.random({n, n}, wide, seed: NxCL.TestSupport.Compare.seed() + seed)
@@ -80,7 +72,6 @@ defmodule NxCL.LinalgTest do
     Nx.add(scaled, Nx.multiply(Nx.eye(n), Nx.tensor(2.0, type: {:f, 64})))
   end
 
-  # A lower factor with a real diagonal of about 2.
   defp factor(n, type, seed) do
     d = dense(n, type, seed)
     diag = Nx.real(Nx.take_diagonal(d))
@@ -88,7 +79,6 @@ defmodule NxCL.LinalgTest do
     Nx.add(strict, Nx.make_diagonal(diag))
   end
 
-  # `L L^H`, the matrix whose Cholesky factor is `L`.
   defp gram(l) do
     lh = if Nx.Type.complex?(Nx.type(l)), do: Nx.conjugate(Nx.transpose(l)), else: Nx.transpose(l)
     Nx.dot(l, lh)
@@ -109,7 +99,6 @@ defmodule NxCL.LinalgTest do
   defp stacked_or_single(nil, fun), do: fun.(1)
   defp stacked_or_single(count, fun), do: stack_of(count, fun)
 
-  # Integer matrices small enough for every integer type.
   defp int_matrix(1), do: Nx.tensor([[3]])
   defp int_matrix(3), do: Nx.tensor([[4, 1, 2], [1, 5, 1], [2, 1, 6]])
 
@@ -125,7 +114,6 @@ defmodule NxCL.LinalgTest do
     if batch, do: stack_of(batch, mat), else: mat.(1)
   end
 
-  # Every size runs unbatched and with a leading batch of 2 (3 also runs 4).
   defp batches(3), do: [nil, 2, 4]
   defp batches(_), do: [nil, 2]
 
@@ -160,8 +148,6 @@ defmodule NxCL.LinalgTest do
     shape = if left, do: {n, m}, else: {m, n}
     Gen.random(shape, type, seed: NxCL.TestSupport.Compare.seed() + 4)
   end
-
-  # -- cholesky ---------------------------------------------------------------
 
   describe "cholesky" do
     for type <- @types do
@@ -203,8 +189,6 @@ defmodule NxCL.LinalgTest do
     end
   end
 
-  # -- triangular_solve -----------------------------------------------------
-
   @all_options for left <- [true, false],
                    lower <- [true, false],
                    t <- [:none, :transpose, :conjugate],
@@ -239,7 +223,6 @@ defmodule NxCL.LinalgTest do
             assert_same(&Nx.LinAlg.triangular_solve(&1, &2, opts), [a, b])
           end
 
-          # A vector right-hand side.
           if n < 257 do
             for opts <- Enum.take(options, 4) do
               b = Gen.random({n}, type, seed: NxCL.TestSupport.Compare.seed() + 5)
@@ -293,8 +276,6 @@ defmodule NxCL.LinalgTest do
     end
   end
 
-  # -- solve ----------------------------------------------------------------
-
   describe "solve" do
     for type <- @types do
       @tag requires: Map.get(@needs, type)
@@ -314,7 +295,6 @@ defmodule NxCL.LinalgTest do
           if n < 257, do: assert_same(&Nx.LinAlg.solve/2, [a, vector], eager)
           assert_same(&Nx.LinAlg.solve/2, [a, matrix], eager)
 
-          # Batched: 3 matrices, or 2 at size 257.
           count = if n >= 257, do: 2, else: 3
           a = small(type, n, count)
           b = Gen.random({count, n}, type, seed: NxCL.TestSupport.Compare.seed() + 10)
@@ -345,8 +325,6 @@ defmodule NxCL.LinalgTest do
       assert Enum.all?(Nx.to_flat_list(result), &(&1 == :nan))
     end
   end
-
-  # -- qr, eigh, svd, lu, determinant, all_close, top_k, a user block -------------
 
   describe "qr, eigh, svd, lu, determinant" do
     for type <- @types do

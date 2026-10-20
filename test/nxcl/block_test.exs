@@ -6,8 +6,8 @@ end
 
 defmodule NxCL.BlockTest do
   @moduledoc """
-  The block hook (`NxCL.Compiler.Lower.Block`): every `Nx.Block.*` struct has a decision,
-  each decision shows in the lowered program, and no block lowers to a `:host_call`.
+  The block hook: every `Nx.Block.*` struct has a decision, each decision shows in
+  the lowered program, and no block lowers to a `:host_call`.
   """
   use ExUnit.Case, async: false
 
@@ -33,7 +33,6 @@ defmodule NxCL.BlockTest do
     Nx.divide(Nx.add(a, Nx.transpose(a)), 2)
   end
 
-  # One call per struct, through the public Nx function that builds the block.
   defp cases do
     x = Nx.tensor([[1.0, -2.0, 3.0], [4.0, 5.0, -6.0]])
     z = Nx.complex(x, Nx.negate(x))

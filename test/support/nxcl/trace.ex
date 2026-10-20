@@ -1,39 +1,33 @@
 defmodule NxCL.TestSupport.Trace do
   @moduledoc """
-  Counts the executor's control steps from outside, with Erlang call tracing, so
-  `lib/` carries no counters.
+  Counts the executor's control steps with Erlang call tracing, so `lib/` has
+  no counters. `run/1` runs a function in the calling process and returns
+  `{result, counts}`:
 
-  `run/1` runs a function in the calling process and returns `{result, counts}`:
+    * `:predicate_reads` - calls of `NxCL.Compiler.Executor.truthy?/3`, each a
+      scalar predicate read back (a `cond` clause or a dynamic `while` condition).
+    * `:segment_runs` - calls of `NxCL.Compiler.Executor.eval!/3`, each a
+      straight-line segment run natively.
+    * `:scope_runs` - calls of `NxCL.Compiler.Executor.run_sub/3`: every `while`
+      body run, predicate scope and `cond` branch. A dynamic loop's body runs are
+      `scope_runs - predicate_reads`.
+    * `:host_calls` - calls of `NxCL.Compiler.Executor.Host.run/3` that run a
+      function (an `:io_call` with no function runs nothing).
+    * `:callback_inputs`, `:callback_input_bytes` - the tensors a callback takes
+      (one per leaf of `in_template`) and their bytes.
+    * `:callback_outputs` - the tensors a `:runtime_call` returns (one per leaf of
+      its output template).
 
-    * `:predicate_reads` - calls of `NxCL.Compiler.Executor.truthy?/3`, each of which reads
-      one scalar predicate back from the device (a `cond` clause or a dynamic
-      `while` condition).
-    * `:segment_runs` - calls of `NxCL.Compiler.Executor.eval!/3`, each of which runs one
-      straight-line segment natively.
-    * `:scope_runs` - calls of `NxCL.Compiler.Executor.run_sub/3`: every `while` body run,
-      predicate scope and `cond` branch. A dynamic loop's body runs are
-      `scope_runs - predicate_reads`; with no `cond` and a static trip count they
-      are `scope_runs`.
-    * `:host_calls` - calls of `NxCL.Compiler.Executor.Host.run/3` that run a function (an
-      `:io_call` with no function runs nothing).
-    * `:callback_inputs` and `:callback_input_bytes` - the tensors a callback takes:
-      one per leaf of the entry's `in_template`, and their bytes. `Host.run/3` reads
-      exactly these back, but the count is read off the template, not observed.
-    * `:callback_outputs` - the tensors a callback returns: one per leaf of a
-      `:runtime_call` output template. An `:io_call` returns its input buffers and
-      uploads nothing.
-
-  The three callback counts are derived from the host-call table entry, not from
-  observed reads and uploads. Observing `NxCL.Native.buffer_read/2` from the
-  `Host` module does not work next to `NxCL.TestSupport.NoFallback`: its pattern on
-  `Host.read/2` silences the traced process, so the reads that follow go unseen.
+  The three callback counts come from the host-call entry, not from observed
+  reads and uploads. Tracing `NxCL.Native.buffer_read/2` fails next to
+  `NxCL.TestSupport.NoFallback`: its pattern on `Host.read/2` silences the
+  traced process.
 
   `run/1` raises if a trace pattern matches no function, so a rename of a traced
   private function fails the test instead of leaving a count at zero. A test that
-  expects a count of zero should also assert a count that must be above zero (for
-  example `scope_runs`) from the same run. Tracing follows one process:
-  the executor must run in the caller (it does), and a test that uses this module
-  must be `async: false`. Do not nest `run/1` or use it inside
+  expects zero should also assert a count that must be above zero (for example
+  `scope_runs`). The executor must run in the caller, and the test must be
+  `async: false`. Do not nest `run/1` or use it inside
   `NxCL.TestSupport.NoFallback.trace/1`: a process has one tracer.
   """
 
@@ -124,10 +118,9 @@ defmodule NxCL.TestSupport.Trace do
 
   defp bump(counts, key, n \\ 1), do: Map.update!(counts, key, &(&1 + n))
 
-  # Patterns are set once per VM. Each appends the caller to the trace message. The
-  # `Host.run/3` pattern matches the one `NxCL.TestSupport.NoFallback` sets, because a
-  # pattern on a function replaces the earlier one. Each pattern must match exactly one
-  # function: a renamed function would otherwise leave its count at zero.
+  # Set once per VM. The `Host.run/3` pattern matches the one
+  # `NxCL.TestSupport.NoFallback` sets, because a pattern on a function replaces the
+  # earlier one. Each pattern must match exactly one function.
   defp install_patterns() do
     if :persistent_term.get({__MODULE__, :installed}, false) == false do
       Code.ensure_loaded!(NxCL.Compiler.Executor)

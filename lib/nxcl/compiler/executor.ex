@@ -1,18 +1,11 @@
 defmodule NxCL.Compiler.Executor do
   @moduledoc false
-  # Runs an `NxCL.Compiler.Program` on the device: upload the inputs, run the program
-  # natively, read the outputs, rebuild the container.
+  # Runs an `NxCL.Compiler.Program` on the device.
   #
-  # A program with no `cond`, `while` or `host_call` goes to the native side whole.
-  # Otherwise `NxCL.Compiler.Executor.Plan` cuts it at the control instructions: each
-  # straight-line segment runs natively as its own program, and this module runs
-  # the `cond`, `while` and `host_call` steps itself (`NxCL.Compiler.Executor.Host`).
-  # Buffers stay on the device between steps, in a table keyed by ref. A step drops the buffers it was the last to read.
-  # Compiled programs and plans live in `NxCL.Compiler.ProgramCache`. A run uses the device and
-  # queue its options name (`NxCL.Devices`).
-  #
-  # The wire term sent to `NxCL.Native.compile_program/2` is built by
-  # `NxCL.Compiler.Executor.Wire`.
+  # A program with no `cond`, `while` or `host_call` runs natively whole.
+  # Otherwise `Plan` cuts it at those instructions: each straight-line segment
+  # runs natively, and this module runs the control steps. Buffers stay on the
+  # device in a table keyed by ref; the last reader drops each one.
 
   alias Nx.Defn.Composite
   alias NxCL.Compiler.Executor.Host
@@ -23,9 +16,9 @@ defmodule NxCL.Compiler.Executor do
   alias NxCL.Devices
 
   @doc """
-  Runs `program` on `args`, the flat list of lazy argument functions that
-  `Nx.Defn.Compiler` passes. Returns the output container. `opts` take `:device`
-  and `:command_queue` (see `NxCL.Devices`).
+  Runs `program` on `args`, the flat list of lazy argument functions from
+  `Nx.Defn.Compiler`. Returns the output container. `opts` take `:device` and
+  `:command_queue`.
   """
   @spec run(Program.t(), [(-> Nx.Tensor.t())], keyword()) :: Nx.Container.t()
   def run(%Program{} = program, args, opts \\ []) do
@@ -35,9 +28,8 @@ defmodule NxCL.Compiler.Executor do
   end
 
   @doc """
-  Runs `program` and returns one device buffer per output leaf, nothing read
-  back. An argument is a lazy function, or `{:buffer, ref}` for a tensor that is
-  already on the device (the eager backend passes these).
+  Runs `program` and returns one device buffer per output leaf. An argument is a
+  lazy function, or `{:buffer, ref}` for a tensor already on the device.
   """
   @spec run_buffers(Program.t(), [(-> Nx.Tensor.t()) | {:buffer, reference()}], keyword()) ::
           [reference()]
@@ -68,8 +60,7 @@ defmodule NxCL.Compiler.Executor do
     )
   end
 
-  # One slot per program input, in order: the device buffer, or `nil` when the
-  # function never reads that argument.
+  # `nil` for an argument the function never reads.
   defp input_buffers(ctx, %Program{inputs: inputs}, args) do
     inputs
     |> Enum.zip(args)
@@ -83,9 +74,8 @@ defmodule NxCL.Compiler.Executor do
     do: Enum.map(captures, &tensor_buffer(ctx, &1))
 
   @doc """
-  Returns `program` with each captured tensor moved to the device `opts` name, so
-  a run reads the same buffer instead of uploading it again. A tensor already on
-  that device stays.
+  Returns `program` with each captured tensor on the device `opts` name, so runs
+  reuse its buffer.
   """
   @spec with_resident_captures(Program.t(), keyword()) :: Program.t()
   def with_resident_captures(%Program{} = program, opts \\ []) do
@@ -125,9 +115,7 @@ defmodule NxCL.Compiler.Executor do
     container
   end
 
-  # The decoded program stays in `NxCL.Compiler.ProgramCache`, so a repeat call skips decoding
-  # and kernel lookups. The key is the program's signature, so the wire term is
-  # only built on a miss.
+  # The key is the signature, so the wire term is built only on a miss.
   defp compiled(dev, program) do
     key = {:program, dev.key, Program.signature(program)}
     cached(dev, key, fn -> Wire.program(program) end)
@@ -142,8 +130,7 @@ defmodule NxCL.Compiler.Executor do
     end)
   end
 
-  # A program with control flow caches its plan under a key that covers every
-  # nested body. Each segment of the plan compiles the first time it runs.
+  # Each segment of a plan compiles the first time it runs.
   defp plan_for(dev, program) do
     if Plan.control?(program) do
       ProgramCache.fetch_or_build({:plan, Program.signature(program)}, fn ->
@@ -153,8 +140,6 @@ defmodule NxCL.Compiler.Executor do
       {:simple, compiled(dev, program)}
     end
   end
-
-  # -- Segmented run -----------------------------------------------------------
 
   defp run_plan(%{ctx: ctx} = dev, plan, program, args) do
     captures =
@@ -178,7 +163,7 @@ defmodule NxCL.Compiler.Executor do
     run_scope(plan.scope, table, env)
   end
 
-  # Consts that a control step or an output reads as a buffer, made once per run.
+  # Constants that a control step or an output reads as a buffer.
   defp const_buffers(_dev, %Plan{const_keys: []}), do: %{}
 
   defp const_buffers(dev, %Plan{const_keys: keys, const_wire: wire, const_key: key}) do
@@ -192,7 +177,6 @@ defmodule NxCL.Compiler.Executor do
     Enum.map(outputs, &Map.fetch!(table, &1))
   end
 
-  # A nested scope starts from the shared captures and consts plus its carry.
   defp run_sub(scope, carry, env) do
     table =
       carry
@@ -270,7 +254,7 @@ defmodule NxCL.Compiler.Executor do
       |> NxCL.Native.buffer_read(div(bits, 8))
       |> NxCL.Native.ok!("could not read a predicate")
 
-    # Integer kinds compare the raw bytes with zero; `Nx.from_binary/2` is for floats.
+    # Compare integer bytes with zero directly.
     if kind in [:s, :u] do
       bytes != :binary.copy(<<0>>, byte_size(bytes))
     else
@@ -296,7 +280,7 @@ defmodule NxCL.Compiler.Executor do
   defp to_buffer(_ctx, {:buffer, ref}), do: ref
   defp to_buffer(ctx, arg), do: tensor_buffer(ctx, arg.())
 
-  # A tensor already on this device goes in as it is: no read back, no new upload.
+  # A tensor already on this device needs no read back or upload.
   defp tensor_buffer(ctx, %Nx.Tensor{data: %NxCL.Backend{ref: ref, ctx: ctx}}), do: ref
 
   defp tensor_buffer(ctx, tensor),

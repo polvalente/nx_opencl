@@ -1,7 +1,7 @@
 # NxCL Benchmarks
 
 Scripts that time `NxCL.Compiler` and `NxCL.Backend` against the Nx Evaluator on
-`Nx.BinaryBackend` and, when installed, EXLA.
+`Nx.BinaryBackend` and, if installed, EXLA.
 
 ## Run
 
@@ -15,8 +15,8 @@ mix run benchmarks/mlp_inference.exs
 mix run benchmarks/compiler_vs_eager.exs
 ```
 
-From `benchmarks/`, with EXLA. This is a separate Mix project that depends on the
-library by path. EXLA is not a dependency of the library.
+From `benchmarks/`, with EXLA (a separate Mix project that depends on the library
+by path):
 
 ```bash
 cd benchmarks
@@ -26,16 +26,15 @@ BENCH_EXLA=1 mix run elementwise.exs
 
 Set `BENCH_EXLA=1` on every command in this project, `mix deps.get` included.
 `mix.exs` reads it to decide whether EXLA is a dependency, and a command without it
-can change `mix.lock`. Check `git diff benchmarks/mix.lock` before you commit.
+can change `mix.lock`.
 
-EXLA 1.0 downloads an XLA binary on first build. On the Mac it runs on the CPU only.
-Do not combine EXLA with PoCL in one process: the two C++ runtimes clash and the VM
-aborts. Run PoCL without EXLA.
+EXLA 1.0 downloads an XLA binary on first build, and on a Mac it runs on the CPU
+only. Do not load EXLA and PoCL in one process: their C++ runtimes clash and the VM
+aborts.
 
-Set `BENCH_BUDGET_MS` to change the time spent per cell (default 1500) and
-`BENCH_BACKENDS` (for example `NxCL.Compiler,EXLA`) to run some columns only.
-To use PoCL, set `OPENCL_DYLIB_PATH` and `OCL_ICD_VENDORS` as the README of the
-library describes for the test suite.
+`BENCH_BUDGET_MS` sets the time per cell (default 1500). `BENCH_BACKENDS` (for
+example `NxCL.Compiler,EXLA`) runs some columns only. For PoCL, set
+`OPENCL_DYLIB_PATH` and `OCL_ICD_VENDORS` as the library README describes.
 
 ## What each script measures
 
@@ -47,11 +46,11 @@ library describes for the test suite.
 | `mlp_inference.exs` | Dense layer, two and three layer MLPs, batch sizes |
 | `compiler_vs_eager.exs` | MLP forward and training step, CNN forward, transformer block |
 
-Each table cell reads `first call us / median per call us`. The first call includes
-tracing, lowering and kernel builds. The per-call time comes after warmup. Inputs sit
-on the backend before timing, and every call reads its outputs back to the host.
-The kernel cache is shared inside one process, so the first call of a later row can
-be cheaper than a cold start.
+Each cell reads `first call us / median per call us`. The first call includes
+tracing, lowering and kernel builds; the per-call time comes after warmup. Inputs
+sit on the backend before timing, and every call reads its outputs back. Rows in
+one process share the kernel cache, so a later row's first call can cost less than
+a cold start.
 
 ## Columns
 
@@ -62,13 +61,11 @@ be cheaper than a cold start.
 
 ## Profile split
 
-This tooling runs on macOS only: the shim builds as a `.dylib` with `cc -dynamiclib`
-and the default OpenCL library is Apple's framework.
-
 `benchmarks/profile/` splits a model call into transfer, kernel and host time. It
-holds a small C shim that stands in for `libOpenCL`, so nothing in `lib/` or `native/`
-changes. The shim reads the `CL_QUEUE_PROFILING_ENABLE` events for kernel time and times
-buffer uploads and reads.
+runs on macOS only: the shim builds as a `.dylib` with `cc -dynamiclib`, and the
+default OpenCL library is Apple's framework. A small C shim stands in for
+`libOpenCL`, so `lib/` and `native/` do not change. It reads the
+`CL_QUEUE_PROFILING_ENABLE` events for kernel time and times buffer uploads and reads.
 
 ```bash
 benchmarks/profile/run.sh                  # Apple
@@ -76,9 +73,8 @@ CALLS=100 ONLY=Transformer benchmarks/profile/run.sh
 benchmarks/profile/run.sh cold_start.exs   # first call and program build time
 ```
 
-Environment: `OPENCL_DYLIB_PATH` names the real `libOpenCL` (default: Apple's framework),
-`NXCL_PROF_FILE` the counters file (default `/tmp/nxcl_prof.bin`), `NXCL_MIX` the command
-that runs Mix (default `mise exec -- mix`).
-
-Set `NXCL_PROF_FINISH=1` to make every queue flush wait for the device, which shows
-the split of a run that ends in `clFinish`.
+Environment: `OPENCL_DYLIB_PATH` is the real `libOpenCL` (default: Apple's framework),
+`NXCL_PROF_FILE` the counters file (default `/tmp/nxcl_prof.bin`), `NXCL_MIX` the
+command that runs Mix (default `mise exec -- mix`). `NXCL_PROF_FINISH=1` makes every
+queue flush wait for the device, which shows the split of a run that ends in
+`clFinish`.

@@ -1,19 +1,19 @@
-//! Cumulative ops: `cumulative_sum`, `cumulative_product`, `cumulative_min`
-//! and `cumulative_max` along one axis, forward or reversed.
+//! Cumulative ops: `cumulative_sum`, `cumulative_product`, `cumulative_min` and
+//! `cumulative_max` along one axis, forward or reversed.
 //!
-//! A line is one run along the axis; the kernels index it with the axis size
-//! `N` and the inner stride, so any axis works with no transpose. A work-efficient
+//! A line is one run along the axis. Kernels index it with the axis size `N` and
+//! the inner stride, so any axis works with no transpose. A work-efficient
 //! (Blelloch) scan runs in local memory over one block of `WG` elements.
 //!
 //! - A line of at most `WG` elements takes one launch.
-//! - A longer line splits into `B = ceil(N / WG)` blocks. Pass 1 scans each
-//!   block and writes its total. Pass 2 scans the totals of each line, one
-//!   group per line, a tile of `WG` totals at a time with a running carry.
-//!   Pass 3 combines each block's offset into its elements.
+//! - A longer line splits into `B = ceil(N / WG)` blocks. Pass 1 scans each block
+//!   and writes its total. Pass 2 scans each line's totals, one group per line,
+//!   `WG` totals at a time with a running carry. Pass 3 adds each block's offset
+//!   to its elements.
 //!
 //! The accumulator has the output type, so integers wrap as the reference does.
 //! No atomics. A float scan adds in a different order from a left fold, so
-//! results differ from it in the last bits.
+//! results differ in the last bits.
 
 use super::index;
 use super::movement::{ints, pragmas, Kernel};
@@ -32,7 +32,6 @@ pub fn handles(op: &str) -> bool {
     OPS.contains(&op)
 }
 
-/// Blocks per line for an axis of `n` elements and groups of `wg` items.
 fn blocks(n: usize, wg: usize) -> usize {
     n.div_ceil(wg).max(1)
 }
@@ -85,7 +84,6 @@ impl Ctx<'_> {
         ))
     }
 
-    /// Declares `N`, `inner`, `B` and `rev` as scalar arguments.
     fn geometry(&self, k: &mut Kernel, b: usize, rev: bool) {
         k.long("N".to_string(), self.n as i64);
         k.long("inner".to_string(), self.inner as i64);

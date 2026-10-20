@@ -1,21 +1,13 @@
 defmodule NxCL.Compiler.Lower.HostCall do
-  @moduledoc """
-  Lowers `io_call` and `runtime_call` nodes to one `:host_call` instruction each.
-
-  The operands are the leaves of the node's input container, in flatten order.
-  The instruction has list-valued `:out_type` and `:out_shape`, one per output
-  leaf, and its results are `{:result, i, k}`, as for `cond` and `while`. Its one
-  attr is an index into `NxCL.Compiler.Program`'s `:host_calls` side table, whose entries
-  `NxCL.Compiler.Executor.Host` reads at run time:
-
-    * `:kind` - `:io_call` (side effect; the outputs are the operands, unchanged)
-      or `:runtime_call` (the function returns the outputs).
-    * `:fun` - the callback, or `nil` for a named `io_call` with no callback.
-    * `:opts` - the options a `runtime_call` passes to its function.
-    * `:in_template` - the input container with template tensors.
-    * `:out_template` - the output container with template tensors.
-
-  """
+  @moduledoc false
+  # Lowers `io_call` and `runtime_call` to one `:host_call` instruction each. The
+  # operands are the leaves of the input container. The one attr indexes the
+  # program's `:host_calls`. `NxCL.Compiler.Executor.Host` reads each entry:
+  #
+  #   * `:kind` - `:io_call` (outputs are the operands) or `:runtime_call`
+  #   * `:fun` - the callback, or `nil` for a named `io_call` with none
+  #   * `:opts` - options a `runtime_call` passes to its function
+  #   * `:in_template`, `:out_template` - containers of template tensors
 
   alias Nx.Defn.Composite
   alias Nx.Tensor, as: T
@@ -53,8 +45,6 @@ defmodule NxCL.Compiler.Lower.HostCall do
     emit(state, n, input, entry)
   end
 
-  # Emits a `:host_call` for `entry` reading the leaves of `input`, and binds the
-  # node's id to its result. A tuple-typed node maps to `{:tuple, refs}`.
   @spec emit(Lower.state(), Shared.tensor(), Nx.Container.t(), Program.host_call()) ::
           Lower.state()
   defp emit(state, %T{data: %Nx.Defn.Expr{id: id}} = n, input, entry) do
@@ -72,9 +62,7 @@ defmodule NxCL.Compiler.Lower.HostCall do
     }
   end
 
-  # The `:host_call` instruction for `entry` over `operands`, and its result refs.
-  # `index` is the entry's place in the program's `:host_calls`; `at` is the
-  # instruction's place in the instruction list.
+  # `index` is the entry's place in `:host_calls`; `at` is the instruction's.
   @spec instruction(
           Program.host_call(),
           [Instruction.ref()],
@@ -96,7 +84,7 @@ defmodule NxCL.Compiler.Lower.HostCall do
     {instr, Shared.result_refs(at, length(leaves))}
   end
 
-  # A named `io_call` runs its own callback (`nil` for none); the `:hooks` option that overrides it is rejected.
+  # A named `io_call` runs its own callback; `:hooks` cannot override it.
   defp callback({:fn, fun}), do: fun
   defp callback({:named, _name, fun}) when is_function(fun) or is_nil(fun), do: fun
 

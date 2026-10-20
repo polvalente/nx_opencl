@@ -1,27 +1,23 @@
 defmodule NxCL.FFTTest do
   @moduledoc """
   Differential rows for `fft`, `ifft` and the `fft2`, `ifft2`, `rfft` and `irfft`
-  blocks through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
+  blocks.
 
   Lengths 2, 8, 100, 1024 and 4097 cover the radix-2 passes and Bluestein. Float
-  inputs scale by `1 / sqrt(n)` for `fft` and by `sqrt(n)` for `ifft`, so the
-  output has unit-size entries and the harness tolerance for the type applies
-  (an `f32` transform of long inputs has an absolute error that grows with the
-  size of its output). Integer inputs cannot scale, so they use lengths up to 8, `rfft`
-  included: at length 100 an `f32` transform of integers up to 8 has an absolute error
-  of about 2e-5, past the absolute tolerance of 1e-5.
+  inputs scale by `1 / sqrt(n)` for `fft` and `sqrt(n)` for `ifft`, so the output
+  has unit-size entries and the harness tolerance applies (the absolute error of an
+  `f32` transform grows with the size of its output). Integer inputs cannot scale,
+  so they stop at length 8: at length 100 an `f32` transform of integers up to 8 is
+  off by about 2e-5, past the 1e-5 tolerance.
 
-  `Nx.BinaryBackend` is wrong in two cases (probed on Nx 1.0), so those
-  rows state the answer. For length 1 it returns an empty tensor; the answer is
-  the input as a complex tensor. For a transform on axis 0 of a rank 3 tensor with
-  a new `:length`, it returns values that differ from the transform of the same
-  axis moved last; the answer is that last-axis transform on the reference.
-  For `f64` and `c128` the reference is also not accurate enough at length 4097
-  (its chirp loses digits: its error against the exact sum is 7e-13, past the
-  `1.0e-12` tolerance), so those types check 4097 against an impulse, whose
-  spectrum is known in closed form. Round trips compare `ifft(fft(x))` with `x`.
-
-  `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
+  `Nx.BinaryBackend` is wrong in two cases, so those rows state the answer. At
+  length 1 it returns an empty tensor; the answer is the input as a complex tensor.
+  For axis 0 of a rank 3 tensor with a new `:length`, it differs from the transform
+  of the same axis moved last; the answer is that last-axis transform. For `f64`
+  and `c128` the reference is also too inaccurate at length 4097 (its chirp loses
+  digits: error 7e-13 against the exact sum, past the 1.0e-12 tolerance), so those
+  types check 4097 against an impulse, whose spectrum is known. Round trips compare
+  `ifft(fft(x))` with `x`.
   """
   use ExUnit.Case, async: false
 

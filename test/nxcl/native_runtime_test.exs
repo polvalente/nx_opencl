@@ -1,7 +1,7 @@
 defmodule NxCL.NativeRuntimeTest do
   @moduledoc """
-  Tests of the native program executor: decoding, outputs, and the program
-  cache a jitted function fills. Most tests use a fresh device context.
+  The native program executor: decoding, outputs, and the program cache a jitted
+  function fills. Most tests use a fresh device context.
   """
   use ExUnit.Case, async: false
 

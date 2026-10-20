@@ -36,9 +36,9 @@ defmodule NxCL.TestSupport.Gen do
   @doc """
   Random tensor on `Nx.BinaryBackend`. Floats lie in [-4, 4]; integers span a small range.
 
-  Without `:seed`, each call in a process draws new data: the seed is ExUnit's seed plus
-  the number of earlier unseeded calls in the process, so two operands of one row differ
-  (`subtract` of equal data would give all zeros) and a failing seed still reproduces the
+  Without `:seed`, each call draws new data: ExUnit's seed plus the number of
+  earlier unseeded calls in the process. Two operands of one row then differ
+  (`subtract` of equal data would give zeros) and a failing seed reproduces the
   data. With `:seed`, the data depends on that seed alone.
   """
   @spec random(tuple(), Nx.Type.t(), keyword()) :: Nx.Tensor.t()
@@ -49,7 +49,6 @@ defmodule NxCL.TestSupport.Gen do
     tensor
   end
 
-  # Counts the unseeded calls of this process; a test runs in its own process.
   defp salt do
     n = Process.get({__MODULE__, :salt}, 0)
     Process.put({__MODULE__, :salt}, n + 1)

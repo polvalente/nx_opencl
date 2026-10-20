@@ -2,21 +2,14 @@ defmodule NxCL.Compiler.Lower do
   @moduledoc """
   Lowers an `Nx.Defn.Expr` graph to an `NxCL.Compiler.Program`.
 
-  The pass walks the graph in post-order (`NxCL.Compiler.Tree`) and emits one
-  instruction per op node. `parameter`, scalar `constant` and `tensor` nodes emit
-  no instruction; they become `{:input, i}`, `{:const, i}` and `{:capture, i}`
-  refs. `metadata` nodes pass their operand's ref through, and `elem` picks a
-  ref out of a tuple. A constant of a shape emits one `broadcast`. An operand
-  that lacks the output shape of an elementwise op gets a `broadcast` too.
+  It walks the graph in post-order and emits one instruction per op node.
+  `parameter`, scalar `constant` and `tensor` nodes emit none; they become
+  `{:input, i}`, `{:const, i}` and `{:capture, i}` refs. An operand that lacks
+  the output shape of an elementwise op gets a `broadcast`.
 
-  A `cond` or `while` node becomes one instruction that holds its bodies as
-  nested instruction lists (`NxCL.Compiler.Lower.Control`). `lower_scope/4`
-  lowers each body. An `io_call`
-  or `runtime_call` node becomes one `:host_call` instruction
-  (`NxCL.Compiler.Lower.HostCall`); its function sits in the program's `:host_calls`.
-
-  An op the pass cannot lower raises `ArgumentError` with the prefix
-  `"does not yet lower op"`. It never falls back to another path.
+  A `cond` or `while` becomes one instruction with nested bodies. An `io_call`
+  or `runtime_call` becomes one `:host_call` instruction. An op it cannot lower
+  raises `ArgumentError` ("does not yet lower op ...").
   """
 
   import NxCL.Compiler.Lower.Shared,
@@ -48,10 +41,9 @@ defmodule NxCL.Compiler.Lower do
   @type node_ref :: Instruction.ref() | {:tuple, [node_ref()]}
 
   @typedoc """
-  The lowering state. `:inputs` maps argument positions to `{type, shape}`;
-  `:captures`, `:constants`, `:instrs` and `:host_calls` are built in reverse;
-  `:refs` maps node ids to refs; `:avail` and `:outer` hold the node ids of the
-  current and parent scopes; `:depth` counts nested bodies.
+  The lowering state. `:captures`, `:constants`, `:instrs` and `:host_calls`
+  are built in reverse. `:avail` and `:outer` hold the node ids of the current
+  and parent scopes; `:depth` counts nested bodies.
   """
   @type state :: %{
           inputs: %{non_neg_integer() => {Nx.Type.t(), tuple()}},
@@ -67,11 +59,9 @@ defmodule NxCL.Compiler.Lower do
         }
 
   @doc """
-  Lowers `output`, the result of tracing a function with `num_inputs`
-  flattened arguments.
-
-  The input list always has `num_inputs` entries, so a function that ignores
-  an argument keeps the positions of the others.
+  Lowers `output`, the trace of a function with `num_inputs` flattened
+  arguments. The input list has `num_inputs` entries, so an ignored argument
+  keeps the positions of the others.
   """
   @spec lower(Nx.Container.t(), non_neg_integer() | nil) :: Program.t()
   def lower(output, num_inputs \\ nil) do
@@ -114,16 +104,14 @@ defmodule NxCL.Compiler.Lower do
     }
   end
 
-  # `while` and `cond` bodies nest; a deeper graph raises instead of exhausting the stack.
+  # Deeper nesting raises instead of exhausting the stack.
   @max_depth 64
 
-  @doc """
-  Lowers `roots` as a body of `parent`. Returns the body (`{instructions,
-  outputs}`) and the parent with the captures, constants and host calls the
-  body added. `seeds` maps node ids to the refs (`{:carry, i}`) the scope starts
-  with. A `:while` scope reads nothing else from the parent; a `:cond` scope reads
-  the parent through its seeds only, so both get the same check.
-  """
+  # Lowers `roots` as a body of `parent`. Returns the body and the parent with the
+  # captures, constants and host calls the body added. `seeds` maps node ids to the
+  # `{:carry, i}` refs the scope starts with. Both kinds read the parent through
+  # its seeds only.
+  @doc false
   @spec lower_scope(state(), [Shared.tensor()], %{reference() => node_ref()}, :while | :cond) ::
           {Instruction.body(), state()}
   def lower_scope(parent, roots, seeds, kind) do
@@ -167,8 +155,7 @@ defmodule NxCL.Compiler.Lower do
      }}
   end
 
-  # A literal tensor or constant may sit in both scopes; any other node of the
-  # parent is a value the body cannot reach.
+  # A literal tensor or constant may sit in both scopes.
   defp reads_outer?(%{outer: outer}, %T{data: %Nx.Defn.Expr{id: id, op: op}}),
     do: op not in [:constant, :tensor] and is_map_key(outer, id)
 
@@ -177,8 +164,6 @@ defmodule NxCL.Compiler.Lower do
           "an inner scope reads #{inspect(op)} from its parent scope; " <>
             "pass the value in as an argument of the while or cond"
   end
-
-  # -- Leaves -------------------------------------------------------------
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :parameter}}, %{scope: :sub}) do
     raise ArgumentError,
@@ -197,7 +182,6 @@ defmodule NxCL.Compiler.Lower do
     if node.shape == {} do
       put_ref(state, id, ref)
     else
-      # A constant of a shape is a scalar constant filling that shape.
       emit(state, node, Ops.broadcast(ref, node.type, node.shape, []))
     end
   end
@@ -216,18 +200,15 @@ defmodule NxCL.Compiler.Lower do
     end
   end
 
-  # A `fun` node holds the body of a `reduce`; the node that owns it reads the body.
+  # The `reduce` that owns a `fun` reads its body.
   defp expand(%T{data: %Nx.Defn.Expr{op: :fun}}, state), do: state
 
-  # `elem` picks one ref out of a tuple node; it emits no instruction.
   defp expand(%T{data: %Nx.Defn.Expr{id: id, op: :elem, args: [tuple, pos]}}, state) do
     case Map.fetch!(state.refs, tuple.data.id) do
       {:tuple, refs} -> put_ref(state, id, Enum.at(refs, pos))
       _other -> unsupported(:elem, "(operand is not a tuple)")
     end
   end
-
-  # -- Ops ----------------------------------------------------------------
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x]}} = node, state)
        when op in @unary_ops do
@@ -236,7 +217,7 @@ defmodule NxCL.Compiler.Lower do
     emit(state, node, Ops.unary(op, rx, node.type, node.shape))
   end
 
-  # `Nx.logical_not/1` is a block; the elementwise kernel does the same job.
+  # `Nx.logical_not/1` is a block; the elementwise kernel does it.
   defp expand(
          %T{data: %Nx.Defn.Expr{op: :block, args: [%Nx.Block.LogicalNot{}, [x], _default, _fun]}} =
            node,
@@ -246,7 +227,7 @@ defmodule NxCL.Compiler.Lower do
     emit(state, node, Ops.unary(:logical_not, rx, node.type, node.shape))
   end
 
-  # `Nx.phase/1` is a block whose default is `atan2(imag, real)`; one kernel does it.
+  # `Nx.phase/1` is a block; one kernel replaces its default `atan2(imag, real)`.
   defp expand(
          %T{data: %Nx.Defn.Expr{op: :block, args: [%Nx.Block.Phase{}, [x], _default, _fun]}} =
            node,
@@ -362,8 +343,6 @@ defmodule NxCL.Compiler.Lower do
     emit(state, node, Ops.eye(node.type, node.shape))
   end
 
-  # -- Reductions, scans, windows, sort ------------------------------------
-
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
        when op in @reduce_ops do
     emit(
@@ -390,7 +369,7 @@ defmodule NxCL.Compiler.Lower do
 
     cond do
       not monoid?(steps) ->
-        # Any other body folds in order, starting from the initial accumulator.
+        # The body is not a monoid: fold in order from the initial accumulator.
         instr =
           Ops.reduce_steps(
             [ref(state, x), ref(state, init)],
@@ -410,7 +389,7 @@ defmodule NxCL.Compiler.Lower do
         )
 
       true ->
-        # Fold the initial accumulator in: the result is `fun(total, init)`.
+        # The result is `fun(total, init)`.
         {state, total} =
           push(state, Ops.reduce_steps([ref(state, x)], node.type, node.shape, steps, axes))
 
@@ -500,8 +479,6 @@ defmodule NxCL.Compiler.Lower do
     )
   end
 
-  # -- Indexing -----------------------------------------------------------
-
   defp expand(%T{data: %Nx.Defn.Expr{op: :gather, args: [x, indices, opts]}} = node, state) do
     emit(
       state,
@@ -517,8 +494,6 @@ defmodule NxCL.Compiler.Lower do
     refs = {rx, ref(state, indices), ru}
     emit(state, node, Ops.indexed(op, refs, node.type, node.shape, opts[:axes]))
   end
-
-  # -- Linear algebra -----------------------------------------------------
 
   defp expand(
          %T{data: %Nx.Defn.Expr{op: :triangular_solve, args: [a, b, opts]}} = node,
@@ -542,7 +517,7 @@ defmodule NxCL.Compiler.Lower do
     emit(state, node, Ops.cholesky(rx, node.type, node.shape))
   end
 
-  # Nx pads or crops the axis to `:length`; so do we, then one transform.
+  # Nx pads or crops the axis to `:length` first.
   defp expand(%T{data: %Nx.Defn.Expr{op: op, args: [x, opts]}} = node, state)
        when op in [:fft, :ifft] do
     {state, rx} = cast(state, x, node.type)
@@ -551,13 +526,9 @@ defmodule NxCL.Compiler.Lower do
     emit(state, node, Ops.fft(op, rx, node.type, node.shape, axis))
   end
 
-  # -- Blocks -------------------------------------------------------------
-
-  # A block with no native clause above: lower its default or run it on the host.
+  # A block with no native clause above lowers through its default.
   defp expand(%T{data: %Nx.Defn.Expr{op: :block}} = node, state),
     do: Block.lower(state, node, &expand/2)
-
-  # -- Control flow -------------------------------------------------------
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :cond}} = node, state),
     do: Control.cond_node(state, node)
@@ -565,14 +536,10 @@ defmodule NxCL.Compiler.Lower do
   defp expand(%T{data: %Nx.Defn.Expr{op: :while}} = node, state),
     do: Control.while_node(state, node)
 
-  # -- Host callbacks -----------------------------------------------------
-
   defp expand(%T{data: %Nx.Defn.Expr{op: op}} = node, state) when op in [:io_call, :runtime_call],
     do: HostCall.node(state, node)
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op}}, _state), do: unsupported(op, nil)
-
-  # -- Helpers ------------------------------------------------------------
 
   defp emit(state, %T{data: %Nx.Defn.Expr{id: id}}, instruction) do
     {state, ref} = push(state, instruction)
@@ -583,9 +550,8 @@ defmodule NxCL.Compiler.Lower do
 
   defp ref(state, %T{data: %Nx.Defn.Expr{id: id}}), do: Map.fetch!(state.refs, id)
 
-  # Every operand of an elementwise op has the output shape, except a scalar
-  # constant, which the kernel takes by value. Any other operand gets a
-  # broadcast instruction, aligned to the trailing axes as `Nx.broadcast` does.
+  # Every operand of an elementwise op gets the output shape, except a scalar
+  # constant, which the kernel takes by value. Axes align to the trailing ones.
   defp conform(state, %T{shape: shape}, operands) do
     {state, refs} =
       Enum.reduce(operands, {state, []}, fn x, {state, refs} ->
@@ -608,7 +574,6 @@ defmodule NxCL.Compiler.Lower do
     end
   end
 
-  # Casts an operand to the output type with an `as_type` instruction.
   defp cast(state, %T{type: type} = x, type), do: {state, ref(state, x)}
 
   defp cast(state, %T{} = x, type),
@@ -624,8 +589,7 @@ defmodule NxCL.Compiler.Lower do
     {state, Enum.reverse(refs)}
   end
 
-  # A start index is a scalar tensor or an integer; an integer becomes an `s64`
-  # constant. The device clamps every start.
+  # An integer start becomes an `s64` constant. The device clamps every start.
   defp start_refs(state, starts) do
     {state, refs} =
       Enum.reduce(starts, {state, []}, fn
@@ -645,9 +609,8 @@ defmodule NxCL.Compiler.Lower do
 
   defp scalar_const?(_state, _operand), do: false
 
-  # Lowers the body of a `reduce` or `window_reduce` function to steps over
-  # two variables (the parameters) and the result of each earlier step. A body
-  # with any other node raises.
+  # Lowers a `reduce` or `window_reduce` body to steps over the two parameters
+  # and earlier results. Any other node raises.
   defp reduce_steps(%T{data: %Nx.Defn.Expr{op: :fun, args: [params, body, _mfa]}}, type, what) do
     if length(params) != 2 do
       unsupported(what, "(the function must take two arguments)")
@@ -683,8 +646,7 @@ defmodule NxCL.Compiler.Lower do
     steps
   end
 
-  # A body that is one `add` or `multiply` with its identity as the initial
-  # accumulator is `sum` or `product`; nothing is left to fold in.
+  # One `add` or `multiply` with its identity as the initial value: nothing to fold in.
   defp identity_init?([{op, a, b}], %T{data: %Nx.Defn.Expr{op: :constant, args: [v]}})
        when {a, b} in [{0, 1}, {1, 0}] do
     (op == :add and v == 0) or (op == :multiply and v == 1)
@@ -692,7 +654,7 @@ defmodule NxCL.Compiler.Lower do
 
   defp identity_init?(_steps, _init), do: false
 
-  # Emits `fun(total, init)` as elementwise instructions; the last one is the node's.
+  # Emits `fun(total, init)`; the last instruction is the node's.
   defp fold_steps(state, node, steps, total, init) do
     last = length(steps) - 1
 

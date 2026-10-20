@@ -1,13 +1,6 @@
 defmodule NxCL.E2E.AxonTest do
   @moduledoc """
-  End-to-end tests using Axon models.
-  These exercise real neural network layer composition through our backend.
-
-  Axon models are pure Nx under the hood:
-  - Dense = Nx.dot + Nx.add (bias)
-  - ReLU = Nx.max(x, 0)
-  - Sigmoid = Nx.sigmoid
-  - Softmax = Nx.exp / Nx.sum(Nx.exp)
+  Axon models through the backend: dense, ReLU, sigmoid and softmax layers.
   """
   use ExUnit.Case, async: false
   import NxCL.TestHelpers
@@ -40,7 +33,6 @@ defmodule NxCL.E2E.AxonTest do
 
       {init_fn, predict_fn} = Axon.build(model)
 
-      # Initialize params on CPU
       template = Nx.template({1, 4}, :f32)
       params = init_fn.(template, %{})
 
@@ -51,10 +43,8 @@ defmodule NxCL.E2E.AxonTest do
       key = Nx.Random.key(42)
       {input, _key} = Nx.Random.uniform(key, shape: {1, 4}, type: :f32)
 
-      # CPU reference
       cpu_result = predict_fn.(params, input)
 
-      # GPU: transfer params and input
       gpu_params = transfer_params(params, NxCL.Backend)
       gpu_input = Nx.backend_transfer(input, NxCL.Backend)
       gpu_result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)

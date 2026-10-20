@@ -1,11 +1,10 @@
 defmodule NxCL.IndexingTest do
   @moduledoc """
-  What the differential rows in `compiler/gather_scatter_test.exs` cannot show:
-  the instructions lowering emits, out-of-bounds indices (the reference raises,
-  so the device must), the `indexed_put` duplicate rule with stated values, the
-  100 000-update `indexed_add` against an `f64` sum, the embedding lookup, the
-  error for 64-bit atomics, and zero-size inputs through the native wire. The
-  reference rules are listed in the moduledoc of that test.
+  What the rows in `compiler/gather_scatter_test.exs` cannot show: the lowered
+  instructions, out-of-bounds indices (the reference raises, so the device must),
+  the `indexed_put` duplicate rule, a 100 000-update `indexed_add` against an
+  `f64` sum, the embedding lookup, the error for 64-bit atomics, and zero-size
+  inputs through the native wire.
   """
   use ExUnit.Case, async: false
 

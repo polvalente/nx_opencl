@@ -1,11 +1,8 @@
 defmodule NxCL.Compiler.Ops do
   @moduledoc """
-  Builds `NxCL.Compiler.Instruction` values.
-
-  The lowering pass and the evaluator (`NxCL.Compiler.Evaluator`) call these
-  functions, so both paths emit the same instructions. The linear algebra and
-  FFT builders carry semantic attrs: the native side derives batches, strides
-  and tables from the operand shapes.
+  Builders for `NxCL.Compiler.Instruction` values, shared by the lowering pass
+  and the evaluator. The native side derives batches, strides and tables from
+  operand shapes.
   """
 
   alias NxCL.Compiler.Instruction
@@ -29,7 +26,7 @@ defmodule NxCL.Compiler.Ops do
 
   @doc """
   An elementwise unary instruction. The operand has the output shape or is a
-  scalar constant. The native side picks the kernel from the op and the types.
+  scalar constant.
   """
   @spec unary(atom(), Instruction.ref(), Nx.Type.t(), tuple()) :: Instruction.t()
   def unary(op, operand, type, shape) when op in @unary_ops do
@@ -38,8 +35,7 @@ defmodule NxCL.Compiler.Ops do
 
   @doc """
   An elementwise binary instruction. Operands have the output shape or are
-  scalar constants. Operand types may differ from each other and from the
-  result; the kernel converts them.
+  scalar constants. Operand types may differ; the kernel converts them.
   """
   @spec binary(atom(), Instruction.ref(), Instruction.ref(), Nx.Type.t(), tuple()) ::
           Instruction.t()
@@ -47,7 +43,7 @@ defmodule NxCL.Compiler.Ops do
     %Instruction{op: op, operands: [left, right], out_type: type, out_shape: shape}
   end
 
-  @doc "A cast to the output type. A cast to the operand's own type moves no data."
+  @doc "A cast to the output type."
   @spec as_type(Instruction.ref(), Nx.Type.t(), tuple()) :: Instruction.t()
   def as_type(operand, type, shape) do
     %Instruction{op: :as_type, operands: [operand], out_type: type, out_shape: shape}
@@ -85,8 +81,7 @@ defmodule NxCL.Compiler.Ops do
 
   @doc """
   A batched matrix product: operands `[b, m, k]` and `[b, k, n]` give `[b, m, n]`.
-  Every `dot` lowers to this form (`NxCL.Compiler.Lower.Contract`). Both operands have the
-  output type.
+  Every `dot` lowers to this form. Both operands have the output type.
   """
   @spec batched_gemm(
           Instruction.ref(),

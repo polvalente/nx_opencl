@@ -1,35 +1,31 @@
 defmodule NxCL.GatherScatterTest do
   @moduledoc """
   Differential rows for `gather`, `take`, `take_along_axis`, `indexed_add` and
-  `indexed_put` through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
-
-  ## Reference rules (read from `Nx.BinaryBackend` and the Nx docs, Nx 1.0)
+  `indexed_put`. Reference rules, read from `Nx.BinaryBackend` and the Nx docs:
 
     * **Out of bounds.** An index below 0 or at or above the axis size raises
-      `ArgumentError` ("index 5 is out of bounds for axis 1 ...") in `gather`,
-      `indexed_add` and `indexed_put`; `take` and `take_along_axis` are blocks
-      whose default is a `gather`, so they raise too. A kernel cannot raise, so
-      the device flags the index, clamps or skips it, and the run raises
-      `NxCL.CompilerError` ("index out of bounds in gather") after the queue
-      drains. `test/nxcl/indexing_test.exs` shows it for every op and index type.
-    * **`axes`.** `gather` and `indexed_*` take a sorted list of axes. The last
-      axis of `indices` holds one index per listed axis. The listed axes act as
-      the leading axes, and the other axes keep their order. `gather` returns
-      `[indices batch..., remaining axes...]`. An update row of `indexed_*` is a
-      window over the remaining axes, starting at 0.
-    * **Duplicates.** `indexed_add` sums every update for an index.
-      `indexed_put` keeps the last update (the highest row): the reference
-      groups updates by offset and takes the last. The Nx docs call this
-      non-deterministic, but the binary backend is not, and the device matches it
-      with a winner pass (`codegen/indexing.rs`). Rows below have duplicates.
-    * **Index dtype.** Any integer type. Floats raise in Nx.
+      `ArgumentError` in `gather`, `indexed_add` and `indexed_put`; `take` and
+      `take_along_axis` are blocks over a `gather`, so they raise too. A kernel
+      cannot raise: the device flags the index, clamps or skips it, and the run
+      raises `NxCL.CompilerError` ("index out of bounds in gather") after the
+      queue drains. `test/nxcl/indexing_test.exs` shows it for every op.
+    * **`axes`.** `gather` and `indexed_*` take a sorted list of axes. The last axis
+      of `indices` holds one index per listed axis. The listed axes act as the
+      leading axes; the others keep their order. `gather` returns `[indices
+      batch..., remaining axes...]`. An update row of `indexed_*` is a window over
+      the remaining axes, starting at 0.
+    * **Duplicates.** `indexed_add` sums every update for an index. `indexed_put`
+      keeps the last update (the highest row). The Nx docs call this
+      non-deterministic, but the binary backend groups updates by offset and takes
+      the last, and the device matches it with a winner pass
+      (`codegen/indexing.rs`). The rows below have duplicates.
+    * **Index dtype.** Any integer type; floats raise in Nx.
     * **Types.** `indexed_*` return the merged type of target and updates.
     * **Windows.** `BinaryBackend` treats an update row as one contiguous chunk of
-      the (permuted) target, so it agrees with a window only when every window
-      axis after the first is the full target axis. Rows use such windows;
-      `indexing_test.exs` states the answer for a window that is not contiguous.
+      the permuted target, so it agrees with a window only when every window axis
+      after the first is the full target axis. Rows use such windows;
+      `indexing_test.exs` states the answer for other windows.
 
-  `f64`/`c128` rows carry `requires: :fp64`; `f16` rows carry `requires: :fp16`.
   `indexed_add` on `s64`, `u64`, `f64` and `c128` needs `cl_khr_int64_base_atomics`;
   on a device without it the rows check the named error instead of a sum.
   """
@@ -66,8 +62,6 @@ defmodule NxCL.GatherScatterTest do
   @wide_add [{:s, 64}, {:u, 64}, {:f, 64}, {:c, 128}]
 
   @shapes [{7}, {5, 4}, {3, 4, 5}]
-
-  # -- Generators ----------------------------------------------------------
 
   defp subsets(rank) do
     for mask <- 1..((1 <<< rank) - 1)//1,
@@ -112,8 +106,6 @@ defmodule NxCL.GatherScatterTest do
     ]
   end
 
-  # -- gather --------------------------------------------------------------
-
   defp gather_rows(type, index_type) do
     for shape <- @shapes, axes <- subsets(tuple_size(shape)), batch <- [{4}, {2, 3}] do
       t = values(shape, type, {:gather, shape, axes})
@@ -121,7 +113,6 @@ defmodule NxCL.GatherScatterTest do
       assert_same(&Nx.gather(&1, &2, axes: axes), [t, idx])
     end
 
-    # Default axes: the leading ones.
     t = values({5, 4}, type, :default_axes)
     idx = indices({6}, [5, 4], index_type, :default_axes_idx)
     assert_same(&Nx.gather/2, [t, idx])
@@ -185,8 +176,6 @@ defmodule NxCL.GatherScatterTest do
       assert_raise NxCL.CompilerError, ~r/index out of bounds in gather/, fn -> jit.(t, idx) end
     end
   end
-
-  # -- indexed_add and indexed_put -----------------------------------------
 
   defp put_rows(type, index_type) do
     for shape <- @shapes,

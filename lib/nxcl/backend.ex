@@ -2,41 +2,31 @@ defmodule NxCL.Backend do
   @moduledoc """
   Nx backend for OpenCL GPUs.
 
-  Tensor data lives on the GPU as opaque NIF resource references. Each compute
-  callback builds a one-op `NxCL.Compiler.Program` and runs it through `NxCL.Compiler.Executor`,
-  the same executor and kernels that `NxCL.Compiler` uses (`NxCL.Compiler.Evaluator`). The
-  executor caches the program by op, operand types, shapes and attributes, so a
-  repeat call builds no kernel.
+  Tensor data lives on the device. Each callback builds a one-op program and
+  runs it with the kernels `NxCL.Compiler` uses. The program is cached by op,
+  operand types, shapes and attributes.
 
-  ## No CPU copy
-
-  The backend never runs an op on `Nx.BinaryBackend`. An op with no lowering
-  raises `ArgumentError` ("does not yet lower op ..."). Each `Nx.Block` runs as a
-  native instruction or as its default expression (every op in it lowers).
-
-  `from_pointer/5` and `to_pointer/2` raise: OpenCL has no portable handle to
-  import or export.
+  No op runs on `Nx.BinaryBackend`. An op with no lowering raises
+  `ArgumentError` ("does not yet lower op ..."). `from_pointer/5` and
+  `to_pointer/2` raise, because OpenCL has no portable handle to share.
 
   ## Memory
 
-  `Nx.backend_deallocate/1` frees the device buffer at once. Without it, the
-  buffer goes when the BEAM collects the tensor. A `reshape` or `squeeze` result
-  shares its operand's device memory; the memory goes when both are freed.
+  `Nx.backend_deallocate/1` frees the device buffer at once. Otherwise it goes
+  when the BEAM collects the tensor. A `reshape` or `squeeze` result shares its
+  operand's memory, which goes when both are freed.
 
   ## Usage
 
-      # Set as default backend
       Nx.default_backend(NxCL.Backend)
 
-      # Or transfer individual tensors
       gpu_tensor = Nx.backend_transfer(cpu_tensor, NxCL.Backend)
 
   ## Device selection
 
-  The default is the first available GPU device (index 0). Pass `device:` to
-  `Nx.default_backend/1`, `Nx.backend_transfer/3` or `Nx.Defn.jit/2` to pick
-  another one (see `NxCL.Devices`). `NxCL.Devices` holds one OpenCL context per
-  device and shares it across all processes.
+  The default is device 0. Pass `device:` to `Nx.default_backend/1`,
+  `Nx.backend_transfer` or `Nx.Defn.jit/2` to pick another (see
+  `NxCL.Devices`).
   """
 
   @behaviour Nx.Backend
@@ -45,15 +35,10 @@ defmodule NxCL.Backend do
   alias NxCL.Compiler.Ops
 
   defstruct [:ref, :ctx]
-
-  # ── Lifecycle ──────────────────────────────────────
-
   @impl true
   def init(opts) do
     opts
   end
-
-  # ── Data Transfer ──────────────────────────────────
 
   @impl true
   def from_binary(%Nx.Tensor{} = tensor, binary, backend_opts) do
@@ -62,7 +47,7 @@ defmodule NxCL.Backend do
     put_in(tensor.data, %__MODULE__{ref: ref, ctx: ctx})
   end
 
-  # `limit` counts elements (vectorized axes included), as in `Nx.BinaryBackend`.
+  # `limit` counts elements, vectorized axes included.
   @impl true
   def to_binary(%Nx.Tensor{data: %__MODULE__{ref: ref}, type: {_, bits}} = tensor, limit) do
     ref
@@ -104,7 +89,7 @@ defmodule NxCL.Backend do
     result
   end
 
-  # Batches are cut from the host copy, as `Nx.BinaryBackend` does; each goes back up.
+  # Batches are cut from the host copy and uploaded again.
   @impl true
   def to_batched(out, %Nx.Tensor{} = tensor, opts) do
     batch_size = elem(out.shape, 0)
@@ -113,7 +98,6 @@ defmodule NxCL.Backend do
     range = if repeat?, do: 0..full, else: 0..(full - 1)//1
     binary = to_binary(tensor, Nx.flat_size(tensor))
     bytes = Nx.byte_size(out)
-    # The batches go back to the device the tensor lives on.
     device_opts = Evaluator.device_opts([tensor])
 
     Stream.map(range, fn
@@ -128,8 +112,6 @@ defmodule NxCL.Backend do
     end)
   end
 
-  # ── Creation ───────────────────────────────────────
-
   @impl true
   def constant(%Nx.Tensor{} = out, number, backend_opts),
     do: Evaluator.constant(out, number, Keyword.take(backend_opts, [:device]))
@@ -141,8 +123,6 @@ defmodule NxCL.Backend do
   @impl true
   def iota(%Nx.Tensor{} = out, axis, backend_opts),
     do: Evaluator.iota(out, axis, Keyword.take(backend_opts, [:device]))
-
-  # ── Elementwise ────────────────────────────────────
 
   # `logical_not` and `phase` reach the backend as blocks, not callbacks.
   for op <- Ops.unary_ops() -- [:logical_not, :phase] do
@@ -166,9 +146,6 @@ defmodule NxCL.Backend do
 
   @impl true
   def clip(out, tensor, min, max), do: Evaluator.clip(out, tensor, min, max)
-
-  # ── Dot / Conv ─────────────────────────────────────
-
   @impl true
   def dot(out, left, left_contract, left_batch, right, right_contract, right_batch) do
     Evaluator.dot(out, left, left_contract, left_batch, right, right_contract, right_batch)
@@ -176,9 +153,6 @@ defmodule NxCL.Backend do
 
   @impl true
   def conv(out, tensor, kernel, opts), do: Evaluator.conv(out, tensor, kernel, opts)
-
-  # ── Shape ──────────────────────────────────────────
-
   @impl true
   def reshape(out, tensor), do: Evaluator.alias_op(:reshape, out, tensor)
 
@@ -210,8 +184,6 @@ defmodule NxCL.Backend do
 
   @impl true
   def stack(out, tensors, axis), do: Evaluator.join(:stack, out, tensors, axis)
-
-  # ── Reductions, windows, sort ──────────────────────
 
   for op <- [:sum, :product, :reduce_max, :reduce_min, :all, :any] do
     @impl true
@@ -247,8 +219,6 @@ defmodule NxCL.Backend do
     def unquote(op)(out, tensor, opts), do: Evaluator.sort(unquote(op), out, tensor, opts)
   end
 
-  # ── Indexing ───────────────────────────────────────
-
   @impl true
   def gather(out, input, indices, opts), do: Evaluator.gather(out, input, indices, opts)
 
@@ -257,8 +227,6 @@ defmodule NxCL.Backend do
     def unquote(op)(out, tensor, indices, updates, opts),
       do: Evaluator.indexed(unquote(op), out, tensor, indices, updates, opts)
   end
-
-  # ── Linear algebra, FFT, blocks ────────────────────
 
   @impl true
   def triangular_solve(out, a, b, opts), do: Evaluator.triangular_solve(out, a, b, opts)
@@ -271,9 +239,6 @@ defmodule NxCL.Backend do
 
   @impl true
   def block(struct, out, args, fun), do: Evaluator.block(struct, out, args, fun)
-
-  # ── Pointers ───────────────────────────────────────
-
   @impl true
   def from_pointer(_out, _pointer, _backend_opts, _offset, _byte_size) do
     raise ArgumentError,

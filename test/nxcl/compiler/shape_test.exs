@@ -1,17 +1,11 @@
 defmodule NxCL.ShapeTest do
   @moduledoc """
-  Differential rows for the shape and data-movement ops: `broadcast`,
-  `transpose`, `reverse`, `slice`, `put_slice`, `pad`, `concatenate`, `stack`,
-  `iota`, `eye`, a constant of a shape, `metadata` and `elem`, on every dtype
-  through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`. A second group states the
-  expected values itself: dynamic starts below 0 and past the end, and rank 0.
-
-  `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry
-  `requires: :fp16`. The ops only move values, so the same rows cover `c64`
-  and `c128` with no extra code.
-
-  Nx 1.0 rejects a zero-size dimension, so zero-size inputs are checked in
-  `NxCL.ShapeOpsTest` through the native wire.
+  Differential rows for `broadcast`, `transpose`, `reverse`, `slice`, `put_slice`,
+  `pad`, `concatenate`, `stack`, `iota`, `eye`, a constant of a shape, `metadata`
+  and `elem` on every dtype. A second group states expected values: dynamic starts
+  below 0 and past the end, and rank 0. The ops only move values, so the same rows
+  cover `c64` and `c128`. Zero-size inputs are in `NxCL.ShapeOpsTest`, since Nx 1.0
+  rejects zero-size dimensions.
   """
   use ExUnit.Case, async: false
 
@@ -38,14 +32,11 @@ defmodule NxCL.ShapeTest do
     {:c, 128}
   ]
 
-  # The extension a dtype needs; `nil` means none.
   @needs %{{:f, 64} => :fp64, {:c, 128} => :fp64, {:f, 16} => :fp16}
 
   defp data(type, shape), do: Gen.random(shape, type)
 
   defp scalar(type, n), do: Nx.tensor(n, type: type)
-
-  # -- Every op, every dtype ---------------------------------------------------
 
   describe "movement ops" do
     for type <- @types do
@@ -90,7 +81,6 @@ defmodule NxCL.ShapeTest do
         assert_same(&Nx.slice(&1, [], []), [data(type, {})])
         assert_same(&Nx.slice(&1, [1], [60]), [data(type, {65})])
 
-        # Dynamic starts, in range.
         assert_same(
           fn x, i, j -> Nx.slice(x, [i, j], [2, 3]) end,
           [data(type, {5, 6}), scalar({:s, 32}, 2), scalar({:u, 8}, 1)]
@@ -123,7 +113,6 @@ defmodule NxCL.ShapeTest do
 
         assert_same(&Nx.pad(&1, zero, [{1, 2, 0}, {0, 0, 0}]), [data(type, {3, 5})])
         assert_same(&Nx.pad(&1, seven, [{1, 1, 2}, {2, 0, 1}]), [data(type, {3, 5})])
-        # Negative low and high padding, with and without interior padding.
         assert_same(&Nx.pad(&1, seven, [{-1, -2, 0}, {2, -1, 1}]), [data(type, {5, 4})])
         assert_same(&Nx.pad(&1, zero, [{-2, 3, 2}]), [data(type, {65})])
         assert_same(&Nx.pad(&1, seven, [{0, 0, 0}]), [data(type, {63})])
@@ -133,7 +122,6 @@ defmodule NxCL.ShapeTest do
           data(type, {2, 3, 4})
         ])
 
-        # The pad value comes from a tensor argument.
         assert_same(fn x, v -> Nx.pad(x, v, [{2, 1, 1}]) end, [
           data(type, {10}),
           data(type, {})
@@ -187,7 +175,6 @@ defmodule NxCL.ShapeTest do
         assert_same(fn -> Nx.eye({2, 3, 5}, type: type) end, [])
         assert_same(fn -> Nx.eye(65, type: type) end, [])
 
-        # A constant of a shape is a scalar constant that fills the shape.
         c = scalar(type, 5)
 
         assert_same(fn x -> Nx.add(x, Nx.broadcast(c, {2, 3})) end, [
@@ -196,7 +183,6 @@ defmodule NxCL.ShapeTest do
 
         assert_same(fn -> Nx.broadcast(c, {63}) end, [])
 
-        # A scalar tensor next to a tensor gets an explicit broadcast.
         assert_same(fn x, s -> Nx.add(x, s) end, [data(type, {65}), data(type, {})])
 
         assert_same(fn x, y -> Nx.add(x, y) end, [
@@ -220,7 +206,6 @@ defmodule NxCL.ShapeTest do
         assert_same(fn x -> Nx.add(x, literal) end, [x])
         assert_same(fn x -> Nx.Defn.Kernel.stop_grad(x) end, [x])
 
-        # A tuple through `metadata`: `elem` picks each element.
         assert_same(
           fn x ->
             {a, b} = Nx.Defn.Kernel.stop_grad({x, Nx.reverse(x)})
@@ -252,8 +237,6 @@ defmodule NxCL.ShapeTest do
       end
     end
   end
-
-  # -- Rows with explicit expected values -----------------------------------------
 
   defp run(fun, args), do: apply(Nx.Defn.jit(fun, compiler: NxCL.Compiler), args)
 

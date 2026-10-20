@@ -1,19 +1,9 @@
 defmodule NxCL.Compiler.Evaluator do
   @moduledoc false
-  # One-op programs for `NxCL.Backend`.
-  #
-  # Each backend callback builds a small `NxCL.Compiler.Program` from its arguments with the
-  # `NxCL.Compiler.Ops` functions that `NxCL.Compiler.Lower` uses, then runs it through
-  # `NxCL.Compiler.Executor`. The tensors are the program's inputs, already on the device,
-  # so nothing crosses to the host. A call may emit more than one instruction (a
-  # broadcast or a cast before the op), as the lowering does.
-  #
-  # The executor caches the decoded program by its wire term, which holds the op,
-  # the operand types and shapes, and the attrs. A repeat call skips the kernel
-  # build.
-  #
-  # An op the lowering cannot take raises `ArgumentError` ("does not yet lower op
-  # ..."). Nothing runs on `Nx.BinaryBackend`.
+  # One-op programs for `NxCL.Backend`. Each backend callback builds a small
+  # program with `NxCL.Compiler.Ops` and runs it through `NxCL.Compiler.Executor`.
+  # The tensors are inputs already on the device. A call may emit a broadcast or
+  # a cast before the op. An op the lowering cannot take raises `ArgumentError`.
 
   import NxCL.Compiler.Lower.Shared,
     only: [axes: 2, check_complex: 3, fit_axis: 6, monoid?: 1, push: 2]
@@ -30,13 +20,13 @@ defmodule NxCL.Compiler.Evaluator do
   alias NxCL.Devices
 
   @doc """
-  Builds and runs a program. `out` is the result template (a tensor or a
-  container of them), `tensors` the operands. `build` gets the builder state and
-  the operands as `{ref, tensor}` pairs and returns `{state, ref | [ref]}`.
+  Builds and runs a program. `out` is the result template, `tensors` the
+  operands. `build` gets the builder state and the operands as `{ref, tensor}`
+  pairs and returns `{state, ref | [ref]}`.
 
-  The program runs on the device the operands live on. Operands on two
-  contexts raise `ArgumentError`. With no operand on a device, `opts[:device]`
-  names the device (default 0); a tensor from another backend goes up to it.
+  The program runs on the operands' device; operands on two contexts raise
+  `ArgumentError`. With no operand on a device, `opts[:device]` decides
+  (default 0).
   """
   @spec run(
           Nx.Container.t(),
@@ -79,9 +69,9 @@ defmodule NxCL.Compiler.Evaluator do
   end
 
   @doc """
-  The `[device: key]` option for a run over `tensors`. The tensors already on a
-  device decide it, and they must share one context. With none, `opts[:device]`
-  (default 0) decides. Raises `ArgumentError` on a mismatch.
+  The `[device: key]` option for a run over `tensors`: their device, which must
+  be one context, else `opts[:device]` (default 0). Raises `ArgumentError` on a
+  mismatch.
   """
   @spec device_opts([Shared.tensor()], keyword()) :: [device: Devices.key()]
   def device_opts(tensors, opts \\ []) do
@@ -117,16 +107,11 @@ defmodule NxCL.Compiler.Evaluator do
       "move them to one device with Nx.backend_transfer/3 first"
   end
 
-  # A tensor from another backend goes up to the run's device.
   defp device(%T{data: %NxCL.Backend{}} = t, _device_opts), do: t
 
   defp device(%T{} = t, device_opts),
     do: NxCL.Backend.from_binary(t, Nx.to_binary(t), device_opts)
 
-  # -- Operand helpers ----------------------------------------------------
-
-  # Broadcasts an operand to `shape` with the trailing axes aligned, as
-  # `Nx.broadcast` does, unless it already has the shape.
   defp conform(st, {ref, %T{shape: shape}}, shape), do: {st, ref}
 
   defp conform(st, {ref, %T{shape: from, type: type}}, shape) do
@@ -137,7 +122,6 @@ defmodule NxCL.Compiler.Evaluator do
 
   defp conform_all(st, operands, shape), do: map_state(st, operands, &conform(&1, &2, shape))
 
-  # Casts an operand to `type` with an `as_type` instruction.
   defp cast(st, {ref, %T{type: type}}, type), do: {st, ref}
   defp cast(st, {ref, %T{} = x}, type), do: push(st, Ops.as_type(ref, type, x.shape))
 
@@ -155,15 +139,11 @@ defmodule NxCL.Compiler.Evaluator do
 
   defp refs(operands), do: Enum.map(operands, &elem(&1, 0))
 
-  # A start index is a scalar tensor or an integer; an integer becomes an `s64`
-  # scalar, uploaded with the other operands, so every start index is an operand
-  # and the program caches by shape.
+  # An integer start becomes an `s64` operand, so the program caches by shape.
   defp start_tensor(%T{} = t), do: t
 
   defp start_tensor(i) when is_integer(i),
     do: Nx.tensor(i, type: {:s, 64}, backend: Nx.BinaryBackend)
-
-  # -- Elementwise ----------------------------------------------------------
 
   @spec unary(atom(), Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def unary(op, out, tensor) do
@@ -223,8 +203,6 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # -- Dot and conv -----------------------------------------------------------
-
   @spec dot(
           Shared.tensor(),
           Shared.tensor(),
@@ -251,8 +229,6 @@ defmodule NxCL.Compiler.Evaluator do
       Contract.conv(st, out, {{rx, tensor.shape}, {rw, kernel.shape}}, opts)
     end)
   end
-
-  # -- Shape ------------------------------------------------------------------
 
   @spec alias_op(:reshape | :squeeze, Shared.tensor(), Shared.tensor()) :: Shared.tensor()
   def alias_op(op, out, tensor) do
@@ -320,7 +296,6 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # The creation ops take the backend options (`:device`) and build on that device.
   @spec iota(Shared.tensor(), non_neg_integer() | nil, keyword()) :: Shared.tensor()
   def iota(out, axis, opts \\ []) do
     run(out, [], fn st, [] -> push(st, Ops.iota(out.type, out.shape, axis)) end, opts)
@@ -331,8 +306,7 @@ defmodule NxCL.Compiler.Evaluator do
     run(out, [], fn st, [] -> push(st, Ops.eye(out.type, out.shape)) end, opts)
   end
 
-  # The number goes up as one scalar; a shape broadcasts it on the device. The
-  # program holds no value, so one program serves every number.
+  # The program holds no value, so one program serves every number.
   @spec constant(Shared.tensor(), number() | Complex.t() | atom(), keyword()) :: Shared.tensor()
   def constant(out, number, opts \\ [])
 
@@ -350,10 +324,7 @@ defmodule NxCL.Compiler.Evaluator do
     )
   end
 
-  # The number as a scalar tensor on the host; `run/4` uploads it with the other operands.
   defp scalar(out, number), do: Nx.tensor(number, type: out.type, backend: Nx.BinaryBackend)
-
-  # -- Reductions, scans, windows, sort -----------------------------------------
 
   @spec reduce(atom(), Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def reduce(op, out, tensor, opts) do
@@ -374,7 +345,6 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # A generic `reduce`: the function body is read as steps, as in the lowering.
   @spec reduce_fun(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword(), function()) ::
           Shared.tensor()
   def reduce_fun(out, tensor, acc, opts, fun) do
@@ -383,7 +353,7 @@ defmodule NxCL.Compiler.Evaluator do
 
     run(out, [tensor, acc], fn st, [{x, _}, {init, _} = acc_operand] ->
       if monoid?(steps) do
-        # The initial accumulator folds in afterwards: `fun(total, init)`.
+        # The result is `fun(total, init)`.
         {st, total} =
           push(st, Ops.reduce_steps([x], out.type, out.shape, steps, axes))
 
@@ -395,7 +365,6 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # Emits `fun(total, init)` as elementwise instructions; the last is the result.
   defp fold(st, steps, refs, out) do
     {st, refs} =
       Enum.reduce(steps, {st, refs}, fn {op, a, b}, {st, refs} ->
@@ -475,8 +444,6 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # -- Indexing ---------------------------------------------------------------
-
   @spec gather(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def gather(out, tensor, indices, opts) do
     run(out, [tensor, indices], fn st, [{x, _}, {i, _}] ->
@@ -500,8 +467,6 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # -- Linear algebra and FFT ---------------------------------------------------
-
   @spec triangular_solve(Shared.tensor(), Shared.tensor(), Shared.tensor(), keyword()) ::
           Shared.tensor()
   def triangular_solve(out, a, b, opts) do
@@ -512,7 +477,7 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # Nx pads or crops the axis to `:length`; so does the lowering, then one transform.
+  # Nx pads or crops the axis to `:length` first.
   @spec fft(:fft | :ifft, Shared.tensor(), Shared.tensor(), keyword()) :: Shared.tensor()
   def fft(op, out, tensor, opts) do
     axis = opts[:axis]
@@ -524,11 +489,8 @@ defmodule NxCL.Compiler.Evaluator do
     end)
   end
 
-  # -- Blocks -------------------------------------------------------------------
-
   @doc """
-  Runs an `Nx.Block`. The decision table of `NxCL.Compiler.Lower.Block` picks the way: a
-  native instruction or the block's default.
+  Runs an `Nx.Block` as a native instruction or through its default.
   """
   @spec block(struct(), Nx.Container.t(), [Shared.tensor()], function()) :: Nx.Container.t()
   def block(struct, out, args, fun) do
@@ -538,8 +500,8 @@ defmodule NxCL.Compiler.Evaluator do
     end
   end
 
-  # The default may build constants and loop state (a `while` init, an `iota`). They
-  # must live on the device with the arguments, not on the caller's default backend.
+  # The default may build constants and loop state; they must live on the
+  # device with the arguments.
   defp with_device_default(device_opts, fun),
     do: Nx.with_default_backend({NxCL.Backend, device_opts}, fun)
 

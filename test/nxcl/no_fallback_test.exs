@@ -1,10 +1,9 @@
 defmodule NxCL.NoFallbackTest do
   @moduledoc """
-  Ops run on the device, not on the host CPU: a backend that raises on every
-  compute callback is the default while a program runs, and calls into
-  `Nx.BinaryBackend` are traced (`NxCL.TestSupport.NoFallback`). Only a host call
-  (`Nx.runtime_call/4` and `Nx.io_call/2`) may compute on the host; `qr`, `eigh`,
-  `svd` and `lu` run on the device.
+  Ops run on the device, not the host CPU. A backend that raises on every compute
+  callback is the default while a program runs, and calls into `Nx.BinaryBackend`
+  are traced (`NxCL.TestSupport.NoFallback`). Only a host call may compute on the
+  host; `qr`, `eigh`, `svd` and `lu` run on the device.
   """
   use ExUnit.Case, async: false
 

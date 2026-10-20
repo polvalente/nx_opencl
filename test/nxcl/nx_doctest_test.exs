@@ -1,9 +1,8 @@
 defmodule NxCL.NxDoctestTest do
   @moduledoc """
-  Nx's own doctests with `NxCL.Backend` as the default backend, after
-  `emlx/test/emlx/nx_doctest_test.exs`. Every ran test is traced for calls into
-  `Nx.BinaryBackend`: none may run. The functions left out are in
-  `NxCL.DoctestSkips`, each with a reason.
+  Nx's own doctests with `NxCL.Backend` as the default backend. Every test is
+  traced for calls into `Nx.BinaryBackend`: none may run. Functions left out are in
+  `NxCL.DoctestSkips`.
   """
   use ExUnit.Case, async: false
 

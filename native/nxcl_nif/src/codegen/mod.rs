@@ -1,7 +1,6 @@
 //! Kernel generation. A decoded instruction (op, operand and output types and
-//! shapes, attrs) goes in; OpenCL C source, an entry name, build options, work
-//! sizes and the argument list come out. Each op family has one module here.
-//! N-d index math sits in `index.rs`.
+//! shapes, attrs) goes in; OpenCL C source, entry name, build options, work sizes
+//! and arguments come out. Each op family has a module; N-d index math is in `index.rs`.
 
 pub mod complex;
 pub mod conv;
@@ -20,7 +19,6 @@ pub mod window;
 
 use types::DType;
 
-/// An instruction attr: an integer, an atom, or a binary.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Attr {
     Int(i64),
@@ -63,10 +61,8 @@ pub enum KernelArg {
     Operand(usize),
     Scalar(Vec<u8>),
     Output,
-    /// The i-th scratch buffer of the plan.
     Scratch(usize),
-    /// A read-only table the host built (twiddles, chirp). The executor uploads
-    /// it when it decodes the program and keeps it with the kernel launch.
+    /// A read-only table the host built (twiddles, chirp), uploaded at decode.
     Table(Vec<u8>),
     /// The program's error flag, one `int` the kernel sets to a nonzero code on a
     /// bad index. The run fails after the queue drains if it is set.
@@ -101,8 +97,7 @@ impl Plan {
     }
 }
 
-/// Workgroup limits of the device. Cooperative kernels size their groups and
-/// local arrays from these; none of them is a constant in the templates.
+/// Workgroup limits of the device. Cooperative kernels size groups and local arrays from these.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// `CL_DEVICE_MAX_WORK_GROUP_SIZE`.
@@ -147,7 +142,6 @@ impl Limits {
     }
 }
 
-/// What the device can do, as far as codegen cares.
 #[derive(Clone, Copy, Debug)]
 pub struct Caps {
     pub fp64: bool,
@@ -185,9 +179,7 @@ impl Caps {
     }
 }
 
-/// Elements in `shape`: exact when the count fits in `usize`, `usize::MAX`
-/// when it does not (never a wrapped value). The decoder rejects such shapes
-/// with `checked_element_count`, so codegen only sees counts that fit.
+/// Elements in `shape`, or `usize::MAX` when the count does not fit (never a wrapped value).
 pub fn element_count(shape: &[usize]) -> usize {
     shape.iter().fold(1usize, |n, &d| n.saturating_mul(d))
 }
@@ -220,7 +212,6 @@ pub fn checked_product(what: &str, factors: &[usize]) -> Result<usize, String> {
     Ok(n)
 }
 
-/// A kernel entry name: `prefix`, then the parts, joined by `_`.
 pub(super) fn entry_name(prefix: &str, parts: &[&str]) -> String {
     let mut name = prefix.to_string();
     for part in parts {
@@ -230,7 +221,6 @@ pub(super) fn entry_name(prefix: &str, parts: &[&str]) -> String {
     name
 }
 
-/// The bytes of one `long` kernel argument holding `v`.
 pub fn long_arg(v: usize) -> Result<Vec<u8>, String> {
     i64::try_from(v)
         .map(|v| v.to_ne_bytes().to_vec())
@@ -287,7 +277,6 @@ pub fn is_gemm(op: &str) -> bool {
     gemm::handles(op) || conv::handles(op)
 }
 
-/// Generate the kernels for any op this module knows, one or several passes.
 pub fn generate_plan(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
     if reduce::handles(&instr.op) {
         reduce::generate(instr, caps, limits)
@@ -327,7 +316,6 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
 pub mod test_support {
     use super::*;
 
-    /// A buffer operand.
     pub fn buf(dtype: DType, shape: &[usize]) -> Operand {
         Operand {
             dtype,
@@ -336,12 +324,10 @@ pub mod test_support {
         }
     }
 
-    /// Integer attrs.
     pub fn ints(v: &[i64]) -> Vec<Attr> {
         v.iter().map(|&i| Attr::Int(i)).collect()
     }
 
-    /// An instruction over the given operands.
     pub fn instr(
         op: &str,
         operands: Vec<Operand>,

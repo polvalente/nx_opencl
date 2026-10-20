@@ -1,4 +1,8 @@
 defmodule NxCL.BufferTest do
+  @moduledoc """
+  Device buffers: write, read, and error handling in `NxCL.Native`.
+  """
+
   use ExUnit.Case, async: false
   import Bitwise
   import NxCL.TestHelpers

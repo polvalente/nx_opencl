@@ -1,25 +1,20 @@
-//! `fft` and `ifft` along one axis of a `c64` or `c128` tensor.
+//! `fft` and `ifft` along one axis of a `c64` or `c128` tensor. The lowering
+//! pads or crops the axis first, so input and output shapes match. `ifft`
+//! divides by the length, as Nx does.
 //!
-//! The lowering pads or crops the axis to the transform length first, so the
-//! input and output shapes are equal. `ifft` divides by the length, as Nx does.
+//! - A power-of-two length `N = 2^L` takes `L` Stockham radix-2 passes, `N / 2`
+//!   butterflies per line, one work item each. The input, the scratch buffer and
+//!   the output take turns as source and target; the last pass writes the
+//!   output. The result is in natural order.
+//! - Any other length uses Bluestein's method: a cyclic convolution of length
+//!   `M` (the next power of two at least `2N - 1`) done with two power-of-two
+//!   transforms. Pre-multiply by the chirp and pad, forward transform, multiply
+//!   by the transform of the chirp filter, inverse transform, post-multiply.
+//! - `ifft` is `conj(fft(conj(x))) / N`: a sign flag on the twiddles and a final scale.
 //!
-//! - A power-of-two length `N = 2^L` takes `L` Stockham radix-2 passes. Each
-//!   pass reads one buffer and writes another (the input, the scratch buffer
-//!   and the output take turns, and the last pass writes the output). A pass
-//!   runs `N / 2` butterflies per line, one work item each. The order of the
-//!   result is natural: no bit-reversal pass.
-//! - Any other length uses Bluestein's chirp-z method. The transform becomes a
-//!   cyclic convolution of length `M`, the next power of two at least `2N - 1`,
-//!   done with two power-of-two transforms: pre-multiply by the chirp and pad,
-//!   forward transform, multiply by the transform of the chirp filter, inverse
-//!   transform, post-multiply by the chirp.
-//! - `ifft` uses `conj(fft(conj(x))) / N`, which the passes get as a sign flag
-//!   on the twiddles and a final scale.
-//!
-//! Twiddle factors, the chirp and the transformed filter come from tables the
-//! host builds in `f64` and rounds once to the element width (`f32` for `c64`).
-//! The device never calls `sin` or `cos`, so accuracy holds at long lengths and
-//! on a device with no `fp64`.
+//! The host builds twiddles, the chirp and the filter transform in `f64` and
+//! rounds once to the element width. The device never calls `sin` or `cos`, so
+//! accuracy holds at long lengths and without `fp64`.
 
 use super::complex;
 use super::index;
@@ -173,7 +168,6 @@ impl Ctx<'_> {
         self.info.component
     }
 
-    /// `v` scaled by the scalar `scale`.
     fn scaled(&self, v: &str) -> String {
         format!("({})(({v}).x * scale, ({v}).y * scale)", self.st(), v = v)
     }

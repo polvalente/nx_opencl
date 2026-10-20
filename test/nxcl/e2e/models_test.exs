@@ -1,19 +1,17 @@
 defmodule NxCL.E2E.ModelsTest do
   @moduledoc """
   Three Axon models through `NxCL.Compiler`, each compared with the evaluator on
-  `Nx.BinaryBackend` (`NxCL.TestSupport.Compare`, which also runs the eager backend):
+  `Nx.BinaryBackend` (`NxCL.TestSupport.Compare` also runs the eager backend):
 
-    * an MLP: forward pass, and one training step (loss, gradient, SGD update);
-    * a small CNN: forward pass, and one training step;
-    * a transformer encoder block with an embedding lookup, attention, layer
-      norm, GELU and residuals: forward pass, and one training step.
+    * an MLP: forward pass and one training step (loss, gradient, SGD update);
+    * a small CNN: forward pass and one training step;
+    * a transformer encoder block (embedding lookup, attention, layer norm, GELU,
+      residuals): forward pass and one training step.
 
-  Tolerances: `f32`, `rtol` and `atol` of `1.0e-4` for a forward pass and
-  `1.0e-3` for a step (a step adds a gradient and an update). `NXCL_MODELS_REPORT=1`
-  prints the largest absolute error of each row.
-
-  Axon is a test-only dependency: the last test checks `mix.exs` and the library
-  source.
+  `f32` tolerances: `1.0e-4` for a forward pass and `1.0e-3` for a step, which adds
+  a gradient and an update. `NXCL_MODELS_REPORT=1` prints the largest absolute error
+  of each row. Axon is a test-only dependency: the last test checks `mix.exs` and
+  the library source.
   """
   use ExUnit.Case, async: false
 
@@ -24,8 +22,6 @@ defmodule NxCL.E2E.ModelsTest do
 
   @forward [rtol: 1.0e-4, atol: 1.0e-4]
   @step [rtol: 1.0e-3, atol: 1.0e-3]
-
-  # -- Models -----------------------------------------------------------------------
 
   defp mlp do
     Axon.input("x", shape: {nil, 6})
@@ -76,8 +72,6 @@ defmodule NxCL.E2E.ModelsTest do
     |> Axon.dense(3, name: "head")
   end
 
-  # -- Inputs -----------------------------------------------------------------------
-
   defp random(shape, seed, opts \\ []) do
     key = Nx.Random.key(seed)
 
@@ -100,7 +94,6 @@ defmodule NxCL.E2E.ModelsTest do
     )
   end
 
-  # Parameters, built on the reference backend, from a fixed key.
   defp params(model, input_shape, type \\ :f32) do
     {init_fn, predict_fn} = Axon.build(model)
 
@@ -118,7 +111,6 @@ defmodule NxCL.E2E.ModelsTest do
     Nx.negate(Nx.mean(Nx.sum(Nx.multiply(labels, log_probs), axes: [1])))
   end
 
-  # One SGD step: returns the loss and the updated parameters.
   defp step_fun(predict_fn, lr) do
     fn state, x, labels ->
       {loss, grads} =
@@ -138,7 +130,6 @@ defmodule NxCL.E2E.ModelsTest do
 
   defp forward_fun(predict_fn), do: fn state, x -> predict_fn.(state, %{"x" => x}) end
 
-  # The comparison, and with `NXCL_MODELS_REPORT=1` the largest absolute error.
   defp assert_model(name, fun, args, opts) do
     assert_same(fun, args, opts)
 
@@ -163,8 +154,6 @@ defmodule NxCL.E2E.ModelsTest do
       IO.puts("#{name}: max abs error #{error}")
     end
   end
-
-  # -- Rows -------------------------------------------------------------------------
 
   describe "MLP" do
     test "forward pass" do

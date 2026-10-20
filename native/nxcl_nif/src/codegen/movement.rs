@@ -1,13 +1,11 @@
 //! Data-movement kernels: `broadcast`, `transpose`, `reverse`, `slice`,
 //! `put_slice`, `pad`, `concatenate`, `stack`, `iota` and `eye`.
 //!
-//! Each output element comes from one input element, or from a constant. The
-//! kernel takes the flat output id, splits it into coordinates, and maps them
-//! to an input index with strides, offsets and clamps. Shapes, strides and
-//! offsets reach the kernel as `long` arguments, so the source depends on the
-//! rank and the types only, not on the sizes. Values move as whole buffer
-//! elements (`float2` for `c64`, `ushort` for `bf16`), so one template serves
-//! every dtype. Every op writes a fresh buffer; none works in place.
+//! The kernel splits the flat output id into coordinates and maps them to an
+//! input index with strides, offsets and clamps, or to a constant. These reach
+//! the kernel as `long` arguments, so the source depends on rank and types, not
+//! sizes. Values move as whole buffer elements (`float2` for `c64`, `ushort` for
+//! `bf16`), so one template serves every dtype. Every op writes a fresh buffer.
 
 use super::complex;
 use super::index::{self, coords, dims, strides};
@@ -31,8 +29,6 @@ pub fn handles(op: &str) -> bool {
     OPS.contains(&op)
 }
 
-// ── Kernel assembly ─────────────────────────────────────
-
 /// Collects the parameter list and the matching argument list in one order.
 pub(super) struct Kernel<'a> {
     pub(super) instr: &'a Instr,
@@ -49,7 +45,6 @@ impl<'a> Kernel<'a> {
         }
     }
 
-    /// Declare operand `k`: a buffer, or a scalar argument for a constant.
     pub(super) fn operand(&mut self, k: usize) -> Result<(), String> {
         let o = self
             .instr
@@ -78,13 +73,11 @@ impl<'a> Kernel<'a> {
         Ok(())
     }
 
-    /// Declare the scalar argument `name` with value `v`.
     pub(super) fn long(&mut self, name: String, v: i64) {
         self.params.push(format!("const long {}", name));
         self.args.push(KernelArg::Scalar(v.to_ne_bytes().to_vec()));
     }
 
-    /// Declare `prefix0`, `prefix1`, ... one per value.
     pub(super) fn longs(&mut self, prefix: &str, values: &[i64]) {
         for (d, v) in values.iter().enumerate() {
             self.long(format!("{}{}", prefix, d), *v);
@@ -101,7 +94,6 @@ impl<'a> Kernel<'a> {
         }
     }
 
-    /// The kernel with one work item per output element.
     pub(super) fn finish(
         self,
         caps: &Caps,
@@ -137,7 +129,6 @@ impl<'a> Kernel<'a> {
     }
 }
 
-/// The source of one kernel: `head`, then the `__kernel` function.
 pub(super) fn assemble(head: &str, entry: &str, params: &str, body: &str) -> String {
     format!("{head}__kernel void {entry}({params}) {{\n{body}}}\n")
 }
@@ -163,8 +154,6 @@ pub(super) fn pragmas(dtypes: &[DType], caps: &Caps) -> Result<String, String> {
     }
     Ok(out)
 }
-
-// ── Index helpers ───────────────────────────────────────
 
 fn check_instr_rank(instr: &Instr) -> Result<usize, String> {
     let widest = instr
@@ -223,8 +212,6 @@ pub(super) fn type_names(instr: &Instr) -> String {
     names.push(instr.out.name());
     names.join("_")
 }
-
-// ── Strided gather: broadcast, transpose, reverse ───────
 
 /// `out[i] = in0[off + sum(c_d * s_d)]`. A stride is 0 on a broadcast axis and
 /// negative on a reversed one.
@@ -339,8 +326,6 @@ fn reverse(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     }
     strided(instr, caps, off, &s)
 }
-
-// ── slice and put_slice ─────────────────────────────────
 
 /// Statements that read start operand `k` for axis `d` into `s{d}`, clamped
 /// to `[0, h{d}]`. A `u64` start compares as unsigned.
@@ -458,8 +443,6 @@ fn put_slice(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     k.finish(caps, entry, "", &body)
 }
 
-// ── pad ─────────────────────────────────────────────────
-
 /// Operands: the tensor and the pad value. Attrs: low, high and interior
 /// padding for each axis. Low and high may be negative.
 fn pad(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
@@ -528,8 +511,6 @@ fn pad(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     let entry = format!("mv_pad_r{}_{}", rank, type_names(instr));
     k.finish(caps, entry, "", &body)
 }
-
-// ── concatenate and stack ───────────────────────────────
 
 /// One kernel reads every input. Each input covers a run of the axis, so the
 /// output id picks the input by comparing the axis coordinate with the run
@@ -610,8 +591,6 @@ fn join(instr: &Instr, caps: &Caps, stack: bool) -> Result<KernelSpec, String> {
     let entry = format!("mv_{}_n{}_{}", instr.op, n, instr.out.name());
     k.finish(caps, entry, "", &body)
 }
-
-// ── iota and eye ────────────────────────────────────────
 
 /// The integer expression `v` as a value of the output type.
 fn from_long(info: &TypeInfo, v: &str) -> String {
@@ -697,9 +676,6 @@ fn eye(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     k.finish(caps, entry, helpers_for(&info), &body)
 }
 
-// ── Entry point ─────────────────────────────────────────
-
-/// Generate the kernel for a movement instruction.
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     check_instr_rank(instr)?;
     match instr.op.as_str() {
@@ -745,7 +721,6 @@ mod tests {
         generate(i, &Caps::all()).unwrap_or_else(|e| panic!("{}: {}", i.op, e))
     }
 
-    /// The scalar arguments as integers.
     fn longs(spec: &KernelSpec) -> Vec<i64> {
         spec.args
             .iter()
@@ -757,8 +732,6 @@ mod tests {
             })
             .collect()
     }
-
-    // ── broadcast, transpose, reverse ──
 
     #[test]
     fn broadcast_zeroes_the_stride_of_an_expanded_axis() {
@@ -826,8 +799,6 @@ mod tests {
         let b = instr("broadcast", vec![buf(F32, &[3])], F32, &[2, 4], ints(&[1]));
         assert!(generate(&b, &Caps::all()).is_err());
     }
-
-    // ── slice and put_slice ──
 
     #[test]
     fn slice_clamps_the_start_to_zero_and_dim_minus_length() {
@@ -944,8 +915,6 @@ mod tests {
         );
     }
 
-    // ── pad ──
-
     #[test]
     fn pad_has_a_branch_for_negative_low_and_high_padding() {
         // {4}: low -1, high -2, interior 1 gives -1 - 2 + 4 + 3 = 4 elements.
@@ -983,8 +952,6 @@ mod tests {
         );
         assert!(generate(&i, &Caps::all()).is_err());
     }
-
-    // ── concatenate and stack ──
 
     #[test]
     fn concatenate_chains_one_branch_per_input_with_run_ends() {
@@ -1076,8 +1043,6 @@ mod tests {
         assert_eq!(spec.args.len(), n + 1 + 2 + 3 * n);
     }
 
-    // ── iota and eye ──
-
     #[test]
     fn iota_with_an_axis_divides_by_the_inner_size() {
         let i = instr("iota", vec![], S32, &[2, 3, 4], ints(&[1]));
@@ -1128,8 +1093,6 @@ mod tests {
         );
         assert!(generate(&instr("eye", vec![], F32, &[3], vec![]), &Caps::all()).is_err());
     }
-
-    // ── Types, sizes, errors ──
 
     #[test]
     fn element_width_comes_from_the_type_table() {

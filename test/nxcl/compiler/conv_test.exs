@@ -1,16 +1,12 @@
 defmodule NxCL.ConvTest do
   @moduledoc """
-  Differential rows for `conv` through `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`.
-
-  The option grid runs on `f32`, `f64`, `c64` and `c128` over 1, 2 and 3 spatial
-  axes: every option alone (strides, each padding form, input dilation, kernel
-  dilation, feature groups, depthwise, batch groups, the three permutations) and
-  then combined. `f16` and `bf16` run a shorter grid. Integer inputs run the basic
-  rows; Nx makes their output floating.
+  Differential rows for `conv`. The option grid runs on `f32`, `f64`, `c64` and
+  `c128` over 1, 2 and 3 spatial axes: each option alone (strides, padding forms,
+  dilations, feature groups, depthwise, batch groups, the three permutations),
+  then combined. `f16` and `bf16` run a shorter grid; integers run the basic rows.
 
   Float and complex inputs hold small integers, so every sum is exact. A second
-  set of rows uses random floats within a tolerance. `f64` and `c128` rows carry
-  `requires: :fp64`; `f16` rows carry `requires: :fp16`.
+  set of rows uses random floats within a tolerance.
   """
   use ExUnit.Case, async: false
 
@@ -25,7 +21,6 @@ defmodule NxCL.ConvTest do
 
   @int_types [{:u, 8}, {:u, 16}, {:u, 32}, {:u, 64}, {:s, 8}, {:s, 16}, {:s, 32}, {:s, 64}]
 
-  # Small integers held in `type`, so sums are exact.
   defp exact({:c, size}, shape, seed) do
     part = {:f, div(size, 2)}
     re = exact(part, shape, seed)
@@ -45,8 +40,6 @@ defmodule NxCL.ConvTest do
   defp check(type, xs, ks, opts) do
     assert_same(&Nx.conv(&1, &2, opts), pair(type, xs, ks))
   end
-
-  # -- Option grid, per spatial rank ---------------------------------------
 
   # Shapes: input `{n, c, spatial...}`, kernel `{o, i, spatial...}`.
   defp base(1), do: {{2, 3, 11}, {4, 3, 3}}
@@ -89,14 +82,11 @@ defmodule NxCL.ConvTest do
 
   # Groups need their own channel counts.
   defp run_groups(type) do
-    # Feature groups: 4 channels in 2 groups, 6 filters.
     check(type, {2, 4, 7, 6}, {6, 2, 3, 2}, feature_group_size: 2)
     check(type, {2, 4, 9}, {4, 2, 3}, feature_group_size: 2, padding: :same)
-    # Depthwise: a group per channel, one filter and then two filters per group.
     check(type, {2, 3, 7, 6}, {3, 1, 3, 2}, feature_group_size: 3)
     check(type, {2, 3, 7, 6}, {6, 1, 3, 2}, feature_group_size: 3, strides: [2, 1])
     check(type, {1, 3, 5, 6, 4}, {3, 1, 2, 3, 2}, feature_group_size: 3, padding: :same)
-    # Batch groups: batch 4 in 2 groups, 4 filters.
     check(type, {4, 3, 7, 6}, {4, 3, 3, 2}, batch_group_size: 2)
     check(type, {4, 2, 9}, {4, 2, 3}, batch_group_size: 2, padding: [{1, 1}])
   end

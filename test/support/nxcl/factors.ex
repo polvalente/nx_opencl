@@ -1,50 +1,45 @@
 defmodule NxCL.TestSupport.Factors do
   @moduledoc """
   Checks for `qr`, `eigh`, `svd` and `lu`, whose factors are not unique: a
-  column of `Q` or an eigenvector may flip sign, and a singular vector too. The
-  device runs the block's default implementation, which can pick other signs than
-  `Nx.BinaryBackend`'s native one, so these checks compare what does not change:
+  column of `Q`, an eigenvector or a singular vector may flip sign. The device
+  runs the block's default implementation, which can pick other signs than
+  `Nx.BinaryBackend`, so the checks compare what does not change:
 
     * `qr`: `Q R == A`, `Q^H Q == I`, `R` upper triangular.
     * `eigh`: `A V == V diag(w)`, `V^H V == I`, `w` equal (sorted) to the `w` of
       the same function on the input widened to `f64` or `c128`.
-    * `svd`: `U diag(S) V^H == A`, `U` and `V` orthonormal, `S` equal (sorted) to the
-      `S` of the same function on the widened input.
+    * `svd`: `U diag(S) V^H == A`, `U` and `V` orthonormal, `S` equal (sorted) to
+      the `S` on the widened input.
     * `lu`: `P L U == A`, `L` unit lower triangular, `U` upper triangular.
 
-  Every result must also have the reference's types and shapes.
+  Every result must also have the reference's types and shapes. Each check
+  measures the largest absolute error of one identity (the residual).
 
-  Each check measures a residual, the largest absolute error of one identity.
+    * `f32`, `f64`, `c64`, `c128`: the tolerance is the one in
+      `NxCL.TestSupport.Compare`, scaled by `max(1, max |A|)`. The device
+      residual may exceed the reference residual by at most that. The default
+      `svd` stops at a loose tolerance, so even `Nx.BinaryBackend` misses
+      `U S V^H == A` by 2e-4 in `f32`.
+    * `f16`, `bf16`: the tolerance is `8 * eps * max(m, n) * max(1, max |A|)` and
+      ignores the reference residual. A half type rounds at every step, so the
+      reference residual is large and random (a `bf16` `R` of a 5-column input has
+      entries of 0.3 below the diagonal), and a tolerance tied to it fails at some
+      seeds. The factor 8 is about twice the largest residual over 400 seeds of
+      each kind on 3 x 3 to 4 x 5 `bf16` inputs.
 
-    * `f32`, `f64`, `c64` and `c128`: the tolerance is the one
-      `NxCL.TestSupport.Compare` uses for the type, scaled by `max(1, max |A|)`. A
-      default implementation has an error of its own (the `svd` default stops at a
-      loose tolerance, so even `Nx.BinaryBackend` misses `U S V^H == A` by 2e-4 in
-      `f32`), so the residual of the device may exceed the residual of the reference
-      by at most the tolerance.
-    * `f16` and `bf16`: the tolerance is `8 * eps * max(m, n) * max(1, max |A|)`, with
-      the epsilon of the type, and it does not look at the reference's residual. A half
-      type rounds at every step of a factorization, so the residual of the reference is
-      itself large and random (a `bf16` `R` of a 5-column input has entries of 0.3 below
-      the diagonal), and a tolerance tied to it fails at some seeds. The factor 8 is about
-      twice the largest residual seen over 400 seeds of `qr`, `eigh`, `svd` and `lu` on
-      3 x 3 to 4 x 5 inputs in `bf16`.
+  The default `svd` stops at a tolerance of `1.19e-7` for every type, so
+  `U S V^H == A` is off by up to about `1.4e-4 * max |A|` in `f32` and `f64` (over
+  1600 `f32` and 400 `f64` cases), also on the reference. In `f64` the device and
+  the reference take the same steps. In `f32` they round differently and take
+  different steps: the reference can sit at 5e-6 where the device sits at 6e-4
+  (seed 77310, a 4 x 3 input). So for `f32` that identity also passes below
+  `4e-4 * max |A|`, about three times the largest residual seen.
 
-  The default `svd` stops its iterations at a tolerance of `1.19e-7` for every type, so
-  its `U S V^H == A` residual is up to about `1.4e-4 * max |A|` in `f32` and `f64` (over
-  1600 `f32` cases and 400 `f64` cases), also on the reference. In `f64` the device and
-  the reference take the same steps and have the same residual. In `f32` they round
-  differently, take different steps, and the reference can sit at 5e-6 where the device
-  sits at 6e-4 (seed 77310, a 4 x 3 input). So for `f32` that one identity also passes
-  below `4e-4 * max |A|`, about three times the largest residual seen.
+  The reference truncates a half type and the device rounds to nearest, so `w`
+  and `S` are measured against the widened input's, not the reference's. A check
+  computes in `f64` or `c128` on `Nx.BinaryBackend`, so it adds no rounding.
 
-  The reference differs from the device in rounding (it truncates a half type, the
-  device rounds to nearest), so `w` and `S` are measured against the widened input's,
-  not against the reference's. The arithmetic of a check runs in `f64` or `c128` on
-  `Nx.BinaryBackend`, so a check adds no rounding of its own.
-
-  Each check runs the function through the compiler and, as `Compare` does,
-  eagerly with the argument on `NxCL.Backend`.
+  Each check runs through the compiler and, as `Compare` does, eagerly.
   """
 
   import ExUnit.Assertions
@@ -110,7 +105,6 @@ defmodule NxCL.TestSupport.Factors do
     :ok
   end
 
-  # `[{identity, residual}]`: the largest absolute error of each identity.
   defp residuals(:qr, a, [q, r], _truth) do
     [
       {"Q R == A", err(mm(q, r), a)},
@@ -150,16 +144,12 @@ defmodule NxCL.TestSupport.Factors do
     ]
   end
 
-  # -- Helpers -------------------------------------------------------------
-
   defp err(actual, expected),
     do: actual |> Nx.subtract(expected) |> Nx.abs() |> Nx.reduce_max() |> scalar()
 
   defp scalar(t), do: t |> Nx.real() |> Nx.to_number()
 
-  # A half type's tolerance stands alone. The other types allow the reference's error,
-  # and `f32` `svd` also allows `@svd_f32_floor * max |A|` for `U S V^H == A` (see the
-  # moduledoc).
+  # Half types use the tolerance alone; the others add the reference's error.
   defp allowed(kind, label, type, tol, ref_err, max_a) do
     cond do
       Map.has_key?(@half_epsilon, type) ->
@@ -173,9 +163,8 @@ defmodule NxCL.TestSupport.Factors do
     end
   end
 
-  # A half type's tolerance is loose: at n = 3 to 5 it is about 20% of max |A| (8 * eps *
-  # n with eps = 2^-7). A bf16 check catches only gross defects, such as a wrong sign, a
-  # wrong factor of 2 or a missing row; it does not see a defect of a few percent.
+  # Loose for half types: about 20% of max |A| at n = 3 to 5 (8 * eps * n, eps = 2^-7).
+  # A `bf16` check catches only gross defects (a wrong sign, a missing row).
   defp tolerance(type, shape, max_a) do
     case @half_epsilon do
       %{^type => eps} ->
@@ -200,13 +189,11 @@ defmodule NxCL.TestSupport.Factors do
   defp rank(t), do: tuple_size(Nx.shape(t))
   defp cols(t), do: Nx.axis_size(t, -1)
 
-  # Matrix product over the last two axes, batched over the rest.
   defp mm(a, b) do
     batch = Enum.to_list(0..(rank(a) - 3)//1)
     Nx.dot(a, [rank(a) - 1], batch, b, [rank(b) - 2], batch)
   end
 
-  # Conjugate transpose of the last two axes.
   defp ct(t) do
     axes = Enum.to_list(0..(rank(t) - 3)//1) ++ [rank(t) - 1, rank(t) - 2]
     t = Nx.transpose(t, axes: axes)
@@ -224,7 +211,6 @@ defmodule NxCL.TestSupport.Factors do
   defp below_diagonal(t), do: mask(t, &Nx.greater/2)
   defp above_or_on_diagonal(t), do: mask(t, &Nx.less_equal/2)
 
-  # 1 where `cmp.(row, col)` holds, in the type of `t`, over the last two axes.
   defp mask(t, cmp) do
     shape = Nx.shape(t)
     r = Nx.iota(shape, axis: rank(t) - 2)

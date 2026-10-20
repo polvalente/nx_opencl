@@ -1,17 +1,14 @@
 defmodule NxCL.Devices do
   @moduledoc """
-  The device registry. It opens each device context once and hands the same
-  context to every process.
+  The device registry. It opens each device context once and shares it across
+  processes.
 
-  A device is named by `device:`: an index (counting every device, GPUs first),
-  or `{platform, index}` (counting the devices of one platform). The default is
-  index 0. The registry keys contexts by `{platform, index}`, with `nil` for
-  "no platform given".
+  `device:` is an index (counting every device, GPUs first) or `{platform,
+  index}` (counting one platform's devices). The default is 0.
 
-  A context has one default queue and any number of extra queues
-  (`new_queue/1`). A program runs on the queue named by `command_queue:`, or on
-  the default queue. Queues of one context share its kernel cache; each queue
-  runs one program at a time.
+  A context has a default queue and any number of extra queues (`new_queue/1`).
+  A program runs on the queue `command_queue:` names, or the default. Queues of
+  one context share its kernel cache; each runs one program at a time.
   """
 
   use GenServer
@@ -30,8 +27,7 @@ defmodule NxCL.Devices do
   end
 
   @doc """
-  The device and queue that `opts` name (`:device`, `:command_queue`). A context
-  that cannot open gives `{:error, reason}`.
+  The device and queue `opts` name (`:device`, `:command_queue`), or `{:error, reason}`.
   """
   @spec fetch(keyword()) :: {:ok, t()} | {:error, String.t()}
   def fetch(opts \\ []) do
@@ -58,8 +54,7 @@ defmodule NxCL.Devices do
   def ctx(), do: fetch!().ctx
 
   @doc """
-  Opens a new command queue on the context that `opts` name. Give it back as
-  `command_queue:`.
+  Opens a command queue on the context `opts` name. Pass it as `command_queue:`.
   """
   @spec new_queue(keyword()) :: {:ok, reference()} | {:error, String.t()}
   def new_queue(opts \\ []) do

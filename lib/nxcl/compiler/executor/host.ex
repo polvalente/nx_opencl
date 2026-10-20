@@ -1,19 +1,14 @@
 defmodule NxCL.Compiler.Executor.Host do
   @moduledoc false
-  # Runs one `:host_call` step: read the operands the callback takes, call it
-  # in the calling process, check the result, upload it.
-  #
-  # The callback gets tensors on the default backend (`Nx.from_binary/2`), in
-  # the container shape of the node's input. Buffers it does not take stay on the
-  # device. A side-effect call (`:io_call`) returns its input buffers as its
-  # outputs, with no copy and no upload.
+  # Runs one `:host_call` step: read the operands, call the callback in the
+  # calling process, check the result, upload it. The callback gets tensors on
+  # the default backend. An `:io_call` returns its input buffers unchanged.
 
   alias Nx.Defn.Composite
   alias NxCL.Compiler.Program
 
   @doc """
-  Runs `entry` (a `:host_calls` table entry) on `buffers`, the device buffers of
-  its operands, and returns one buffer per output leaf.
+  Runs `entry` on the operand `buffers` and returns one buffer per output leaf.
   """
   @spec run(Program.host_call(), reference(), [reference()]) :: [reference()]
   def run(%{kind: :io_call, fun: nil}, _ctx, buffers), do: buffers
@@ -41,7 +36,6 @@ defmodule NxCL.Compiler.Executor.Host do
     end)
   end
 
-  # Rebuilds the input container with host tensors read from the buffers.
   defp read(in_template, buffers) do
     {container, []} =
       Composite.traverse(in_template, buffers, fn template, [buf | rest] ->
@@ -60,7 +54,7 @@ defmodule NxCL.Compiler.Executor.Host do
     container
   end
 
-  # The templates of what the callback returned, for the error text.
+  # For the error text.
   defp actual_template(result) do
     Composite.traverse(result, &(&1 |> Nx.to_tensor() |> Nx.to_template()))
   rescue

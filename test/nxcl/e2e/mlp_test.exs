@@ -1,7 +1,6 @@
 defmodule NxCL.E2E.MLPTest do
   @moduledoc """
-  End-to-end test: run a simple MLP through the NxCL backend
-  and compare against the CPU backend.
+  A simple MLP on the NxCL backend against the CPU backend.
   """
   use ExUnit.Case, async: false
   import NxCL.TestHelpers
@@ -9,12 +8,10 @@ defmodule NxCL.E2E.MLPTest do
   @moduletag :opencl
 
   defp run_mlp(params, input) do
-    # Layer 1: matmul + bias + relu
     h = Nx.dot(input, params.w1)
     h = Nx.add(h, params.b1)
     h = Nx.max(h, Nx.tensor(0.0))
 
-    # Layer 2: matmul + bias
     out = Nx.dot(h, params.w2)
     Nx.add(out, params.b2)
   end
@@ -36,10 +33,8 @@ defmodule NxCL.E2E.MLPTest do
     params = build_params(key)
     {input, _key} = Nx.Random.uniform(key, shape: {1, 4}, type: :f32)
 
-    # Run on CPU
     cpu_result = run_mlp(params, input)
 
-    # Run on GPU
     gpu_params = transfer_params_to_gpu(params)
     gpu_input = Nx.backend_transfer(input, NxCL.Backend)
     gpu_result = run_mlp(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)

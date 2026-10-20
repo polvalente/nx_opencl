@@ -1,9 +1,5 @@
-# Common setup for all benchmarks.
-#
-# Run from the repo root with `mix run benchmarks/<script>.exs` (no EXLA), or from
-# `benchmarks/` with `mix run <script>.exs` (the benchmark project, which can add EXLA;
-# see README.md). Set BENCH_BUDGET_MS to change the time spent per cell (default 1500) and
-# BENCH_BACKENDS (for example "NxCL.Compiler,EXLA") to run only some columns.
+# Common setup for all benchmarks. See README.md for how to run them, and for
+# BENCH_BUDGET_MS and BENCH_BACKENDS.
 
 defmodule BenchHelper do
   @moduledoc false
@@ -72,7 +68,7 @@ defmodule BenchHelper do
   defp measure_one(fun, args, compiler, backend, budget) do
     args = Enum.map(args, &Nx.backend_copy(&1, backend))
 
-    # A fresh closure per backend so no compile cache is shared between columns.
+    # A fresh closure per backend, so columns share no compile cache.
     jitted = Nx.Defn.jit(fn a -> apply(fun, Tuple.to_list(a)) end, compiler: compiler)
     call = fn -> jitted.(List.to_tuple(args)) |> force() end
 

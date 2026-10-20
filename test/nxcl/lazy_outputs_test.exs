@@ -1,9 +1,9 @@
 defmodule NxCL.LazyOutputsTest do
   @moduledoc """
-  A run on the default queue may return before the device is done. These tests check
-  values: a later read, and a later run on another queue, see finished data, and a
-  program with several outputs returns each one. They cannot tell a lazy run from a
-  synchronous one; they fail if a read or a later run sees unfinished data.
+  A run on the default queue may return before the device finishes. These tests
+  check values: a later read, and a later run on another queue, see finished data,
+  and a program with several outputs returns each one. They cannot tell a lazy run
+  from a synchronous one; they fail if a read or run sees unfinished data.
   """
   use ExUnit.Case, async: false
 

@@ -6,27 +6,24 @@ end
 
 defmodule NxCL.HostCallTest do
   @moduledoc """
-  Host callbacks (`io_call`, `runtime_call`, `print_value`) through `NxCL.Compiler`.
+  Host callbacks (`io_call`, `runtime_call`, `print_value`) through `NxCL.Compiler`,
+  matched to what `Nx.Defn.Evaluator` does in Nx 1.0:
 
-  What `Nx.Defn.Evaluator` does, probed on Nx 1.0, and what we match:
-
-    * Nx 1.0 has no `:hook` node. `print_value` is an `io_call`, and a named
+    * There is no `:hook` node. `print_value` is an `io_call`, and a named
       `io_call` runs its own callback (the `:hooks` override is out of scope).
-    * A callback runs in the calling process, once for each time its node is
-      evaluated: once per execution, only in the `cond` clause taken, once per
-      `while` iteration. A node used twice fires once.
-    * The evaluator walks from the outputs, so an effect whose result no output
-      reads never fires. We lower from the outputs too, so it does not fire.
+    * A callback runs in the calling process once each time its node is evaluated:
+      once per execution, only in the `cond` clause taken, once per `while`
+      iteration. A node used twice fires once.
+    * The evaluator walks from the outputs, so an effect no output reads never
+      fires. Lowering does the same.
     * Effects fire in argument order, depth first: `io_call(io_call(x, f1) + 1, f2)`
-      runs `f1` then `f2`, and a tuple output `{io_call(a, f1), io_call(b, f2)}` runs
-      `f1` then `f2`.
-    * The callback receives its input container with tensors on the evaluator's
-      backend (`Nx.BinaryBackend` here). We pass tensors on the default backend,
-      made with `Nx.from_binary/2`, so the two agree. The return value of an
-      `io_call` callback is ignored; its result is the input, unchanged.
+      runs `f1` then `f2`, and so does a tuple output `{io_call(a, f1), io_call(b, f2)}`.
+    * The callback gets its input container with tensors on the default backend
+      (`Nx.BinaryBackend` for the evaluator). An `io_call` callback's return value is
+      ignored; its result is the input.
     * A `runtime_call` result must be `Nx.compatible?/2` with the template. The
-      evaluator raises a `RuntimeError`; we raise an `ArgumentError` that names
-      both templates.
+      evaluator raises a `RuntimeError`; we raise an `ArgumentError` naming both
+      templates.
   """
   use ExUnit.Case, async: false
 
@@ -48,7 +45,6 @@ defmodule NxCL.HostCallTest do
     end
   end
 
-  # Runs `fun` on both compilers and returns the messages each one sent.
   defp both(fun, args) do
     flush()
     expected = apply(run_jit(fun, Nx.Defn.Evaluator), args)

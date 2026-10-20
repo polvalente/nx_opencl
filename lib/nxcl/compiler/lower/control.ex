@@ -1,22 +1,9 @@
 defmodule NxCL.Compiler.Lower.Control do
-  @moduledoc """
-  Lowers `cond` and `while` nodes to one instruction each. The instruction
-  holds its bodies as nested instruction lists in its attrs (see
-  `NxCL.Compiler.Instruction`).
-
-  A `while` instruction has the operands of its initial carry and the attrs
-  `[cond: body, body: body]`. Inside the bodies `{:carry, i}` is the i-th carry
-  slot. A static counted loop adds `static: count`.
-
-  A `cond` instruction has as operands the outer values its clauses read, and the
-  attrs `[clauses: [{pred_body, body}, ...], else: body]`. Inside the bodies
-  `{:carry, i}` is the i-th operand. A clause shares the parent scope in Nx; here
-  it reads the parent only through these operands.
-
-  Both instructions give their results as `{:result, i, k}`, the k-th output of
-  the i-th instruction, and set `:out_type` and `:out_shape` to lists. A node
-  with a tuple type maps to `{:tuple, refs}`.
-  """
+  @moduledoc false
+  # Lowers `cond` and `while` to one instruction each, with nested bodies (see
+  # `NxCL.Compiler.Instruction`). A `while` has its initial carry as operands. A
+  # `cond` has the outer values its clauses read; a clause reads the parent only
+  # through them. Inside a body, `{:carry, i}` is the i-th operand.
 
   import NxCL.Compiler.Lower.Shared, only: [leaves: 1]
 
@@ -27,9 +14,9 @@ defmodule NxCL.Compiler.Lower.Control do
   alias NxCL.Compiler.Lower.Shared
 
   @doc """
-  Dependencies of a node for `NxCL.Compiler.Tree.post_order/2`. A node the scope has a
-  ref for stops the walk. A `cond` depends on the outer values its clauses read,
-  not on its clause bodies.
+  Dependencies of a node for `NxCL.Compiler.Tree.post_order/2`. A node with a
+  ref stops the walk. A `cond` depends on the outer values its clauses read,
+  not on its bodies.
   """
   @spec scope_deps(Shared.tensor(), Lower.state()) :: {:ok, [Shared.tensor()]} | :default
   def scope_deps(%T{data: %Nx.Defn.Expr{id: id}}, %{refs: refs}) when is_map_key(refs, id),
@@ -40,7 +27,7 @@ defmodule NxCL.Compiler.Lower.Control do
 
   def scope_deps(_node, _state), do: :default
 
-  @doc "Lowers a `cond` node: one instruction, nested clause bodies, explicit operands."
+  @doc "Lowers a `cond` node."
   @spec cond_node(Lower.state(), Shared.tensor()) :: Lower.state()
   def cond_node(state, %T{data: %Nx.Defn.Expr{id: id, args: [clauses, last]}} = node) do
     {operands, seeds} = bind(state, free_nodes(node, state.avail))
@@ -65,7 +52,7 @@ defmodule NxCL.Compiler.Lower.Control do
     put_outputs(state, id, node, instr)
   end
 
-  @doc "Lowers a `while` node: one instruction with nested `cond` and `body` instruction lists."
+  @doc "Lowers a `while` node."
   @spec while_node(Lower.state(), Shared.tensor()) :: Lower.state()
   def while_node(
         state,
@@ -107,10 +94,8 @@ defmodule NxCL.Compiler.Lower.Control do
     %{state | instrs: [instr | state.instrs], refs: Map.put(state.refs, id, ref)}
   end
 
-  # -- Outer values of a cond ------------------------------------------------
-
-  # The nodes the clauses read that the enclosing scope provides: parameters and
-  # nodes `avail` names. The walk stops at them. Any other node belongs to the cond.
+  # The nodes the clauses read that the enclosing scope provides (parameters and
+  # `avail` nodes). Any other node belongs to the cond.
   defp free_nodes(%T{data: %Nx.Defn.Expr{args: [clauses, last]}}, avail) do
     roots = Enum.flat_map(clauses, fn {pred, body} -> [pred | leaves(body)] end) ++ leaves(last)
 
@@ -141,7 +126,6 @@ defmodule NxCL.Compiler.Lower.Control do
     end
   end
 
-  # Operands for the free nodes, and the ref each node has inside the bodies.
   defp bind(state, free) do
     {operands, seeds} =
       Enum.reduce(free, {[], %{}}, fn node, {operands, seeds} ->
@@ -164,10 +148,8 @@ defmodule NxCL.Compiler.Lower.Control do
     end
   end
 
-  # -- Static trip count ------------------------------------------------------
-
-  # A counter that starts at a literal, steps by a literal and is compared with a
-  # literal bound has a known trip count; the executor then reads no predicate.
+  # A counter that starts, steps and ends at literals has a known trip count, so
+  # the executor reads no predicate.
   defp static_count([start | _], [counter | _], pred, [next | _]) do
     with {:ok, from} <- literal(start),
          true <- integer_type?(counter.type),
@@ -230,7 +212,7 @@ defmodule NxCL.Compiler.Lower.Control do
 
   defp trip_count(_kind, _from, _bound, _step), do: :error
 
-  # The counter must not wrap on the way, or the loop would not stop where the count says.
+  # The counter must not wrap, or the loop would not stop at the count.
   defp fits?({:s, bits}, n), do: n >= -Bitwise.bsl(1, bits - 1) and n < Bitwise.bsl(1, bits - 1)
   defp fits?({:u, bits}, n), do: n >= 0 and n < Bitwise.bsl(1, bits)
 end

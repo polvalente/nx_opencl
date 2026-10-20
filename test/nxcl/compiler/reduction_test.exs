@@ -1,23 +1,15 @@
 defmodule NxCL.ReductionTest do
   @moduledoc """
-  Differential rows for reductions, arg reductions, scans and windows, through
-  `NxCL.TestSupport.Compare` against `Nx.BinaryBackend`: `sum product reduce_max reduce_min
-  all any argmax argmin reduce`, `cumulative_sum cumulative_product
-  cumulative_min cumulative_max`, and `window_sum window_product window_max
-  window_min window_reduce window_scatter_max window_scatter_min`, on every
-  dtype Nx accepts for the op. Nx raises for `reduce_max reduce_min argmax
-  argmin`, the min/max scans and windows, and `sort` on `c64` and `c128`, so
-  those combinations are not supported.
+  Differential rows for reductions, arg reductions, scans and windows on every
+  dtype Nx accepts for the op. Nx raises for `reduce_max`, `reduce_min`, `argmax`,
+  `argmin`, the min/max scans and windows, and `sort` on `c64` and `c128`.
 
   Float inputs for sums and scans hold small integers, so every partial sum is
   exact and the order of a tree reduction cannot change the answer. `f16` and
   `bf16` hold only -1, 0 and 1, since a partial sum past 2048 (`f16`) or 256
-  (`bf16`) would round. Random non-integer floats appear only on shapes with
-  few elements per line, where the default tolerance covers the rounding.
-  Products of floats and complex values use entries of magnitude 1.
-
-  `f64` and `c128` rows carry `requires: :fp64`; `f16` rows carry
-  `requires: :fp16`.
+  (`bf16`) would round. Random non-integer floats appear only on shapes with few
+  elements per line, where the default tolerance covers the rounding. Products of
+  floats and complex values use entries of magnitude 1.
   """
   use ExUnit.Case, async: false
 
@@ -49,11 +41,8 @@ defmodule NxCL.ReductionTest do
 
   @needs %{{:f, 64} => :fp64, {:c, 128} => :fp64, {:f, 16} => :fp16}
 
-  # -- Inputs ------------------------------------------------------------------
-
   defp low?(type), do: type in [{:f, 16}, {:bf, 16}]
 
-  # Small integers held in `type`, so sums are exact.
   defp exact({:c, size}, shape, seed) do
     part = {:f, div(size, 2)}
     re = exact(part, shape, seed)
@@ -128,7 +117,6 @@ defmodule NxCL.ReductionTest do
     assert_same(fun, args, opts)
   end
 
-  # Values with ties and, for floats, the special values, as one line of `n`.
   defp with_edges(type, n) do
     edges = Gen.edge_values(type)
     Nx.concatenate([edges, Gen.random({max(n - Nx.size(edges), 1)}, type)])
@@ -147,8 +135,6 @@ defmodule NxCL.ReductionTest do
 
   defp axis_list(shape), do: Enum.to_list(0..(tuple_size(shape) - 1)//1)
 
-  # -- sum, product, all, any --------------------------------------------------
-
   describe "sum, product, all, any" do
     for type <- @types do
       @tag requires: Map.get(@needs, type)
@@ -166,7 +152,6 @@ defmodule NxCL.ReductionTest do
           )
         end
 
-        # Few outputs and many elements (sliced), many outputs (one group each).
         assert_same(&Nx.sum(&1, axes: [0]), [exact(type, {4097, 3})])
         assert_same(&Nx.sum(&1, axes: [1]), [exact(type, {3, 4097})])
         assert_same(&Nx.sum(&1, axes: [1]), [exact(type, {70, 100})])
@@ -246,8 +231,6 @@ defmodule NxCL.ReductionTest do
     end
   end
 
-  # -- reduce_max, reduce_min, argmax, argmin ----------------------------------
-
   describe "reduce_max, reduce_min, argmax, argmin" do
     for type <- @real_types do
       @tag requires: Map.get(@needs, type)
@@ -260,7 +243,6 @@ defmodule NxCL.ReductionTest do
           assert_same(&Nx.reduce_min(&1, axes: axes, keep_axes: keep), [t])
         end
 
-        # Edge values: NaN, infinities and signed zero for floats; the extremes for integers.
         for n <- [7, 70, 4097] do
           t = with_edges(type, n)
           assert_same(&Nx.reduce_max/1, [t])
@@ -292,7 +274,6 @@ defmodule NxCL.ReductionTest do
           )
         end
 
-        # Ties on every element, and edge values (NaN beats numbers).
         for tie <- [:low, :high], n <- [7, 70, 4097] do
           assert_same(&Nx.argmax(&1, tie_break: tie), [with_edges(type, n)])
           assert_same(&Nx.argmin(&1, tie_break: tie), [with_edges(type, n)])
@@ -307,8 +288,6 @@ defmodule NxCL.ReductionTest do
     end
   end
 
-  # -- reduce ------------------------------------------------------------------
-
   describe "reduce" do
     for type <- @types do
       @tag requires: Map.get(@needs, type)
@@ -320,7 +299,6 @@ defmodule NxCL.ReductionTest do
         for shape <- [{}, {1}, {63}, {65}, {3, 5}, {2, 3, 4}], axes <- axes_for(shape) do
           t = exact(type, shape)
 
-          # The bodies Nx folds like a sum and a product.
           assert_same(
             &Nx.reduce(&1, init.(&1), [axes: axes], fn a, b -> Nx.add(a, b) end),
             [t]
@@ -342,7 +320,6 @@ defmodule NxCL.ReductionTest do
           ]
         )
 
-        # A non-identity initial value is folded in once.
         assert_same(
           &Nx.reduce(&1, Nx.tensor(3, type: Nx.type(&1)), [axes: [1]], fn a, b -> Nx.add(a, b) end),
           [exact(type, {3, 70})]
@@ -372,8 +349,6 @@ defmodule NxCL.ReductionTest do
     end
   end
 
-  # -- scans -------------------------------------------------------------------
-
   describe "cumulative ops" do
     @scan_shapes [{1}, {63}, {65}, {1000}, {4097}, {3, 5}, {2, 3, 4}, {2, 1, 3, 1, 2}]
 
@@ -396,7 +371,6 @@ defmodule NxCL.ReductionTest do
           )
         end
 
-        # Lines past one block, with a few and with many lines.
         for shape <- [{2, 600}, {600, 2}, {3, 5000}, {70, 300}], axis <- [0, 1] do
           assert_same(&Nx.cumulative_sum(&1, axis: axis), [
             exact(type, shape)
@@ -433,9 +407,6 @@ defmodule NxCL.ReductionTest do
     end
   end
 
-  # -- windows -----------------------------------------------------------------
-
-  # {shape, window, opts}: strides, padding and dilations in several forms.
   @window_cases [
     {{7}, {3}, []},
     {{63}, {3}, [strides: [2]]},
@@ -522,7 +493,6 @@ defmodule NxCL.ReductionTest do
           )
         end
 
-        # Special values and ties inside a window.
         t = with_edges(type, 70) |> Nx.reshape({7, 10})
         assert_same(&Nx.window_max(&1, {2, 3}), [t])
         assert_same(&Nx.window_min(&1, {2, 3}, padding: :same), [t])
@@ -530,7 +500,6 @@ defmodule NxCL.ReductionTest do
     end
   end
 
-  # -- Explicit expected values --------------------------------------------------
   #
   # `Nx.BinaryBackend` is too slow at 16M elements, so these rows state the answer.
 

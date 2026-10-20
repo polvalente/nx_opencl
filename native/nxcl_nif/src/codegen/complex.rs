@@ -1,17 +1,14 @@
-//! Complex math for kernels. OpenCL C has no complex type, so `c64` is a
-//! `float2` and `c128` a `double2` (real part in `.x`, imaginary part in `.y`),
-//! and every operation is a plain function written out here. The vector
-//! operators of `float2` work component by component, not as complex
-//! arithmetic, so the helpers never rely on them for products or quotients.
+//! Complex math for kernels. OpenCL C has no complex type: `c64` is a `float2`
+//! and `c128` a `double2` (real part in `.x`, imaginary in `.y`), and each
+//! operation is a plain function written out here. The vector operators work per
+//! component, so the helpers never use them for products or quotients.
 //!
-//! A kernel gets the helpers it calls (and what those call), once per width it
-//! uses. Kernels without a complex type get nothing. The functions follow
-//! C99 Annex G where it says something (the sign of zero on a branch cut,
-//! infinity and NaN), and Nx's own rules elsewhere. `sqrt`, `log`, `asin`,
-//! `acos`, `atan`, `asinh`, `acosh` and `atanh` keep the sign of a zero
-//! imaginary part, which picks the side of the cut. `FP_CONTRACT` is off, so a
-//! compiler never fuses a product and a sum into one rounding. The kernels are
-//! built without any fast-math option.
+//! A kernel gets only the helpers it calls, once per width. They follow C99
+//! Annex G (sign of zero on a branch cut, infinity, NaN) and Nx's own rules
+//! elsewhere. `sqrt`, `log`, `asin`, `acos`, `atan`, `asinh`, `acosh` and
+//! `atanh` keep the sign of a zero imaginary part, which picks the side of the
+//! cut. `FP_CONTRACT` is off and kernels build without fast-math, so no product
+//! and sum fuse into one rounding.
 
 use std::collections::BTreeSet;
 
@@ -381,7 +378,6 @@ pub fn prefix(info: &TypeInfo) -> &'static str {
     }
 }
 
-/// The C name of helper `name` for the type.
 pub fn fn_name(info: &TypeInfo, name: &str) -> String {
     format!("{}_{}", prefix(info), name)
 }
@@ -403,7 +399,6 @@ pub fn all_names() -> Vec<&'static str> {
     FUNCS.iter().map(|f| f.name).collect()
 }
 
-/// Add `name` and everything it calls to `set`.
 fn close(name: &str, set: &mut BTreeSet<&'static str>) {
     if let Some(f) = FUNCS.iter().find(|f| f.name == name) {
         if set.insert(f.name) {
@@ -415,8 +410,7 @@ fn close(name: &str, set: &mut BTreeSet<&'static str>) {
 }
 
 /// The source for the helpers `names` (and what they call) over the width of
-/// `info`. Empty for a real type, so a kernel without complex values keeps
-/// its source, hash and build as before.
+/// `info`. Empty for a real type.
 pub fn preamble(info: &TypeInfo, names: &[&str]) -> String {
     if info.preamble != Preamble::Complex {
         return String::new();
@@ -431,8 +425,6 @@ pub fn preamble(info: &TypeInfo, names: &[&str]) -> String {
     }
     out
 }
-
-// ── Fragments the reduction and fft kernels use ─────────
 
 /// A complex literal of the type's width, `(float2)(re, im)`, from whole
 /// numbers: they print exactly, and no NaN or infinity can reach the source.

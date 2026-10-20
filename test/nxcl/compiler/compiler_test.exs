@@ -1,8 +1,7 @@
 defmodule NxCL.CompilerTest do
   @moduledoc """
-  Full compiler round-trip tests: trace → lower → execute → verify.
-  Compares compiled results against `Nx.Defn.Evaluator` on the binary backend
-  through `NxCL.TestSupport.Compare`.
+  Compiled results against `Nx.Defn.Evaluator` on `Nx.BinaryBackend`, through
+  `NxCL.TestSupport.Compare`.
   """
   use ExUnit.Case, async: false
   import NxCL.TestSupport.Compare

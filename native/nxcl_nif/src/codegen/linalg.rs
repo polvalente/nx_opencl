@@ -1,22 +1,19 @@
 //! Dense linear algebra: `triangular_solve` and `cholesky`.
 //!
-//! `triangular_solve` solves `op(A) X = B` (`left_side`) or `X op(A) = B` for
-//! a batch of triangular matrices. One work item solves one right-hand side by
-//! substitution, so the launch is parallel over batches and columns. The
-//! matrix is read through two strides, so a transpose or the other side costs
-//! no copy; only the triangle the attrs name is read.
+//! `triangular_solve` solves `op(A) X = B` (`left_side`) or `X op(A) = B` for a
+//! batch of triangular matrices. One work item solves one right-hand side by
+//! substitution. The matrix is read through two strides, so a transpose or the
+//! other side costs no copy; only the named triangle is read.
 //!
-//! `cholesky` runs one work group per matrix, right-looking: for each column
-//! the group takes the square root of the pivot, scales the column below it,
-//! and updates the trailing triangle, with a barrier between the three steps.
-//! A matrix that is not positive definite gives NaN, as `sqrt` of a negative
-//! number does; for complex input the pivot is a complex square root, so a
-//! negative real pivot gives an imaginary one, as the reference does. The upper
-//! triangle of the result is zero. Complex input is taken as Hermitian: the
-//! update conjugates.
+//! `cholesky` runs one work group per matrix, right-looking: per column, take
+//! the square root of the pivot, scale the column below, update the trailing
+//! triangle, with a barrier between the steps. A matrix that is not positive
+//! definite gives NaN. Complex input is taken as Hermitian, so the update
+//! conjugates; a negative real pivot gives an imaginary one, as the reference
+//! does. The upper triangle of the result is zero.
 //!
 //! Operands and output share one type; the lowering casts to it. `bf16` and
-//! `f16` compute in `float` and round when they store.
+//! `f16` compute in `float` and round on store.
 
 use super::complex;
 use super::movement::{pragmas, Kernel};
@@ -29,7 +26,6 @@ pub fn handles(op: &str) -> bool {
     OPS.contains(&op)
 }
 
-/// The arithmetic of one element type as C expression builders.
 struct Arith {
     complex: bool,
     info: TypeInfo,

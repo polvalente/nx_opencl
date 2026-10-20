@@ -1,10 +1,9 @@
 //! Elementwise kernels: unary and binary ops, `as_type`, `select`, `clip`.
 //!
-//! One kernel per `{op, operand types, output type}`, written from the
-//! templates below. Operands have the output shape, except scalar constants,
-//! which the kernel takes as scalar arguments. Arithmetic follows C99 on
-//! explicit casts: integers wrap (computed in an unsigned type of at least 32
-//! bits), shifts and division have guards, NaN rules come from `isnan`-style
+//! One kernel per `{op, operand types, output type}`. Operands have the output
+//! shape, except scalar constants, which are scalar arguments. Arithmetic follows
+//! C99 on explicit casts: integers wrap (computed in an unsigned type of at least
+//! 32 bits), shifts and division are guarded, and NaN rules use `isnan`-style
 //! comparisons. The rule for each case is noted beside its template.
 
 use std::collections::BTreeMap;
@@ -99,8 +98,6 @@ pub fn handles(op: &str) -> bool {
         || matches!(op, "logical_not" | "as_type" | "select" | "clip")
 }
 
-// ── C helpers ───────────────────────────────────────────
-
 /// Integer `pow` by repeated squaring, wrapping in the unsigned type. A
 /// negative exponent gives the integer limit: 1 and -1 keep their value, the
 /// rest go to 0.
@@ -194,8 +191,6 @@ fn f2i_helper(src: &TypeInfo, out: &TypeInfo) -> String {
     )
 }
 
-// ── Generator ───────────────────────────────────────────
-
 fn float_lit(m: &TypeInfo, text: &str) -> String {
     if m.math == "double" {
         text.to_string()
@@ -260,7 +255,6 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Declare a local `x{k}` holding operand `k` in the math type `to`.
     fn operand(&mut self, k: usize, to: &TypeInfo) -> Result<String, String> {
         let value = self.load(k, to)?;
         self.locals
@@ -268,7 +262,6 @@ impl<'a> Gen<'a> {
         Ok(format!("x{}", k))
     }
 
-    /// Wrap an expression of math type `from` for the output buffer.
     fn store(&mut self, expr: &str, from: &TypeInfo) -> Result<String, String> {
         let out = type_info(self.instr.out)?;
         self.need_half(out.half);
@@ -322,8 +315,6 @@ impl<'a> Gen<'a> {
             _ => format!("({a} >= 0 && (ulong){a} {sym} (ulong){b})"),
         }
     }
-
-    // ── Complex ──
 
     /// True when the output or an operand is complex, or the op is one of
     /// `real`, `imag`, `conjugate`, `phase`.
@@ -975,7 +966,6 @@ fn require_int(op: &str, m: &TypeInfo) -> Result<(), String> {
     }
 }
 
-/// Generate the kernel for an elementwise instruction.
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
     // Every operand has the output shape, or is a scalar constant.
     for (k, operand) in instr.operands.iter().enumerate() {
@@ -1076,8 +1066,6 @@ mod tests {
         src(op, &[a, b], U8)
     }
 
-    // ── Wrap, overflow ──
-
     #[test]
     fn u8_add_wraps_through_an_explicit_cast() {
         let s = src("add", &[U8, U8], U8);
@@ -1114,8 +1102,6 @@ mod tests {
         );
         assert!(src("abs", &[U8], U8).contains("out[i] = x0;"));
     }
-
-    // ── NaN ──
 
     #[test]
     fn float_max_and_min_return_nan_if_either_side_is_nan() {
@@ -1236,8 +1222,6 @@ mod tests {
         );
     }
 
-    // ── Zero divisor, integer division ──
-
     #[test]
     fn float_divide_is_plain_division_so_zero_gives_inf_and_nan() {
         let s = src("divide", &[F32, F32], F32);
@@ -1280,8 +1264,6 @@ mod tests {
         assert!(ops("quotient", F32).is_err());
     }
 
-    // ── Shifts ──
-
     #[test]
     fn shift_counts_at_or_above_the_width_are_guarded() {
         let s = src("left_shift", &[U8, U8], U8);
@@ -1302,8 +1284,6 @@ mod tests {
         let s = src("right_shift", &[U8, U8], U8);
         assert!(s.contains("(uchar)((uint)x0 >> ((uchar)x1))"), "{}", s);
     }
-
-    // ── Pow, round ──
 
     #[test]
     fn integer_pow_is_repeated_squaring_with_a_negative_exponent_rule() {
@@ -1329,8 +1309,6 @@ mod tests {
         assert!(src("round", &[F32], F32).contains("round(x0)"));
         assert!(src("round", &[S32], S32).contains("out[i] = x0;"));
     }
-
-    // ── Casts ──
 
     #[test]
     fn as_type_float_to_int_goes_through_the_saturating_helper() {
@@ -1361,8 +1339,6 @@ mod tests {
         assert!(s.contains("out[i] = (half)((float)(x0));"), "{}", s);
         assert!(!s.contains("f32_to_f16"), "{}", s);
     }
-
-    // ── Special functions ──
 
     #[test]
     fn sigmoid_keeps_exp_argument_non_positive() {
@@ -1410,8 +1386,6 @@ mod tests {
             assert!(s.contains("popcount(("), "{}", s);
         }
     }
-
-    // ── Types ──
 
     #[test]
     fn bf16_add_computes_in_float_and_stores_with_rounding() {
@@ -1479,8 +1453,6 @@ mod tests {
         assert!(s.contains("float x0 = (float)(in0[i]);"), "{}", s);
         assert!(s.contains("out[i] = (half)((x0 + x1));"), "{}", s);
     }
-
-    // ── Operands, entry, cache key ──
 
     #[test]
     fn a_scalar_constant_is_a_scalar_argument() {
@@ -1556,8 +1528,6 @@ mod tests {
         let err = generate(&i, &Caps::all()).unwrap_err();
         assert!(err.contains("broadcast"), "{}", err);
     }
-
-    // ── Coverage of every op family ──
 
     #[test]
     fn every_unary_op_generates_for_every_dtype_it_accepts() {
@@ -1654,8 +1624,6 @@ mod tests {
         assert!(!handles("dot"));
         assert!(!handles("bitcast"));
     }
-
-    // ── Complex ──
 
     const C64: DType = DType::new(Kind::C, 64);
     const C128: DType = DType::new(Kind::C, 128);

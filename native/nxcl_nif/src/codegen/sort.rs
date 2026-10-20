@@ -27,7 +27,6 @@ pub fn handles(op: &str) -> bool {
     OPS.contains(&op)
 }
 
-/// Most elements one workgroup sorts in local memory.
 const MAX_LOCAL: usize = 4096;
 
 /// Local capacity (a power of two) for keys of `key_bytes`, plus a 4-byte index.
@@ -39,7 +38,6 @@ fn local_capacity(limits: &Limits, key_bytes: usize) -> usize {
     m
 }
 
-/// The line length padded to a power of two.
 fn padded(n: usize) -> Result<usize, String> {
     n.max(1)
         .checked_next_power_of_two()

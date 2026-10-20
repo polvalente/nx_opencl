@@ -1,17 +1,8 @@
 defmodule NxCL.Compiler.Lower.Block do
-  @moduledoc """
-  The block hook: decides how each `Nx.Block` node lowers.
-
-  Every block struct of the pinned Nx has one entry in `decisions/0`:
-
-    * `:native` - `NxCL.Compiler.Lower` has a clause that emits instructions for the
-      struct itself.
-    * `:default` - the block's `default_expr` lowers inline, in the parent
-      program. Its parameters map to the refs of the block's arguments.
-
-  A struct outside the table (a user block) lowers through its `default_expr`.
-  `NxCL.Compiler.Lower.BlockTest` fails when a struct of `Nx.Block.*` has no entry.
-  """
+  @moduledoc false
+  # Decides how each `Nx.Block` node lowers: `:native` (a clause in
+  # `NxCL.Compiler.Lower`) or `:default` (its `default_expr`, inline). A struct
+  # outside the table lowers through its default.
 
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Lower
@@ -52,8 +43,7 @@ defmodule NxCL.Compiler.Lower.Block do
   def decision(%{__struct__: mod}), do: Map.get(@decisions, mod, :default)
 
   @doc """
-  Lowers a block node that has no native clause. `expand` is
-  `(node, state) -> state` for one graph node.
+  Lowers a block node that has no native clause. `expand` lowers one graph node.
   """
   @spec lower(Lower.state(), Shared.tensor(), (Shared.tensor(), Lower.state() -> Lower.state())) ::
           Lower.state()
@@ -69,12 +59,9 @@ defmodule NxCL.Compiler.Lower.Block do
   end
 
   @doc """
-  Lowers `node`, a block with `{args, default}`, through its default expression.
-
-  The default is a graph over inner parameters, one per block argument. This
-  walks it in post-order, points each parameter at the ref of the matching
-  argument, and lowers the other nodes with `expand`. The block node gets the
-  ref of the default's result; a tuple result gets `{:tuple, refs}`.
+  Lowers a block through its default expression. Each parameter of the default
+  takes the ref of the matching argument; `expand` lowers the other nodes. A
+  tuple result gets `{:tuple, refs}`.
   """
   @spec inline(
           Lower.state(),
@@ -83,7 +70,6 @@ defmodule NxCL.Compiler.Lower.Block do
           (Shared.tensor(), Lower.state() -> Lower.state())
         ) :: Lower.state()
   def inline(state, %T{data: %Nx.Defn.Expr{id: id}}, {args, default}, expand) do
-    # Nodes of the default belong to this scope for the `cond` dependency walk.
     state = %{state | avail: Map.merge(state.avail, Nx.Defn.Tree.scope_ids(default))}
 
     state =

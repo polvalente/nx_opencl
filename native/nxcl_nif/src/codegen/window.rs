@@ -1,17 +1,17 @@
-//! Window ops: `window_sum`, `window_product`, `window_max`, `window_min`,
-//! the generic `window_reduce`, and `window_scatter_max` / `window_scatter_min`
-//! (the gradient of max and min pooling).
+//! Window ops: `window_sum`, `window_product`, `window_max`, `window_min`, the
+//! generic `window_reduce`, and `window_scatter_max` / `window_scatter_min` (the
+//! gradient of max and min pooling).
 //!
-//! One work item per output element; no atomics. A window cell outside the
-//! input reads as the initial value, as `Nx` pads with it, and folds in
-//! row-major order over the window, so a generic body that is not associative
-//! gives the reference result. Window size, strides, dilations and padding are
-//! `long` arguments, so the source depends on the rank and the types only.
+//! One work item per output element; no atomics. A window cell outside the input
+//! reads as the initial value, as Nx pads with it. The fold runs in row-major
+//! order over the window, so a generic body that is not associative gives the
+//! reference result. Window size, strides, dilations and padding are `long`
+//! arguments, so the source depends on rank and types only.
 //!
-//! `window_scatter_*` is written as a gather, since there are no atomics: the
-//! work item of input element `p` visits each window that covers `p`, finds that
-//! window's selected cell by the reference rule (the later of equal cells wins),
-//! and adds the window's source value when the selected cell is `p`.
+//! `window_scatter_*` is a gather, since there are no atomics: the work item of
+//! input element `p` visits each window that covers `p`, finds the window's
+//! selected cell by the reference rule (the later of equal cells wins), and adds
+//! the window's source value when that cell is `p`.
 
 use super::elementwise::{scalar_binary, ScalarCode};
 use super::index::{self, coords, dims, strides};
@@ -34,7 +34,6 @@ pub fn handles(op: &str) -> bool {
     OPS.contains(&op)
 }
 
-/// Window parameters, one entry per input axis.
 struct Window {
     dims: Vec<i64>,
     strides: Vec<i64>,

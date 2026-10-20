@@ -1,14 +1,13 @@
 defmodule NxCL.Compiler.Options do
   @moduledoc false
-  # Checks the options `NxCL.Compiler` takes. An unknown key raises
-  # `ArgumentError` and names the key.
+  # Checks the options `NxCL.Compiler` takes.
 
   @keys [:device, :command_queue, :max_concurrency]
 
   @doc "Validates `opts` and returns them. Raises on an unknown key or a non-empty `:hooks`."
   @spec validate!(keyword()) :: keyword()
   def validate!(opts) do
-    # Nx passes an empty `:hooks` to every compiler; the named-override map is not wired through.
+    # Nx passes an empty `:hooks` to every compiler.
     {hooks, opts} = Keyword.pop(opts, :hooks, %{})
 
     if hooks not in [%{}, []] do

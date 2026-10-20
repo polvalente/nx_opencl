@@ -1,21 +1,19 @@
 //! Straight-line program executor.
 //!
-//! `Program::decode` turns the wire term built by `NxCL.Compiler.Executor` into steps and
-//! builds every kernel through the device cache. `Program::eval` enqueues the
-//! steps in order on the one in-order queue. On the context's own queue it returns
-//! after a flush, and a read of an output waits; on any other queue, or when a
-//! kernel reports an error code, it waits once, in `finish`.
+//! `Program::decode` turns the wire term from `NxCL.Compiler.Executor.Wire`
+//! into steps and builds every kernel through the device cache. `Program::eval`
+//! enqueues the steps in order. On the context's own queue it returns after a
+//! flush and a read of an output waits; on another queue, or when a kernel
+//! reports an error code, it waits once, in `finish`.
 //!
-//! Wire term: `{inputs, captures, consts, [instr], [out_ref]}` where
+//! Wire term: `{inputs, captures, consts, [instr], [out_ref]}` with
 //! `inputs = [{type, shape} | nil]`, `captures = [{type, shape}]`,
 //! `consts = [{type, value}]`, `instr = {op, [ref], out_type, out_shape, [attr]}`,
-//! `type = {kind, bits}`, `shape` is a tuple and `ref = {kind, index}`. Rust
-//! keeps the type and shape of every slot, so an instruction needs no operand
-//! types of its own.
+//! `type = {kind, bits}`, `ref = {kind, index}`. The decoder keeps each slot's
+//! type and shape, so an instruction carries no operand types.
 //!
-//! The decoder checks every size it reads. A shape whose element count, or
-//! whose byte size, does not fit in a `long` is an error, so codegen can turn
-//! dimensions into kernel arguments without a wrap.
+//! A shape whose element count or byte size does not fit in a `long` is an
+//! error, so codegen can pass dimensions as kernel arguments without a wrap.
 
 use opencl3::command_queue::CommandQueue;
 use opencl3::kernel::ExecuteKernel;
@@ -442,11 +440,9 @@ impl Program {
         };
 
         let on_default_queue = std::ptr::eq(queue, &ctx.queue);
-        // The default queue returns without waiting; a read of an output blocks.
-        // That read goes through the default queue (`buffer_read` and
-        // `buffer_read_many` use no other), so it is ordered after this run's
-        // commands. A run on any other queue always ends in `finish`, so its
-        // outputs are done before the call returns and any queue may read them.
+        // The default queue returns without waiting. A read of an output uses the
+        // default queue (`buffer_read` and `buffer_read_many` use no other), so
+        // it runs after this run's commands. Any other queue ends in `finish`.
         let lazy = !self.uses_flag && on_default_queue;
         if !on_default_queue {
             // An input may be the output of an earlier run on the default
@@ -489,9 +485,9 @@ impl Program {
             .collect()
     }
 
-    /// Enqueue every step in order. No wait between steps. The queue is in
-    /// order, and OpenCL keeps a buffer alive until every queued command that
-    /// uses it has finished, so dropping a slot at its last reader is safe.
+    /// Enqueue every step in order, with no wait between. OpenCL keeps a buffer
+    /// alive until every queued command that uses it finishes, so dropping a slot
+    /// at its last reader is safe.
     fn run_steps(
         &self,
         ctx: &DeviceCtx,
@@ -521,9 +517,8 @@ impl Launch {
         slots: &mut [Option<Arc<DeviceBuffer>>],
     ) -> Result<(), String> {
         let out_buf = Arc::new(DeviceBuffer::create(ctx, self.out_bytes)?);
-        // An empty output needs no launch. Codegen still builds the kernels (it
-        // clamps their global size to 1 so the spec is well formed), and none
-        // of them runs.
+        // An empty output needs no launch. Codegen still builds the kernels, with
+        // global size clamped to 1.
         if self.out_bytes > 0 {
             let scratch = self
                 .scratch

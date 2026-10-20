@@ -1,4 +1,8 @@
 defmodule NxCL.Compiler.TreeTest do
+  @moduledoc """
+  `NxCL.Compiler.Tree.post_order/2`: order, shared nodes and scopes.
+  """
+
   use ExUnit.Case, async: true
   import Nx.Defn
 
@@ -18,7 +22,6 @@ defmodule NxCL.Compiler.TreeTest do
 
     for {node, node_idx} <- Enum.with_index(order) do
       Nx.Defn.Tree.apply_args(node, :scope, :ok, fn dep, :ok ->
-        # Inner-scope deps are not in the order; skip them.
         with {:ok, dep_idx} <- Map.fetch(index, dep.data.id) do
           assert dep_idx < node_idx
         end

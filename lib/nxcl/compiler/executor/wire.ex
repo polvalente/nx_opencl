@@ -1,21 +1,16 @@
 defmodule NxCL.Compiler.Executor.Wire do
   @moduledoc false
-  # The term `NxCL.Native.compile_program/2` reads, and the functions that build it
-  # from a `NxCL.Compiler.Program`. `NxCL.Compiler.Executor` and
-  # `NxCL.Compiler.Executor.Plan` both use it.
+  # Builds the term `NxCL.Native.compile_program/2` reads from a program:
   #
   #     {[input], [capture], [const], [instr], [out_ref]}
   #     input = {type, shape} | nil        (nil: the function never reads it)
   #     capture = {type, shape}
-  #     const = {type, value}              (value: a number, :nan, :infinity, :neg_infinity,
-  #                                         or a {re, im} pair for a complex type)
+  #     const = {type, value}              (a number, :nan, :infinity, :neg_infinity,
+  #                                         or {re, im} for a complex type)
   #     instr = {op, [ref], out_type, out_shape, [attr]}
-  #     ref = {:input | :capture | :const | :result, index}
   #
-  # A `batched_gemm` carries `[b, m, n, k]` as attrs. Buffers go to `eval_program/2` in the
-  # order inputs, captures, constants; constants go as `nil`, because Rust holds
-  # their values. The native side generates the kernel for each instruction from
-  # the op, the types and the shapes.
+  # Buffers go to `eval_program/2` as inputs, captures, constants. Constants go
+  # as `nil`; Rust holds their values.
 
   alias NxCL.Compiler.Instruction
   alias NxCL.Compiler.Program
@@ -54,8 +49,8 @@ defmodule NxCL.Compiler.Executor.Wire do
   end
 
   @doc """
-  Encodes a constant `{value, type}`. A value is a finite number, `:nan`,
-  `:infinity`, `:neg_infinity`, or a `Complex` of those.
+  Encodes a constant `{value, type}`. A value is a number, `:nan`, `:infinity`,
+  `:neg_infinity`, or a `Complex` of those.
   """
   @spec const({term(), Nx.Type.t()}) :: const()
   def const({value, type}) when is_number(value) or value in @special, do: {type, value}
