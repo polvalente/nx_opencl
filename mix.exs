@@ -33,7 +33,7 @@ defmodule NxOpencl.MixProject do
       main: "readme",
       source_url: "https://github.com/polvalente/nx_opencl",
       source_ref: "v0.1.0",
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: ["README.md", "docs/nerves.md", "CHANGELOG.md"]
     ]
   end
 
@@ -52,6 +52,7 @@ defmodule NxOpencl.MixProject do
         native/nxcl_nif/Cargo.toml
         native/nxcl_nif/Cargo.lock
         native/nxcl_nif/.cargo
+        docs
         mix.exs
         README.md
         CHANGELOG.md

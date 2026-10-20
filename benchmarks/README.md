@@ -25,8 +25,8 @@ BENCH_EXLA=1 mix run elementwise.exs
 ```
 
 Set `BENCH_EXLA=1` on every command in this project, `mix deps.get` included.
-`mix.exs` reads it to decide whether EXLA is a dependency, and a command without it
-can change `mix.lock`.
+`mix.exs` reads it to decide whether EXLA is a dependency. `mix.lock` depends on
+that choice, so a command without `BENCH_EXLA=1` can change the file.
 
 EXLA 1.0 downloads an XLA binary on first build, and on a Mac it runs on the CPU
 only. Do not load EXLA and PoCL in one process: their C++ runtimes clash and the VM
@@ -61,8 +61,8 @@ a cold start.
 
 ## Profile split
 
-`benchmarks/profile/` splits a model call into transfer, kernel and host time. It
-runs on macOS only: the shim builds as a `.dylib` with `cc -dynamiclib`, and the
+Author tool, macOS only. `benchmarks/profile/` splits a model call into transfer,
+kernel and host time. It runs on macOS only: the shim builds as a `.dylib` with `cc -dynamiclib`, and the
 default OpenCL library is Apple's framework. A small C shim stands in for
 `libOpenCL`, so `lib/` and `native/` do not change. It reads the
 `CL_QUEUE_PROFILING_ENABLE` events for kernel time and times buffer uploads and reads.
