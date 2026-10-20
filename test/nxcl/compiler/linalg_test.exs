@@ -94,6 +94,23 @@ defmodule NxCL.LinalgTest do
   defp triangular_from_4(x, n, {kind, 16}) when n > 3 and kind in [:f, :bf], do: Nx.triu(x)
   defp triangular_from_4(x, _n, _type), do: x
 
+  # The wide types get a diagonally dominant matrix: a random one can be nearly
+  # singular, and then its determinant cancels to a value that the rounding of either
+  # side decides. The other types get whole numbers (see `whole/2`). From 4 on,
+  # `determinant` runs `lu`, which divides. On a half type the reference truncates and
+  # the device rounds to nearest, so general values differ by more than the tolerance
+  # (both are off from the exact value). An upper triangular matrix has no row swap and
+  # no division, so those rows stay exact.
+  defp det_matrix(n, type, seed) do
+    if wide?(type) do
+      dense(n, type, seed) |> Nx.as_type(type)
+    else
+      Gen.random({n, n}, type, seed: NxCL.TestSupport.Compare.seed() + seed)
+      |> whole(type)
+      |> triangular_from_4(n, type)
+    end
+  end
+
   defp stack_of(count, fun), do: Nx.stack(for i <- 1..count, do: fun.(i))
 
   defp stacked_or_single(nil, fun), do: fun.(1)
@@ -308,9 +325,24 @@ defmodule NxCL.LinalgTest do
       end
     end
 
-    test "an ill-conditioned matrix matches" do
+    # The condition number is about 4e4, so a solve loses about 4 digits: in `f32` the two
+    # sides can differ by `4e4 * 6e-8 = 2.4e-3` of the answer (entries near 1e4), and the
+    # tolerance of 1e-2 leaves 4 times that. In `f64` the error is about 4e-12 at most,
+    # and 1e-9 leaves 250 times that.
+    test "an ill-conditioned matrix matches in f32" do
       a = Nx.tensor([[1.0, 1.0], [1.0, 1.0001]])
-      assert_same(&Nx.LinAlg.solve/2, [a, Nx.tensor([1.0, 2.0])])
+
+      assert_same(&Nx.LinAlg.solve/2, [a, Nx.tensor([1.0, 2.0])], rtol: 1.0e-2, atol: 1.0e-2)
+    end
+
+    @tag requires: :fp64
+    test "an ill-conditioned matrix matches in f64" do
+      a = Nx.tensor([[1.0, 1.0], [1.0, 1.0001]], type: :f64)
+
+      assert_same(&Nx.LinAlg.solve/2, [a, Nx.tensor([1.0, 2.0], type: :f64)],
+        rtol: 1.0e-9,
+        atol: 1.0e-9
+      )
     end
 
     test "a singular matrix gives NaN where the reference raises" do
@@ -352,17 +384,15 @@ defmodule NxCL.LinalgTest do
         end
 
         for n <- [2, 3, 4, 5] do
-          x = Gen.random({n, n}, type, seed: NxCL.TestSupport.Compare.seed() + 42) |> whole(type)
-          # From 4 on, `determinant` runs `lu`, which divides. On a half type the reference
-          # truncates and the device rounds to nearest, so general values differ by more
-          # than the tolerance (both are off from the exact value). An upper triangular
-          # matrix has no row swap and no division, so those rows stay exact.
-          x = triangular_from_4(x, n, type)
-          assert_same(&Nx.LinAlg.determinant/1, [x])
+          assert_same(&Nx.LinAlg.determinant/1, [det_matrix(n, type, 42)])
         end
 
         batch =
-          Gen.random({2, 3, 3}, type, seed: NxCL.TestSupport.Compare.seed() + 43) |> whole(type)
+          if wide?(type),
+            do: Nx.stack([det_matrix(3, type, 43), det_matrix(3, type, 44)]),
+            else:
+              Gen.random({2, 3, 3}, type, seed: NxCL.TestSupport.Compare.seed() + 43)
+              |> whole(type)
 
         assert_same(&Nx.LinAlg.determinant/1, [batch])
       end

@@ -8,7 +8,8 @@ defmodule NxCL.ReductionTest do
   exact and the order of a tree reduction cannot change the answer. `f16` and
   `bf16` hold only -1, 0 and 1, since a partial sum past 2048 (`f16`) or 256
   (`bf16`) would round. Random non-integer floats appear only on shapes with few
-  elements per line, where the default tolerance covers the rounding. Products of
+  elements per line. Their sums use a tolerance per type (see `random_sum_opts/1`),
+  because a tree reduction adds in another order than `Nx.BinaryBackend`. Products of
   floats and complex values use entries of magnitude 1.
   """
   use ExUnit.Case, async: false
@@ -42,6 +43,16 @@ defmodule NxCL.ReductionTest do
   @needs %{{:f, 64} => :fp64, {:c, 128} => :fp64, {:f, 16} => :fp16}
 
   defp low?(type), do: type in [{:f, 16}, {:bf, 16}]
+
+  # Options for the sum of random non-integer values: at most 65 entries of magnitude
+  # up to 4, so partial sums stay under 260 and typical sums near 20.
+  #   * `f64`, `c128`: the entries come from `f32`, so every partial sum needs under 40
+  #     bits and is exact in any order. The default tolerance applies.
+  #   * `f32`, `c64`: the order changes the result by a few ulps (an ulp is 1.5e-5 between
+  #     128 and 256), so the absolute tolerance is 1e-4.
+  #   * `f16`, `bf16`: an ulp is 0.016 and 0.125 near 20; 0.5 is 4 `bf16` ulps there.
+  defp random_sum_opts(type) when type in [{:f, 64}, {:c, 128}], do: []
+  defp random_sum_opts(type), do: if(low?(type), do: [atol: 0.5], else: [atol: 1.0e-4])
 
   defp exact({:c, size}, shape, seed) do
     part = {:f, div(size, 2)}
@@ -145,11 +156,9 @@ defmodule NxCL.ReductionTest do
           assert_same(&Nx.sum(&1, axes: axes, keep_axes: keep), [exact(type, shape)])
         end
 
-        # Few elements per line: random non-integer values stay inside the tolerance.
+        # Few elements per line, so the rounding stays under `random_sum_opts/1`.
         for shape <- [{3, 5}, {2, 3, 4}, {63}, {65}], axes <- [nil, [0]] do
-          assert_same(&Nx.sum(&1, axes: axes), [Gen.random(shape, type)],
-            atol: if(low?(type), do: 0.5, else: 1.0e-4)
-          )
+          assert_same(&Nx.sum(&1, axes: axes), [Gen.random(shape, type)], random_sum_opts(type))
         end
 
         assert_same(&Nx.sum(&1, axes: [0]), [exact(type, {4097, 3})])
@@ -528,8 +537,10 @@ defmodule NxCL.ReductionTest do
       assert Nx.Defn.jit(&Nx.all/1, compiler: NxCL.Compiler).(x) |> Nx.to_number() == 1
     end
 
-    test "1M s32 values against the reference" do
-      x = Gen.random({1_048_576}, {:s, 32})
+    # Each assertion runs the reference on `Nx.BinaryBackend` and two more paths, so
+    # 65K elements keep the row fast. The rows with stated answers cover 1M.
+    test "65K s32 values against the reference" do
+      x = Gen.random({65_537}, {:s, 32})
       assert_same(&Nx.sum/1, [x])
       assert_same(&Nx.reduce_max/1, [x])
       assert_same(&Nx.argmax(&1, tie_break: :high), [x])

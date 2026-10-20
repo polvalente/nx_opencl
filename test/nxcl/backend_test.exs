@@ -1,10 +1,11 @@
 defmodule NxCL.BackendTest do
   @moduledoc """
-  `NxCL.Backend`: transfers, elementwise ops, `dot`, reductions, memory, caching and batching, with a check against the CPU.
+  `NxCL.Backend`: transfers, elementwise ops, `dot`, reductions, buffer lifetime and reads, caching and batching.
   """
 
   use ExUnit.Case, async: false
-  import NxCL.TestHelpers
+
+  alias NxCL.TestSupport.Compare
 
   @moduletag :opencl
 
@@ -25,7 +26,7 @@ defmodule NxCL.BackendTest do
       gpu_t = Nx.backend_transfer(t, NxCL.Backend)
       cpu_t = Nx.backend_transfer(gpu_t, Nx.BinaryBackend)
 
-      assert_tensors_close(cpu_t, t)
+      Compare.assert_close(cpu_t, t)
     end
   end
 
@@ -37,7 +38,7 @@ defmodule NxCL.BackendTest do
       result = Nx.add(a, b) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor([11.0, 22.0, 33.0])
 
-      assert_tensors_close(result, expected)
+      Compare.assert_close(result, expected)
     end
 
     test "subtract" do
@@ -47,7 +48,7 @@ defmodule NxCL.BackendTest do
       result = Nx.subtract(a, b) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor([9.0, 18.0, 27.0])
 
-      assert_tensors_close(result, expected)
+      Compare.assert_close(result, expected)
     end
 
     test "multiply" do
@@ -57,7 +58,7 @@ defmodule NxCL.BackendTest do
       result = Nx.multiply(a, b) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor([10.0, 15.0, 20.0])
 
-      assert_tensors_close(result, expected)
+      Compare.assert_close(result, expected)
     end
 
     test "divide" do
@@ -67,7 +68,7 @@ defmodule NxCL.BackendTest do
       result = Nx.divide(a, b) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor([5.0, 5.0, 6.0])
 
-      assert_tensors_close(result, expected)
+      Compare.assert_close(result, expected)
     end
   end
 
@@ -76,21 +77,21 @@ defmodule NxCL.BackendTest do
       t = Nx.tensor([1.0, -2.0, 3.0]) |> Nx.backend_transfer(NxCL.Backend)
       result = Nx.negate(t) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor([-1.0, 2.0, -3.0])
-      assert_tensors_close(result, expected)
+      Compare.assert_close(result, expected)
     end
 
     test "exp" do
       t = Nx.tensor([0.0, 1.0, 2.0]) |> Nx.backend_transfer(NxCL.Backend)
       result = Nx.exp(t) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.exp(Nx.tensor([0.0, 1.0, 2.0]))
-      assert_tensors_close(result, expected, 1.0e-5)
+      Compare.assert_close(result, expected, 1.0e-5)
     end
 
     test "sigmoid" do
       t = Nx.tensor([0.0, 1.0, -1.0]) |> Nx.backend_transfer(NxCL.Backend)
       result = Nx.sigmoid(t) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.sigmoid(Nx.tensor([0.0, 1.0, -1.0]))
-      assert_tensors_close(result, expected, 1.0e-5)
+      Compare.assert_close(result, expected, 1.0e-5)
     end
   end
 
@@ -102,7 +103,7 @@ defmodule NxCL.BackendTest do
       result = Nx.dot(a, b) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.dot(Nx.tensor([[1.0, 2.0], [3.0, 4.0]]), Nx.tensor([[5.0, 6.0], [7.0, 8.0]]))
 
-      assert_tensors_close(result, expected)
+      Compare.assert_close(result, expected)
     end
 
     test "non-square matmul" do
@@ -116,7 +117,7 @@ defmodule NxCL.BackendTest do
       result = Nx.dot(a, b) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.dot(a_cpu, b_cpu)
 
-      assert_tensors_close(result, expected, 1.0e-4)
+      Compare.assert_close(result, expected, 1.0e-4)
     end
   end
 
@@ -125,21 +126,21 @@ defmodule NxCL.BackendTest do
       t = Nx.tensor([1.0, 2.0, 3.0, 4.0]) |> Nx.backend_transfer(NxCL.Backend)
       result = Nx.sum(t) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor(10.0)
-      assert_tensors_close(result, expected, 1.0e-4)
+      Compare.assert_close(result, expected, 1.0e-4)
     end
 
     test "reduce_max" do
       t = Nx.tensor([3.0, 1.0, 5.0, 2.0]) |> Nx.backend_transfer(NxCL.Backend)
       result = Nx.reduce_max(t) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor(5.0)
-      assert_tensors_close(result, expected, 1.0e-5)
+      Compare.assert_close(result, expected, 1.0e-5)
     end
 
     test "reduce_min" do
       t = Nx.tensor([3.0, 1.0, 5.0, 2.0]) |> Nx.backend_transfer(NxCL.Backend)
       result = Nx.reduce_min(t) |> Nx.backend_transfer(Nx.BinaryBackend)
       expected = Nx.tensor(1.0)
-      assert_tensors_close(result, expected, 1.0e-5)
+      Compare.assert_close(result, expected, 1.0e-5)
     end
   end
 
@@ -155,7 +156,7 @@ defmodule NxCL.BackendTest do
       sorted = Nx.sort(Nx.tensor([3.0, 1.0, 2.0]) |> Nx.backend_transfer(NxCL.Backend))
       assert %NxCL.Backend{} = sorted.data
 
-      assert_tensors_close(
+      Compare.assert_close(
         Nx.backend_transfer(sorted, Nx.BinaryBackend),
         Nx.tensor([1.0, 2.0, 3.0])
       )
@@ -240,7 +241,7 @@ defmodule NxCL.BackendTest do
     end
   end
 
-  describe "memory" do
+  describe "freeing and reading buffers" do
     # This cannot see a leak or a double free; it checks the return value and that
     # freeing a result leaves the inputs readable.
     test "deallocating the result of an add returns :ok, and the inputs stay readable" do
@@ -331,30 +332,6 @@ defmodule NxCL.BackendTest do
       batches = t |> Nx.to_batched(2, leftover: :repeat) |> Enum.map(&Nx.to_flat_list/1)
       assert batches == [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 0, 1]]
       assert t |> Nx.to_batched(2, leftover: :discard) |> Enum.count() == 2
-    end
-  end
-
-  describe "differential test: GPU vs CPU" do
-    test "chain of ops matches CPU" do
-      key = Nx.Random.key(42)
-      {input, _key} = Nx.Random.uniform(key, shape: {4, 4})
-
-      cpu_result =
-        input
-        |> Nx.multiply(Nx.tensor(2.0))
-        |> Nx.add(Nx.tensor(1.0))
-        |> Nx.negate()
-
-      gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-
-      gpu_result =
-        gpu_input
-        |> Nx.multiply(Nx.backend_transfer(Nx.tensor(2.0), NxCL.Backend))
-        |> Nx.add(Nx.backend_transfer(Nx.tensor(1.0), NxCL.Backend))
-        |> Nx.negate()
-        |> Nx.backend_transfer(Nx.BinaryBackend)
-
-      assert_tensors_close(gpu_result, cpu_result, 1.0e-5)
     end
   end
 

@@ -7,6 +7,8 @@ defmodule NxCL.TestSupport.Calls do
   tracer: do not nest `count/2` or use it inside `NxCL.TestSupport.Trace.run/1`.
   """
 
+  alias NxCL.TestSupport.Collector
+
   @doc "Runs `fun` and returns `{result, counts}` for `mfas`."
   @spec count([mfa()], (-> result)) :: {result, %{mfa() => non_neg_integer()}} when result: var
   def count(mfas, fun) do
@@ -16,47 +18,22 @@ defmodule NxCL.TestSupport.Calls do
       1 = :erlang.trace_pattern(mfa, true, [])
     end
 
-    tracer = spawn_link(fn -> collect(Map.new(mfas, &{&1, 0})) end)
-    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+    collector = Collector.start(Map.new(mfas, &{&1, 0}), &tally/2)
+    Collector.trace_self(collector)
 
     try do
       result = fun.()
-      {result, stop(tracer)}
+      {result, Collector.stop(collector)}
     after
-      :erlang.trace(self(), false, [:call])
+      Collector.discard(collector)
       for mfa <- mfas, do: :erlang.trace_pattern(mfa, false, [])
     end
   end
 
-  # A process does not trace itself: a second one collects the messages.
-  defp collect(counts) do
-    receive do
-      {:trace, _pid, :call, {mod, fun, args}} ->
-        collect(Map.update!(counts, {mod, fun, length(args)}, &(&1 + 1)))
+  defp tally({:trace, _pid, :call, {mod, fun, args}}, counts),
+    do: Map.update!(counts, {mod, fun, length(args)}, &(&1 + 1))
 
-      {:done, from, ref} ->
-        send(from, {ref, counts})
-    end
-  end
-
-  defp stop(tracer) do
-    :erlang.trace(self(), false, [:call])
-    # Wait until the VM has handed every trace message to the collector.
-    delivered = :erlang.trace_delivered(self())
-
-    receive do
-      {:trace_delivered, _pid, ^delivered} -> :ok
-    after
-      5000 -> raise "trace messages were not delivered"
-    end
-
-    ref = make_ref()
-    send(tracer, {:done, self(), ref})
-
-    receive do
-      {^ref, counts} -> counts
-    after
-      5000 -> raise "trace collector did not answer"
-    end
-  end
+  # Patterns that other tracers set for the whole VM can fire as well (they send the
+  # caller too); only the functions asked for count.
+  defp tally(_message, counts), do: counts
 end

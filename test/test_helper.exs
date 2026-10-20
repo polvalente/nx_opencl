@@ -6,4 +6,4 @@ skipped =
 
 for {_filter, cap} <- skipped, do: IO.puts(NxCL.TestSupport.Device.skip_reason(cap))
 
-ExUnit.start(exclude: [:skip] ++ Enum.map(skipped, &elem(&1, 0)))
+ExUnit.start(exclude: Enum.map(skipped, &elem(&1, 0)))

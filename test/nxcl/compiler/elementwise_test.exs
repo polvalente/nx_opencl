@@ -23,8 +23,8 @@ defmodule NxCL.ElementwiseTest do
 
   # Tolerances for a result the reference gets wrong or only roughly right. An
   # entry needs a note on why. `BinaryBackend` computes `erf_inv` of an `f64` to
-  # single precision (about 6e-8 off); the "erf_inv f64 inverts erf" row checks
-  # our value against `erf` at full precision.
+  # single precision (about 6e-8 off, so 1e-6 leaves a margin of about 16); the
+  # "erf_inv f64 inverts erf" row checks our value against `erf` at full precision.
   @tolerances %{{:erf_inv, {:f, 64}} => [rtol: 1.0e-6, atol: 1.0e-6]}
 
   defp tol(op, type), do: Map.get(@tolerances, {op, type}, [])

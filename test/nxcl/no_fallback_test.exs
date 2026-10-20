@@ -139,7 +139,13 @@ defmodule NxCL.NoFallbackTest do
       assert_raise NoFallback.Fallback, fn -> NoFallback.guard(fn -> Nx.iota({3}) end) end
       a = Nx.tensor([1.0], backend: Nx.BinaryBackend)
       assert {_, %{binary: [{:add, 3, _}]}} = NoFallback.trace(fn -> Nx.add(a, a) end)
-      assert Process.get({NoFallback, :collector}) == nil
+    end
+
+    test "trace leaves no trace on the process after a raise" do
+      assert_raise RuntimeError, fn -> NoFallback.trace(fn -> raise "boom" end) end
+
+      assert {:flags, []} = :erlang.trace_info(self(), :flags)
+      assert {:tracer, []} = :erlang.trace_info(self(), :tracer)
     end
   end
 

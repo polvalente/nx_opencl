@@ -77,17 +77,6 @@ defmodule NxCL.GemmWireTest do
   end
 
   describe "K == 0 and zero-size products" do
-    test "K == 0 gives zeros" do
-      ctx = Native.device_ctx_create(0)
-      {:ok, program} = Native.compile_program(ctx, gemm_wire(2, 3, 4, 0))
-
-      {:ok, [out]} =
-        Native.eval_program(program, [Native.buffer_create(ctx, 0), Native.buffer_create(ctx, 0)])
-
-      assert out |> Native.buffer_read(2 * 3 * 4 * 4) |> Nx.from_binary(@f32) |> Nx.to_flat_list() ==
-               List.duplicate(0.0, 24)
-    end
-
     test "K == 0 gives zeros for every dtype" do
       ctx = Native.device_ctx_create(0)
 
@@ -108,7 +97,11 @@ defmodule NxCL.GemmWireTest do
       for {b, m, n, k} <- [{1, 0, 4, 3}, {1, 4, 0, 3}, {0, 4, 4, 3}] do
         {:ok, program} = Native.compile_program(ctx, gemm_wire(b, m, n, k))
         empty = Native.buffer_create(ctx, 0)
-        {:ok, [_out]} = Native.eval_program(program, [empty, empty])
+        {:ok, [out]} = Native.eval_program(program, [empty, empty])
+
+        # A read clamps to the buffer size, so an empty result for 16 bytes asked
+        # means the buffer holds none.
+        assert Native.buffer_read(out, 16) == <<>>, inspect({b, m, n, k})
       end
     end
 

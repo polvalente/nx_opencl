@@ -152,7 +152,7 @@ defmodule NxCL.ShapeOpsTest do
     end
 
     defp floats(buf, n),
-      do: buf |> Native.buffer_read(n * 4) |> NxCL.TestHelpers.binary_to_floats()
+      do: for(<<f::float-32-native <- Native.buffer_read(buf, n * 4)>>, do: f)
 
     test "an empty output reads back as empty", %{ctx: ctx} do
       empty = Native.buffer_write(ctx, <<>>)
@@ -181,7 +181,7 @@ defmodule NxCL.ShapeOpsTest do
 
     test "an empty input beside a non-empty output still fills", %{ctx: ctx} do
       empty = Native.buffer_write(ctx, <<>>)
-      full = Native.buffer_write(ctx, NxCL.TestHelpers.floats_to_binary([1.0, 2.0]))
+      full = Native.buffer_write(ctx, Nx.to_binary(Nx.tensor([1.0, 2.0], type: :f32)))
 
       out =
         exec(

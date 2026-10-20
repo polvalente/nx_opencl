@@ -8,32 +8,20 @@ defmodule NxCL.TestSupport.Factors do
     * `qr`: `Q R == A`, `Q^H Q == I`, `R` upper triangular.
     * `eigh`: `A V == V diag(w)`, `V^H V == I`, `w` equal (sorted) to the `w` of
       the same function on the input widened to `f64` or `c128`.
-    * `svd`: `U diag(S) V^H == A`, `U` and `V` orthonormal, `S` equal (sorted) to
-      the `S` on the widened input.
-    * `lu`: `P L U == A`, `L` unit lower triangular, `U` upper triangular.
+    * `svd`: `U diag(S) V^H == A`, `U` and `V` orthonormal, `S` in descending
+      order and equal (sorted) to the `S` on the widened input.
+    * `lu`: `P L U == A`, `P` a permutation matrix (entries 0 or 1, `P^T P == I`),
+      `L` unit lower triangular, `U` upper triangular.
 
   Every result must also have the reference's types and shapes. Each check
   measures the largest absolute error of one identity (the residual).
 
     * `f32`, `f64`, `c64`, `c128`: the tolerance is the one in
       `NxCL.TestSupport.Compare`, scaled by `max(1, max |A|)`. The device
-      residual may exceed the reference residual by at most that. The default
-      `svd` stops at a loose tolerance, so even `Nx.BinaryBackend` misses
-      `U S V^H == A` by 2e-4 in `f32`.
+      residual may exceed the reference residual by at most that.
     * `f16`, `bf16`: the tolerance is `8 * eps * max(m, n) * max(1, max |A|)` and
-      ignores the reference residual. A half type rounds at every step, so the
-      reference residual is large and random (a `bf16` `R` of a 5-column input has
-      entries of 0.3 below the diagonal), and a tolerance tied to it fails at some
-      seeds. The factor 8 is about twice the largest residual over 400 seeds of
-      each kind on 3 x 3 to 4 x 5 `bf16` inputs.
-
-  The default `svd` stops at a tolerance of `1.19e-7` for every type, so
-  `U S V^H == A` is off by up to about `1.4e-4 * max |A|` in `f32` and `f64` (over
-  1600 `f32` and 400 `f64` cases), also on the reference. In `f64` the device and
-  the reference take the same steps. In `f32` they round differently and take
-  different steps: the reference can sit at 5e-6 where the device sits at 6e-4
-  (seed 77310, a 4 x 3 input). So for `f32` that identity also passes below
-  `4e-4 * max |A|`, about three times the largest residual seen.
+      ignores the reference residual: a half type rounds at every step, so the
+      reference residual is large and random.
 
   The reference truncates a half type and the device rounds to nearest, so `w`
   and `S` are measured against the widened input's, not the reference's. A check
@@ -47,7 +35,19 @@ defmodule NxCL.TestSupport.Factors do
   @tol %{{:f, 64} => 1.0e-12, {:f, 32} => 1.0e-5}
 
   @half_epsilon %{{:f, 16} => :math.pow(2, -10), {:bf, 16} => :math.pow(2, -7)}
+
+  # The factor 8 is about twice the largest residual over 400 seeds of each kind on
+  # 3 x 3 to 4 x 5 `bf16` inputs. A `bf16` `R` of a 5-column input has entries of 0.3
+  # below the diagonal, so a tolerance tied to the reference residual fails at some seeds.
   @half_factor 8
+
+  # The default `svd` stops at a tolerance of `1.19e-7` for every type, so `U S V^H == A`
+  # is off by up to about `1.4e-4 * max |A|` in `f32` and `f64` (over 1600 `f32` and
+  # 400 `f64` cases), also on the reference: `Nx.BinaryBackend` misses it by 2e-4 in
+  # `f32`. In `f64` the device and the reference take the same steps. In `f32` they
+  # round differently and take different steps: the reference can sit at 5e-6 where the
+  # device sits at 6e-4 (seed 77310, a 4 x 3 input). So for `f32` that identity also
+  # passes below `4e-4 * max |A|`, about three times the largest residual seen.
   @svd_f32_floor 4.0e-4
 
   @type kind :: :qr | :eigh | :svd | :lu
@@ -131,13 +131,16 @@ defmodule NxCL.TestSupport.Factors do
       {"U S V^H == A", err(mm(Nx.multiply(uk, Nx.new_axis(s, -2)), vk), a)},
       {"U^H U == I", err(mm(ct(u), u), identity(u, cols(u)))},
       {"V^H V == I", err(mm(vt, ct(vt)), identity(vt, cols(vt)))},
-      {"S == S of the widened input", err(Nx.sort(s, axis: -1), Nx.sort(ts, axis: -1))}
+      {"S == S of the widened input", err(Nx.sort(s, axis: -1), Nx.sort(ts, axis: -1))},
+      {"S descending", ascent(s)}
     ]
   end
 
   defp residuals(:lu, a, [p, l, u], _truth) do
     [
       {"P L U == A", err(mm(mm(p, l), u), a)},
+      {"P entries are 0 or 1", err(Nx.multiply(p, Nx.subtract(p, 1)), zeros(p))},
+      {"P^T P == I", err(mm(ct(p), p), identity(p, cols(p)))},
       {"L unit lower triangular",
        err(Nx.multiply(l, above_or_on_diagonal(l)), identity(l, cols(l)))},
       {"U upper triangular", err(Nx.multiply(u, below_diagonal(u)), zeros(u))}
@@ -146,6 +149,22 @@ defmodule NxCL.TestSupport.Factors do
 
   defp err(actual, expected),
     do: actual |> Nx.subtract(expected) |> Nx.abs() |> Nx.reduce_max() |> scalar()
+
+  # The largest step up between neighbors of `s`: 0 when `s` is in descending order.
+  defp ascent(s) do
+    k = Nx.axis_size(s, -1)
+
+    if k < 2 do
+      0.0
+    else
+      s
+      |> Nx.slice_along_axis(1, k - 1, axis: -1)
+      |> Nx.subtract(Nx.slice_along_axis(s, 0, k - 1, axis: -1))
+      |> Nx.max(0)
+      |> Nx.reduce_max()
+      |> scalar()
+    end
+  end
 
   defp scalar(t), do: t |> Nx.real() |> Nx.to_number()
 

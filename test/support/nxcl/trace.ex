@@ -14,22 +14,19 @@ defmodule NxCL.TestSupport.Trace do
     * `:host_calls` - calls of `NxCL.Compiler.Executor.Host.run/3` that run a
       function (an `:io_call` with no function runs nothing).
     * `:callback_inputs`, `:callback_input_bytes` - the tensors a callback takes
-      (one per leaf of `in_template`) and their bytes.
+      (one per leaf of `in_template`) and their bytes. Counted from the entry's
+      templates, not from observed reads.
     * `:callback_outputs` - the tensors a `:runtime_call` returns (one per leaf of
       its output template).
 
-  The three callback counts come from the host-call entry, not from observed
-  reads and uploads. Tracing `NxCL.Native.buffer_read/2` fails next to
-  `NxCL.TestSupport.NoFallback`: its pattern on `Host.read/2` silences the
-  traced process.
-
-  `run/1` raises if a trace pattern matches no function, so a rename of a traced
-  private function fails the test instead of leaving a count at zero. A test that
-  expects zero should also assert a count that must be above zero (for example
-  `scope_runs`). The executor must run in the caller, and the test must be
-  `async: false`. Do not nest `run/1` or use it inside
-  `NxCL.TestSupport.NoFallback.trace/1`: a process has one tracer.
+  `run/1` raises if a trace pattern matches no function, so a renamed executor
+  function fails the test and does not leave a count at zero. A test that expects
+  zero should also assert a count that must be above zero (such as `scope_runs`).
+  The executor must run in the caller, and the test must be `async: false`. Do not
+  nest `run/1` or use it inside `NxCL.TestSupport.NoFallback.trace/1`.
   """
+
+  alias NxCL.TestSupport.Collector
 
   @empty %{
     predicate_reads: 0,
@@ -45,42 +42,14 @@ defmodule NxCL.TestSupport.Trace do
   @spec run((-> result)) :: {result, %{atom() => non_neg_integer()}} when result: var
   def run(fun) do
     install_patterns()
-    tracer = spawn(fn -> collect([]) end)
-    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+    collector = Collector.start(@empty, &count(&2, &1))
+    Collector.trace_self(collector)
 
     try do
       result = fun.()
-      {result, stop(tracer)}
+      {result, Collector.stop(collector)}
     after
-      :erlang.trace(self(), false, [:call])
-    end
-  end
-
-  # A process does not trace itself, so a second process collects the messages.
-  defp collect(messages) do
-    receive do
-      {:trace, _pid, :call, {mod, _fun, _args}, _caller} = message
-      when mod in [NxCL.Compiler.Executor, NxCL.Compiler.Executor.Host] ->
-        collect([message | messages])
-
-      # Other patterns (`NxCL.TestSupport.NoFallback` sets some) can fire; skip them.
-      {:trace, _pid, _kind, _mfa, _caller} ->
-        collect(messages)
-
-      {:done, from, ref} ->
-        send(from, {ref, Enum.reverse(messages)})
-    end
-  end
-
-  defp stop(tracer) do
-    :erlang.trace(self(), false, [:call])
-    ref = make_ref()
-    send(tracer, {:done, self(), ref})
-
-    receive do
-      {^ref, messages} -> Enum.reduce(messages, @empty, &count(&2, &1))
-    after
-      5000 -> raise "trace collector did not answer"
+      Collector.discard(collector)
     end
   end
 

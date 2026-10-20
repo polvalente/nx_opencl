@@ -20,9 +20,9 @@ defmodule NxCL.NativeRuntimeTest do
   """
 
   defp upload(ctx, floats),
-    do: Native.buffer_write(ctx, NxCL.TestHelpers.floats_to_binary(floats))
+    do: Native.buffer_write(ctx, Nx.to_binary(Nx.tensor(floats, type: :f32)))
 
-  defp read(buf, n), do: buf |> Native.buffer_read(n * 4) |> NxCL.TestHelpers.binary_to_floats()
+  defp read(buf, n), do: for(<<f::float-32-native <- Native.buffer_read(buf, n * 4)>>, do: f)
 
   # `shape` is the shape of every input; the tests use f32 vectors.
   defp wire(instrs, outputs, n_inputs \\ 1, shape \\ {3}),

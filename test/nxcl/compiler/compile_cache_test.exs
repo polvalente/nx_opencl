@@ -304,6 +304,23 @@ defmodule NxCL.Compiler.CompileCacheTest do
       assert %{key: {nil, 0}} = Devices.for_ctx(new_ctx)
       assert Nx.to_flat_list(jit(fn x -> Nx.negate(x) end).(Nx.tensor([1.0]))) == [-1.0]
     end
+
+    test "an eager op on a tensor made before the crash names the cause" do
+      old = Nx.tensor([1.0, 2.0], backend: NxCL.Backend)
+      pids = for mod <- [Devices, ProgramCache, CompileCache], do: Process.whereis(mod)
+      ref = Process.monitor(hd(pids))
+      Process.exit(hd(pids), :kill)
+      assert_receive {:DOWN, ^ref, :process, _pid, :killed}
+
+      TestSupport.wait_until(fn ->
+        new = for mod <- [Devices, ProgramCache, CompileCache], do: Process.whereis(mod)
+        Enum.all?(new, &is_pid/1) and Enum.zip(pids, new) |> Enum.all?(fn {a, b} -> a != b end)
+      end)
+
+      assert_raise ArgumentError, ~r/context that NxCL.Devices does not know/, fn ->
+        Nx.negate(old)
+      end
+    end
   end
 
   describe "partitions" do
@@ -353,9 +370,13 @@ defmodule NxCL.Compiler.CompileCacheTest do
         end)
       end
 
+      # A 64-term `f32` sum is off by a few ulps of the result, so the tolerance is
+      # relative (the entries reach 3e4).
+      tol = TestSupport.Compare.default_tolerance({:f, 32})
+
       for results <- Task.await_many([run.(one), run.(two)], 60_000),
           result <- results do
-        assert Nx.all_close(result, expected, atol: 1.0e-3) |> Nx.to_number() == 1
+        assert Nx.all_close(result, expected, rtol: tol, atol: tol) |> Nx.to_number() == 1
       end
     end
   end
@@ -384,11 +405,11 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
       Task.await(evictor, 60_000)
 
+      # The entries reach 500; a 64-term `f32` sum is off by a few ulps of the result.
+      tol = TestSupport.Compare.default_tolerance({:f, 32})
+
       for result <- Task.await(runner, 60_000),
-          do:
-            assert(
-              Nx.all_close(result, expected, rtol: 1.0e-4, atol: 1.0e-4) |> Nx.to_number() == 1
-            )
+          do: assert(Nx.all_close(result, expected, rtol: tol, atol: tol) |> Nx.to_number() == 1)
     end
   end
 

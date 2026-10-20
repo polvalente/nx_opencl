@@ -8,6 +8,7 @@ defmodule NxCL.LazyOutputsTest do
   use ExUnit.Case, async: false
 
   alias NxCL.Devices
+  alias NxCL.TestSupport.Compare
 
   @moduletag :opencl
 
@@ -15,12 +16,8 @@ defmodule NxCL.LazyOutputsTest do
 
   defp input(n), do: Nx.iota({n}, type: :f32) |> Nx.divide(n)
 
-  test "a read right after a compiled run gives the right values" do
-    x = input(100_000)
-    expected = Nx.Defn.jit(&heavy/1, compiler: Nx.Defn.Evaluator).(x)
-    got = Nx.Defn.jit(&heavy/1, compiler: NxCL.Compiler).(x)
-
-    assert Nx.all_close(got, expected, atol: 1.0e-5) |> Nx.to_number() == 1
+  test "a compiled run reads back the values the evaluator gives" do
+    Compare.assert_same(&heavy/1, [input(100_000)])
   end
 
   test "a run on another queue reads the right values from a default-queue run" do
@@ -31,10 +28,10 @@ defmodule NxCL.LazyOutputsTest do
     for _ <- 1..20 do
       queued = x |> Nx.backend_copy(NxCL.Backend) |> heavy()
 
-      got =
-        Nx.Defn.jit(&Nx.add(&1, 1), compiler: NxCL.Compiler, command_queue: queue).(queued)
-
-      assert Nx.all_close(got, expected, atol: 1.0e-5) |> Nx.to_number() == 1
+      Compare.assert_expected(&Nx.add(&1, 1), [queued], expected,
+        compiler_opts: [command_queue: queue],
+        backend: false
+      )
     end
   end
 

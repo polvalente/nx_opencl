@@ -98,15 +98,4 @@ defmodule NxCL.DoctestSkips do
 
     always ++ gated
   end
-
-  @doc "Every entry as `{module, {name, arity}, requires, reason}`; `requires` is `nil` for a skip on every device."
-  @spec all() :: [{module(), {atom(), non_neg_integer()}, atom() | nil, String.t()}]
-  def all do
-    always = for {mod, entries} <- @skips, {fun, reason} <- entries, do: {mod, fun, nil, reason}
-
-    gated =
-      for {mod, entries} <- @needs, {cap, fun, reason} <- entries, do: {mod, fun, cap, reason}
-
-    always ++ gated
-  end
 end

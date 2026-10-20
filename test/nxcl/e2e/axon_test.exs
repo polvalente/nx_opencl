@@ -1,11 +1,16 @@
 defmodule NxCL.E2E.AxonTest do
   @moduledoc """
-  Axon models through the backend: dense, ReLU, sigmoid and softmax layers.
+  Axon models through the backend: dense, ReLU, sigmoid, tanh and softmax layers.
+  Each GPU-vs-CPU row compares the compiler and the eager backend with the
+  evaluator on `Nx.BinaryBackend`, at the `f32` tolerance of a forward pass in
+  `NxCL.E2E.ModelsTest`.
   """
   use ExUnit.Case, async: false
-  import NxCL.TestHelpers
+  import NxCL.TestSupport.Compare, only: [assert_same: 3]
 
   @moduletag :opencl
+
+  @forward [rtol: 1.0e-4, atol: 1.0e-4]
 
   defp transfer_params(%Axon.ModelState{} = model_state, backend) do
     new_data =
@@ -43,13 +48,7 @@ defmodule NxCL.E2E.AxonTest do
       key = Nx.Random.key(42)
       {input, _key} = Nx.Random.uniform(key, shape: {1, 4}, type: :f32)
 
-      cpu_result = predict_fn.(params, input)
-
-      gpu_params = transfer_params(params, NxCL.Backend)
-      gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-      gpu_result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-      assert_tensors_close(gpu_result, cpu_result, 1.0e-3)
+      assert_same(predict_fn, [params, input], @forward)
     end
 
     test "softmax output sums to ~1.0", %{predict_fn: predict_fn, params: params} do
@@ -61,7 +60,8 @@ defmodule NxCL.E2E.AxonTest do
       result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
 
       sum = result |> Nx.sum() |> Nx.to_number()
-      assert_in_delta sum, 1.0, 1.0e-3
+      # A handful of `f32` values that sum to 1 hold a few ulps of error (1e-7 each).
+      assert_in_delta sum, 1.0, 1.0e-5
     end
 
     test "all probabilities are non-negative", %{predict_fn: predict_fn, params: params} do
@@ -80,13 +80,7 @@ defmodule NxCL.E2E.AxonTest do
       key = Nx.Random.key(99)
       {input, _key} = Nx.Random.uniform(key, shape: {8, 4}, type: :f32)
 
-      cpu_result = predict_fn.(params, input)
-
-      gpu_params = transfer_params(params, NxCL.Backend)
-      gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-      gpu_result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-      assert_tensors_close(gpu_result, cpu_result, 1.0e-3)
+      assert_same(predict_fn, [params, input], @forward)
     end
 
     test "deterministic across runs", %{predict_fn: predict_fn, params: params} do
@@ -127,13 +121,7 @@ defmodule NxCL.E2E.AxonTest do
       key = Nx.Random.key(42)
       {input, _key} = Nx.Random.uniform(key, shape: {1, 8}, type: :f32)
 
-      cpu_result = predict_fn.(params, input)
-
-      gpu_params = transfer_params(params, NxCL.Backend)
-      gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-      gpu_result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-      assert_tensors_close(gpu_result, cpu_result, 1.0e-3)
+      assert_same(predict_fn, [params, input], @forward)
     end
 
     test "output is in [0, 1] range", %{predict_fn: predict_fn, params: params} do
@@ -170,13 +158,7 @@ defmodule NxCL.E2E.AxonTest do
       key = Nx.Random.key(42)
       {input, _key} = Nx.Random.uniform(key, shape: {1, 4}, type: :f32)
 
-      cpu_result = predict_fn.(params, input)
-
-      gpu_params = transfer_params(params, NxCL.Backend)
-      gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-      gpu_result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-      assert_tensors_close(gpu_result, cpu_result, 1.0e-3)
+      assert_same(predict_fn, [params, input], @forward)
     end
   end
 
@@ -201,13 +183,7 @@ defmodule NxCL.E2E.AxonTest do
       key = Nx.Random.key(42)
       {input, _key} = Nx.Random.uniform(key, shape: {1, 16}, type: :f32)
 
-      cpu_result = predict_fn.(params, input)
-
-      gpu_params = transfer_params(params, NxCL.Backend)
-      gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-      gpu_result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-      assert_tensors_close(gpu_result, cpu_result, 1.0e-2)
+      assert_same(predict_fn, [params, input], @forward)
     end
 
     test "softmax sums to 1.0 on 5-layer network", %{predict_fn: predict_fn, params: params} do
@@ -219,7 +195,8 @@ defmodule NxCL.E2E.AxonTest do
       result = predict_fn.(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
 
       sum = result |> Nx.sum() |> Nx.to_number()
-      assert_in_delta sum, 1.0, 1.0e-2
+      # A handful of `f32` values that sum to 1 hold a few ulps of error (1e-7 each).
+      assert_in_delta sum, 1.0, 1.0e-5
     end
   end
 end

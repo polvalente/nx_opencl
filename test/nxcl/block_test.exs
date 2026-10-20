@@ -97,6 +97,8 @@ defmodule NxCL.BlockTest do
     end
   end
 
+  # The table below is the expected set. A struct that should be `:native` but has no
+  # table entry decides `:default`, drops out of the decided set, and fails the equality.
   test "a native block lowers to its own instruction" do
     native = %{
       Nx.Block.LogicalNot => :logical_not,

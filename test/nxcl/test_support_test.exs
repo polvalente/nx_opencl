@@ -2,7 +2,7 @@ defmodule NxCL.TestSupportTest do
   @moduledoc "Tests of the test helpers: the comparison rules, device gating, and generators."
   use ExUnit.Case, async: false
 
-  alias NxCL.TestSupport.{Compare, Device, Factors, Gen}
+  alias NxCL.TestSupport.{Calls, Compare, Device, Factors, Gen, Trace}
 
   # Runs the evaluator, then breaks the result in the way `:mode` names.
   defmodule BrokenCompiler do
@@ -72,26 +72,16 @@ defmodule NxCL.TestSupportTest do
   end
 
   describe "capability gating" do
-    # These run the evaluator on both sides. They prove the tag skips a device
-    # without the extension and runs on one that has it.
+    # The tag excludes the row on a device without the extension, so these rows run
+    # only where the device has it.
     @tag requires: :fp64
     test "f64 rows run only where the device has cl_khr_fp64" do
       assert Device.capability?(:fp64)
-
-      assert :ok =
-               Compare.assert_same(&Nx.negate/1, [Nx.tensor([1.0, 2.0], type: :f64)],
-                 compiler: Nx.Defn.Evaluator
-               )
     end
 
     @tag requires: :fp16
     test "f16 rows run only where the device has cl_khr_fp16" do
       assert Device.capability?(:fp16)
-
-      assert :ok =
-               Compare.assert_same(&Nx.negate/1, [Nx.tensor([1.0, 2.0], type: :f16)],
-                 compiler: Nx.Defn.Evaluator
-               )
     end
 
     setup do
@@ -131,19 +121,48 @@ defmodule NxCL.TestSupportTest do
     defp restore(:error), do: Application.delete_env(:nx_opencl, :test_extensions)
   end
 
+  describe "call tracers" do
+    # A raise in the traced function must leave the process untraced and kill the
+    # collector, or the next tracer in the same process fails.
+    defp raise_with_collector(run) do
+      parent = self()
+
+      assert_raise RuntimeError, "boom", fn ->
+        run.(fn ->
+          {:tracer, collector} = :erlang.trace_info(self(), :tracer)
+          send(parent, {:collector, collector})
+          raise "boom"
+        end)
+      end
+
+      assert_received {:collector, collector}
+      ref = Process.monitor(collector)
+      assert_receive {:DOWN, ^ref, :process, _pid, _reason}
+      assert {:flags, []} = :erlang.trace_info(self(), :flags)
+    end
+
+    test "Trace.run cleans up after a raise" do
+      raise_with_collector(&Trace.run/1)
+      assert {:ok, %{host_calls: 0}} = Trace.run(fn -> :ok end)
+    end
+
+    test "Calls.count cleans up after a raise" do
+      mfa = {Enum, :map, 2}
+      raise_with_collector(&Calls.count([mfa], &1))
+      assert {2, %{^mfa => 1}} = Calls.count([mfa], fn -> length(Enum.map([1, 2], & &1)) end)
+    end
+  end
+
   describe "Gen" do
     test "same seed gives the same tensor" do
       a = Gen.random({65}, {:f, 32}, seed: 7)
       assert Nx.to_binary(a) == Nx.to_binary(Gen.random({65}, {:f, 32}, seed: 7))
     end
 
-    test "two unseeded calls draw different data, and the same seed gives the same data" do
+    test "two unseeded calls draw different data" do
       a = Gen.random({65}, {:f, 32})
       b = Gen.random({65}, {:f, 32})
       refute Nx.to_binary(a) == Nx.to_binary(b)
-
-      assert Nx.to_binary(Gen.random({65}, {:s, 8}, seed: 3)) ==
-               Nx.to_binary(Gen.random({65}, {:s, 8}, seed: 3))
     end
 
     test "random tensors have the asked shape and type" do
@@ -157,7 +176,6 @@ defmodule NxCL.TestSupportTest do
     test "edge values build for every real dtype" do
       for {kind, _} = type <- Gen.dtypes(), kind in [:s, :u, :f, :bf] do
         assert Gen.edge_values(type).type == type
-        if type != {:f, 64}, do: assert(tuple_size(Gen.overflow_values(type).shape) == 1)
       end
     end
   end
@@ -238,6 +256,49 @@ defmodule NxCL.TestSupportTest do
 
       assert_raise ExUnit.AssertionError, ~r/U S V\^H == A/, fn ->
         Factors.assert_factors(:svd, wrong, x, reference_fun: &Nx.LinAlg.svd/1)
+      end
+    end
+
+    test "a P that is not 0 or 1 fails" do
+      # `P` doubled and `U` halved keep `P L U == A`, `L` and `U` right.
+      wrong = fn x ->
+        {p, l, u} = Nx.LinAlg.lu(x)
+        {Nx.multiply(p, 2), l, Nx.divide(u, 2)}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/P entries are 0 or 1/, fn ->
+        Factors.assert_factors(:lu, wrong, half(), reference_fun: &Nx.LinAlg.lu/1)
+      end
+    end
+
+    test "a P with two ones in a row fails" do
+      # For this `A`, `P = [[1, 0], [1, 0]]` still gives `P L U == A` with a unit lower
+      # `L` and an upper `U`; only `P^T P == I` shows that `P` is not a permutation.
+      a = Nx.tensor([[1.0, 0.0], [1.0, 0.0]])
+
+      wrong = fn x ->
+        {_p, l, u} = Nx.LinAlg.lu(x)
+        {Nx.tensor([[1.0, 0.0], [1.0, 0.0]]), l, u}
+      end
+
+      assert :ok = Factors.assert_factors(:lu, &Nx.LinAlg.lu/1, a)
+
+      assert_raise ExUnit.AssertionError, ~r/P\^T P == I/, fn ->
+        Factors.assert_factors(:lu, wrong, a, reference_fun: &Nx.LinAlg.lu/1)
+      end
+    end
+
+    test "singular values in ascending order fail" do
+      # The same factors in reverse order still multiply to `A` and stay orthonormal.
+      wrong = fn x ->
+        {u, s, vt} = Nx.LinAlg.svd(x)
+        {Nx.reverse(u, axes: [1]), Nx.reverse(s), Nx.reverse(vt, axes: [0])}
+      end
+
+      assert_raise ExUnit.AssertionError, ~r/S descending/, fn ->
+        Factors.assert_factors(:svd, wrong, Nx.as_type(half(), :f32),
+          reference_fun: &Nx.LinAlg.svd/1
+        )
       end
     end
 

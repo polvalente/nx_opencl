@@ -17,8 +17,7 @@ defmodule NxCL.TestSupport.Compare do
     {:f, 64} => 1.0e-12,
     {:f, 32} => 1.0e-5,
     {:f, 16} => 1.0e-2,
-    {:bf, 16} => 1.0e-2,
-    {:f, 8} => 1.0e-1
+    {:bf, 16} => 1.0e-2
   }
 
   @doc "The default absolute and relative tolerance for `type` (a complex type uses that of its parts)."
@@ -80,6 +79,22 @@ defmodule NxCL.TestSupport.Compare do
         reraise %{e | message: e.message <> "\npath: backend\nseed: #{seed()}"},
                 __STACKTRACE__
     end
+
+    :ok
+  end
+
+  @doc """
+  Asserts that every element of `actual` is within `atol` of `expected` (absolute
+  only, no relative part). For a row that has no function to run twice; the tensors
+  may live on any backend.
+  """
+  @spec assert_close(Nx.Tensor.t(), Nx.Tensor.t(), number()) :: :ok
+  def assert_close(actual, expected, atol \\ 1.0e-5) do
+    a = Nx.backend_copy(actual, Nx.BinaryBackend)
+    e = Nx.backend_copy(expected, Nx.BinaryBackend)
+
+    assert Nx.all_close(a, e, atol: atol, rtol: 0.0) |> Nx.to_number() == 1,
+           "tensors differ by more than #{atol}\n  expected #{inspect(e)}\n  actual   #{inspect(a)}"
 
     :ok
   end

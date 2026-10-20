@@ -313,7 +313,7 @@ defmodule NxCL.IndexingTest do
 
     test "a gather with no indices reads back as empty", %{ctx: ctx} do
       empty = Native.buffer_write(ctx, <<>>)
-      table = Native.buffer_write(ctx, NxCL.TestHelpers.floats_to_binary([1.0, 2.0, 3.0]))
+      table = Native.buffer_write(ctx, Nx.to_binary(Nx.tensor([1.0, 2.0, 3.0], type: :f32)))
       s32 = {:s, 32}
 
       wire =
@@ -330,14 +330,14 @@ defmodule NxCL.IndexingTest do
       s32 = {:s, 32}
 
       for op <- [:indexed_add, :indexed_put] do
-        target = Native.buffer_write(ctx, NxCL.TestHelpers.floats_to_binary(values))
+        target = Native.buffer_write(ctx, Nx.to_binary(Nx.tensor(values, type: :f32)))
 
         wire =
           {[{@f32, {3}}, {s32, {0, 1}}, {@f32, {0}}], [], [],
            [{op, [{:input, 0}, {:input, 1}, {:input, 2}], @f32, {3}, [0]}], [{:result, 0}]}
 
         out = exec(ctx, wire, [target, empty, empty])
-        assert out |> Native.buffer_read(12) |> NxCL.TestHelpers.binary_to_floats() == values
+        assert for(<<f::float-32-native <- Native.buffer_read(out, 12)>>, do: f) == values
       end
     end
   end

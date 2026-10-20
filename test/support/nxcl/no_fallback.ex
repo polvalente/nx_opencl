@@ -27,7 +27,9 @@ defmodule NxCL.TestSupport.NoFallback do
     defexception [:message]
   end
 
-  @collector {__MODULE__, :collector}
+  alias NxCL.TestSupport.Collector
+
+  @installed {__MODULE__, :installed}
 
   # Callbacks that move data or change a shape.
   @data [
@@ -81,7 +83,7 @@ defmodule NxCL.TestSupport.NoFallback do
       {result, end_trace(collector)}
     after
       # A raise in `fun` leaves the trace on; stop it and the collector.
-      if Process.get(@collector), do: end_trace(collector)
+      Collector.discard(collector)
     end
   end
 
@@ -97,17 +99,20 @@ defmodule NxCL.TestSupport.NoFallback do
   def begin_trace do
     Code.ensure_loaded!(Nx.BinaryBackend)
     install_patterns()
-    collector = spawn(fn -> collect(%{binary: MapSet.new(), host_calls: 0}) end)
+
+    collector =
+      Collector.start(%{binary: MapSet.new(), host_calls: 0}, &collect/2, fn seen ->
+        %{seen | binary: Enum.sort(seen.binary)}
+      end)
 
     :erlang.trace(self(), false, [:silent])
-    :erlang.trace(self(), true, [:call, {:tracer, collector}])
-    Process.put(@collector, collector)
+    Collector.trace_self(collector)
     collector
   end
 
   # Trace patterns are global and slow to set: once per VM.
   defp install_patterns do
-    if :persistent_term.get(@collector, nil) == nil do
+    if :persistent_term.get(@installed, nil) == nil do
       Code.ensure_loaded!(NxCL.Compiler.Executor)
       Code.ensure_loaded!(NxCL.Compiler.Executor.Host)
       :erlang.system_flag(:backtrace_depth, 100)
@@ -145,7 +150,7 @@ defmodule NxCL.TestSupport.NoFallback do
         [:local]
       )
 
-      :persistent_term.put(@collector, :installed)
+      :persistent_term.put(@installed, :installed)
     end
   end
 
@@ -154,46 +159,23 @@ defmodule NxCL.TestSupport.NoFallback do
   `begin_trace/0` (see `trace/1`).
   """
   @spec end_trace(pid(), pid()) :: %{binary: [tuple()], host_calls: non_neg_integer()}
-  def end_trace(collector, pid \\ self()) do
-    # A process that has exited has no trace left to stop.
-    try do
-      :erlang.trace(pid, false, [:call, :silent])
-    rescue
-      ArgumentError -> :ok
-    end
-
-    Process.delete(@collector)
-    ref = make_ref()
-    send(collector, {:done, self(), ref})
-
-    receive do
-      {^ref, calls} -> calls
-    after
-      5000 -> raise "trace collector did not answer"
-    end
-  end
+  def end_trace(collector, pid \\ self()), do: Collector.stop(collector, pid)
 
   defp ran_function?(%{kind: :io_call, fun: nil}), do: false
   defp ran_function?(_entry), do: true
 
-  defp collect(seen) do
-    receive do
-      {:trace, _pid, :call, {Nx.BinaryBackend, name, args}, caller} ->
-        collect(Map.update!(seen, :binary, &MapSet.put(&1, {name, length(args), caller})))
+  defp collect({:trace, _pid, :call, {Nx.BinaryBackend, name, args}, caller}, seen),
+    do: Map.update!(seen, :binary, &MapSet.put(&1, {name, length(args), caller}))
 
-      {:trace, _pid, :call, {NxCL.Compiler.Executor.Host, :run, [entry, _ctx, _buffers]}, _caller} ->
-        collect(
-          if ran_function?(entry), do: Map.update!(seen, :host_calls, &(&1 + 1)), else: seen
-        )
+  defp collect(
+         {:trace, _pid, :call, {NxCL.Compiler.Executor.Host, :run, [entry, _ctx, _buffers]},
+          _caller},
+         seen
+       ),
+       do: if(ran_function?(entry), do: Map.update!(seen, :host_calls, &(&1 + 1)), else: seen)
 
-      # `NxCL.TestSupport.Trace` sets patterns on other executor functions.
-      {:trace, _pid, :call, _mfa, _caller} ->
-        collect(seen)
-
-      {:done, from, ref} ->
-        send(from, {ref, %{seen | binary: Enum.sort(seen.binary)}})
-    end
-  end
+  # `NxCL.TestSupport.Trace` sets patterns on other executor functions.
+  defp collect(_message, seen), do: seen
 
   @impl true
   def init(opts), do: opts

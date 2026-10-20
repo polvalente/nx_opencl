@@ -688,7 +688,7 @@ defmodule NxCL.ComplexTest do
           :exp,
           type,
           [
-            {{inf, 1.0}, {inf, 1.682941969615793}} |> then(fn {z, _} -> {z, {inf, inf}} end),
+            {{inf, 1.0}, {inf, inf}},
             {{1.0, inf}, {nan, nan}},
             {{nan, 1.0}, {nan, nan}},
             {{:neg_infinity, 1.0}, {0.0, 0.0}}

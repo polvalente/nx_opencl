@@ -3,7 +3,7 @@ defmodule NxCL.E2E.LinAlgTest do
   QR and SVD in composition with other Nx ops.
   """
   use ExUnit.Case, async: false
-  import NxCL.TestHelpers
+  import NxCL.TestSupport.Compare, only: [assert_close: 3]
 
   @moduletag :opencl
 
@@ -18,7 +18,7 @@ defmodule NxCL.E2E.LinAlgTest do
       r_cpu = Nx.backend_transfer(r, Nx.BinaryBackend)
 
       reconstructed = Nx.dot(q_cpu, r_cpu)
-      assert_tensors_close(reconstructed, a, 1.0e-3)
+      assert_close(reconstructed, a, 1.0e-3)
     end
 
     test "Q is orthogonal (Q^T * Q ≈ I)" do
@@ -31,7 +31,7 @@ defmodule NxCL.E2E.LinAlgTest do
       qtq = Nx.dot(Nx.transpose(q_cpu), q_cpu)
       eye = Nx.eye(elem(Nx.shape(qtq), 0))
 
-      assert_tensors_close(qtq, eye, 1.0e-3)
+      assert_close(qtq, eye, 1.0e-3)
     end
 
     test "R is upper triangular" do
@@ -66,8 +66,8 @@ defmodule NxCL.E2E.LinAlgTest do
           Nx.backend_transfer(r_gpu, Nx.BinaryBackend)
         )
 
-      assert_tensors_close(cpu_reconstructed, a, 1.0e-3)
-      assert_tensors_close(gpu_reconstructed, a, 1.0e-3)
+      assert_close(cpu_reconstructed, a, 1.0e-3)
+      assert_close(gpu_reconstructed, a, 1.0e-3)
     end
 
     test "QR on square matrix" do
@@ -80,7 +80,7 @@ defmodule NxCL.E2E.LinAlgTest do
       r_cpu = Nx.backend_transfer(r, Nx.BinaryBackend)
 
       reconstructed = Nx.dot(q_cpu, r_cpu)
-      assert_tensors_close(reconstructed, a, 1.0e-2)
+      assert_close(reconstructed, a, 1.0e-2)
     end
   end
 
@@ -98,7 +98,7 @@ defmodule NxCL.E2E.LinAlgTest do
       s_diag = Nx.make_diagonal(s_cpu)
       reconstructed = u_cpu |> Nx.dot(s_diag) |> Nx.dot(vt_cpu)
 
-      assert_tensors_close(reconstructed, a, 1.0e-3)
+      assert_close(reconstructed, a, 1.0e-3)
     end
 
     test "singular values are non-negative and sorted descending" do
@@ -129,7 +129,7 @@ defmodule NxCL.E2E.LinAlgTest do
       n = elem(Nx.shape(utu), 0)
       eye = Nx.eye(n)
 
-      assert_tensors_close(utu, eye, 1.0e-2)
+      assert_close(utu, eye, 1.0e-2)
     end
 
     test "SVD matches CPU backend" do
@@ -149,8 +149,8 @@ defmodule NxCL.E2E.LinAlgTest do
       s_diag_g = Nx.make_diagonal(s_g)
       gpu_reconstructed = u_g |> Nx.dot(s_diag_g) |> Nx.dot(vt_g)
 
-      assert_tensors_close(cpu_reconstructed, a, 1.0e-3)
-      assert_tensors_close(gpu_reconstructed, a, 1.0e-3)
+      assert_close(cpu_reconstructed, a, 1.0e-3)
+      assert_close(gpu_reconstructed, a, 1.0e-3)
     end
   end
 end
