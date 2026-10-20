@@ -1,4 +1,4 @@
-use crate::device_ctx::{lock, DeviceCtx};
+use crate::device_ctx::{cl_error, lock, DeviceCtx};
 use opencl3::kernel::Kernel;
 use opencl3::program::Program;
 use std::sync::{Arc, Mutex};
@@ -31,16 +31,33 @@ impl CompiledKernel {
         build_opts: &str,
     ) -> Result<Self, String> {
         let program = Program::create_and_build_from_source(&ctx.context, source, build_opts)
-            .map_err(|e| format!("Failed to compile kernel: {:?}", e))?;
+            .map_err(|e| cl_error("Failed to compile kernel", e))?;
 
         let kernel = Kernel::create(&program, entry_point)
-            .map_err(|e| format!("Failed to create kernel '{}': {:?}", entry_point, e))?;
+            .map_err(|e| cl_error(&format!("Failed to create kernel '{}'", entry_point), e))?;
 
         Ok(Self {
             kernel,
             launch: Mutex::new(()),
             _program: program,
         })
+    }
+
+    /// Fails unless the kernel declares `n` parameters. `ExecuteKernel` panics
+    /// on too many or too few arguments, so the count is checked before any run.
+    pub fn expect_args(&self, n: usize) -> Result<(), String> {
+        let declared = self
+            .kernel
+            .num_args()
+            .map_err(|e| cl_error("Failed to read the kernel's argument count", e))?;
+        if declared as usize == n {
+            Ok(())
+        } else {
+            Err(format!(
+                "the kernel declares {} arguments, the program passes {}",
+                declared, n
+            ))
+        }
     }
 }
 

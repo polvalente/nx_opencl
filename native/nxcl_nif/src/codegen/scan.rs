@@ -15,11 +15,13 @@
 //! No atomics. A float scan adds in a different order from a left fold, so
 //! results differ in the last bits.
 
-use super::index;
+use super::index::{self, LINE};
 use super::movement::{ints, pragmas, Kernel};
 use super::reduce::{combiner, Canon, CombKind, Combiner};
 use super::types::{bf16_helpers, load_as, math_bytes, math_of, store_as, type_info, TypeInfo};
-use super::{checked_product, entry_name, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::{
+    checked_product, entry_name, expect_operands, Caps, Instr, KernelArg, KernelSpec, Limits, Plan,
+};
 
 const OPS: [&str; 4] = [
     "cumulative_sum",
@@ -70,11 +72,12 @@ impl Ctx<'_> {
     fn spec(
         &self,
         pass: &str,
-        k: Kernel,
+        mut k: Kernel,
         body: String,
         groups: usize,
     ) -> Result<KernelSpec, String> {
         let global = checked_product("the scan launch size", &[groups, self.wg])?;
+        let body = format!("{}{body}", k.guard_groups(groups)?);
         Ok(k.into_spec(
             &self.head,
             self.entry(pass),
@@ -93,8 +96,9 @@ impl Ctx<'_> {
 }
 
 /// Source that scans `sh[0..WG]` into an exclusive prefix; the sum of the
-/// whole array goes to `total`. Needs `lid`, `sh`, `total`, and `ident`.
-fn blelloch(wg: usize, id: &str) -> String {
+/// whole array goes to `total`. `lid`, `sh` and `total` must be in scope; `id`
+/// is the identity of the combiner.
+fn blelloch(wg: usize, id: &str, t: &str) -> String {
     format!(
         "  barrier(CLK_LOCAL_MEM_FENCE);
   for (long d = 1; d < {wg}; d <<= 1) {{
@@ -106,18 +110,12 @@ fn blelloch(wg: usize, id: &str) -> String {
   barrier(CLK_LOCAL_MEM_FENCE);
   for (long d = {wg} / 2; d >= 1; d >>= 1) {{
     long i = (lid + 1) * 2 * d - 1;
-    if (i < {wg}) {{ ACC t = sh[i - d]; sh[i - d] = sh[i]; sh[i] = comb(t, sh[i]); }}
+    if (i < {wg}) {{ {t} t = sh[i - d]; sh[i - d] = sh[i]; sh[i] = comb(t, sh[i]); }}
     barrier(CLK_LOCAL_MEM_FENCE);
   }}
 "
     )
 }
-
-/// Source: `base` and the position of logical element `k`.
-const LINE: &str = "  long outer = line / inner;
-  long inn = line % inner;
-  long base = outer * N * inner + inn;
-";
 
 fn pass_block(ctx: &Ctx, b: usize, rev: bool, totals: bool) -> Result<KernelSpec, String> {
     let (wg, t) = (ctx.wg, ctx.acc.math);
@@ -135,6 +133,8 @@ fn pass_block(ctx: &Ctx, b: usize, rev: bool, totals: bool) -> Result<KernelSpec
     } else {
         ""
     };
+    // The inclusive result is `comb(v, exclusive prefix)`. The first element of
+    // a line combines with the identity, so a float `sum` turns -0.0 into +0.0.
     let body = format!(
         "  long lid = (long)get_local_id(0);
   long grp = (long)get_group_id(0);
@@ -151,7 +151,7 @@ fn pass_block(ctx: &Ctx, b: usize, rev: bool, totals: bool) -> Result<KernelSpec
   if (k < N) out[pos] = {store};
 {write_total}",
         id = ctx.id(),
-        scan = blelloch(wg, ctx.id()).replace("ACC", t),
+        scan = blelloch(wg, ctx.id(), t),
         store = store_as(&ctx.out_info, "r"),
     );
     ctx.spec(
@@ -186,7 +186,7 @@ fn pass_totals(ctx: &Ctx, b: usize) -> Result<KernelSpec, String> {
   }}
 ",
         id = ctx.id(),
-        scan = blelloch(wg, ctx.id()).replace("ACC", t),
+        scan = blelloch(wg, ctx.id(), t),
     );
     ctx.spec("p2", k, body, ctx.lines)
 }
@@ -222,13 +222,7 @@ fn pass_add(ctx: &Ctx, b: usize, rev: bool) -> Result<KernelSpec, String> {
 }
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
-    if instr.operands.len() != 1 {
-        return Err(format!(
-            "{} takes 1 operand, got {}",
-            instr.op,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, 1)?;
     let input = &instr.operands[0];
     index::check_rank(&instr.op, input.shape.len())?;
     let a = ints(&instr.attrs, "scan")?;
@@ -296,9 +290,9 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::plan;
+    use super::super::test_support::{self, plan};
     use super::super::types::Kind;
-    use super::super::{Attr, DType, Operand};
+    use super::super::{Attr, DType};
     use super::*;
 
     const S32: DType = DType::new(Kind::S, 32);
@@ -306,17 +300,13 @@ mod tests {
     const C64: DType = DType::new(Kind::C, 64);
 
     fn instr(op: &str, dtype: DType, shape: &[usize], axis: i64, reverse: i64) -> Instr {
-        Instr {
-            op: op.to_string(),
-            operands: vec![Operand {
-                dtype,
-                shape: shape.to_vec(),
-                constant: None,
-            }],
-            out: dtype,
-            out_shape: shape.to_vec(),
-            attrs: vec![Attr::Int(axis), Attr::Int(reverse)],
-        }
+        test_support::instr(
+            op,
+            vec![test_support::buf(dtype, shape)],
+            dtype,
+            shape,
+            vec![Attr::Int(axis), Attr::Int(reverse)],
+        )
     }
 
     #[test]
@@ -405,6 +395,14 @@ mod tests {
                 p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)),
                 "{shape:?}"
             );
+            // The one item the launch would run must find nothing to do.
+            for s in &p.passes {
+                assert!(
+                    test_support::starts_guarded(&s.source),
+                    "{shape:?} {}",
+                    s.entry
+                );
+            }
         }
     }
 

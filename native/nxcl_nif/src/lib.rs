@@ -6,13 +6,15 @@ mod program;
 
 use buffer::DeviceBuffer;
 use device_ctx::{lock, DeviceCtx};
-use opencl3::command_queue::{CommandQueue, CL_QUEUE_PROFILING_ENABLE};
+use opencl3::command_queue::CommandQueue;
 use rustler::{Binary, Env, NifResult, OwnedBinary, ResourceArc, Term};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 
-// A fallible NIF returns `{:error, message}` and never raises. Handle and read
-// NIFs return the bare value on success; program NIFs return `{:ok, value}`.
+// A fallible NIF returns `{:error, message}` and does not raise on bad input.
+// Only `compile_program` and the two eval NIFs also turn a panic into an error.
+// Handle and read NIFs return the bare value on success; program NIFs return
+// `{:ok, value}`.
 
 /// An error the NIF returns as `{:error, message}`.
 fn term_err(message: impl Into<String>) -> rustler::Error {
@@ -89,10 +91,7 @@ fn open_ctx(platform: Option<usize>, device_id: usize) -> NifResult<ResourceArc<
 /// A new command queue on the context, for `eval_program_on`.
 #[rustler::nif(schedule = "DirtyIo")]
 fn queue_create(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<ResourceArc<NifQueue>> {
-    // OpenCL 1.2 entry point, as in `DeviceCtx::new`.
-    #[allow(deprecated)]
-    let queue = CommandQueue::create_default(&ctx.inner.context, CL_QUEUE_PROFILING_ENABLE)
-        .map_err(|e| term_err(format!("Failed to create command queue: {:?}", e)))?;
+    let queue = DeviceCtx::new_queue(&ctx.inner.context).map_err(term_err)?;
     Ok(ResourceArc::new(NifQueue {
         queue: Mutex::new(queue),
         ctx: ctx.inner.clone(),
@@ -118,8 +117,8 @@ fn device_info(ctx: ResourceArc<NifDeviceCtx>) -> NifResult<Vec<(String, String)
     ])
 }
 
-fn new_handle(ctx: &Arc<DeviceCtx>, buf: DeviceBuffer) -> ResourceArc<NifDeviceBuffer> {
-    ResourceArc::new(NifDeviceBuffer::new(Arc::new(buf), ctx.clone()))
+fn new_handle(ctx: &Arc<DeviceCtx>, buffer: Arc<DeviceBuffer>) -> ResourceArc<NifDeviceBuffer> {
+    ResourceArc::new(NifDeviceBuffer::new(buffer, ctx.clone()))
 }
 
 fn binary_from(bytes: &[u8]) -> NifResult<OwnedBinary> {
@@ -135,16 +134,16 @@ fn buffer_create(
     size: usize,
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     let buf = DeviceBuffer::create(&ctx.inner, size).map_err(term_err)?;
-    Ok(new_handle(&ctx.inner, buf))
+    Ok(new_handle(&ctx.inner, Arc::new(buf)))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
 fn buffer_write(
     ctx: ResourceArc<NifDeviceCtx>,
-    data: rustler::Binary,
+    data: Binary,
 ) -> NifResult<ResourceArc<NifDeviceBuffer>> {
     let buf = DeviceBuffer::create_with_data(&ctx.inner, data.as_slice()).map_err(term_err)?;
-    Ok(new_handle(&ctx.inner, buf))
+    Ok(new_handle(&ctx.inner, Arc::new(buf)))
 }
 
 #[rustler::nif(schedule = "DirtyIo")]
@@ -163,7 +162,10 @@ fn buffer_read_many<'a>(
 ) -> NifResult<Vec<Binary<'a>>> {
     let devices = items
         .iter()
-        .map(|(buf, size)| buf.get().map(|b| (b, *size)))
+        .map(|(buf, size)| {
+            same_ctx(&buf.ctx, &ctx.inner)?;
+            buf.get().map(|b| (b, *size))
+        })
         .collect::<Result<Vec<_>, _>>()
         .map_err(term_err)?;
     let data = DeviceBuffer::read_many(&ctx.inner, &devices).map_err(term_err)?;
@@ -198,13 +200,30 @@ fn compile_program(
     })
 }
 
-/// The device buffers behind the handles; `None` marks a slot nothing reads.
+/// Fails unless both handles belong to one device context. A `cl_mem` from
+/// another context is undefined behavior in OpenCL; some drivers reject it and
+/// some do not.
+fn same_ctx(a: &Arc<DeviceCtx>, b: &Arc<DeviceCtx>) -> Result<(), String> {
+    if Arc::ptr_eq(a, b) {
+        Ok(())
+    } else {
+        Err("the buffer belongs to another device context".to_string())
+    }
+}
+
+/// The device buffers behind the handles, all from context `ctx`; `None` marks
+/// a slot nothing reads.
 fn externals(
+    ctx: &Arc<DeviceCtx>,
     buffers: &[Option<ResourceArc<NifDeviceBuffer>>],
 ) -> Result<Vec<Option<Arc<DeviceBuffer>>>, String> {
     buffers
         .iter()
-        .map(|b| b.as_ref().map(|b| b.get()).transpose())
+        .map(|b| {
+            b.as_ref()
+                .map(|b| same_ctx(&b.ctx, ctx).and_then(|_| b.get()))
+                .transpose()
+        })
         .collect()
 }
 
@@ -214,9 +233,9 @@ fn eval_program(
     buffers: Vec<Option<ResourceArc<NifDeviceBuffer>>>,
 ) -> Result<Vec<ResourceArc<NifDeviceBuffer>>, String> {
     guarded(|| {
-        let outputs = prog
-            .program
-            .eval(&prog.ctx, &prog.ctx.queue, externals(&buffers)?)?;
+        let outputs =
+            prog.program
+                .eval(&prog.ctx, &prog.ctx.queue, externals(&prog.ctx, &buffers)?)?;
         Ok(wrap_outputs(&prog.ctx, outputs))
     })
 }
@@ -232,9 +251,9 @@ fn eval_program_on(
         if !Arc::ptr_eq(&prog.ctx, &queue.ctx) {
             return Err("the queue belongs to another device context".to_string());
         }
-        let outputs = prog
-            .program
-            .eval(&prog.ctx, &queue.queue, externals(&buffers)?)?;
+        let outputs =
+            prog.program
+                .eval(&prog.ctx, &queue.queue, externals(&prog.ctx, &buffers)?)?;
         Ok(wrap_outputs(&prog.ctx, outputs))
     })
 }
@@ -245,15 +264,16 @@ fn wrap_outputs(
 ) -> Vec<ResourceArc<NifDeviceBuffer>> {
     outputs
         .into_iter()
-        .map(|buffer| ResourceArc::new(NifDeviceBuffer::new(buffer, ctx.clone())))
+        .map(|buffer| new_handle(ctx, buffer))
         .collect()
 }
 
 /// Resets `SIGCHLD` to `SIG_DFL` when the VM left it at `SIG_IGN`.
 ///
-/// With `SIG_IGN` the kernel reaps a child at once and `wait4` never sees its
-/// exit. PoCL runs `clang` and `ld` as children to build a kernel and would wait
-/// forever. A handler another library installed stays.
+/// With `SIG_IGN` the kernel reaps a child at once, so `wait4` fails with
+/// `ECHILD` instead of returning the exit status. PoCL runs `clang` and `ld` as
+/// children to build a kernel and cannot tell whether they succeeded. A handler
+/// another library installed stays.
 ///
 /// The change is process-wide: a child forked later by any library stays a
 /// zombie until its parent waits. The BEAM starts its ports through
@@ -262,11 +282,13 @@ fn wrap_outputs(
 /// This uses `sigaction`, which reads the disposition without changing it, so no
 /// handler loses its flags or mask. `signal` can only read by setting.
 ///
-/// Unsafe because `libc::sigaction` is a raw system call over C structs. An
-/// all-zero `sigaction` is valid (`SIG_DFL`, no flags, empty mask) on every
-/// platform `libc` supports, and both pointers outlive the call.
+/// If the second `sigaction` fails the disposition stays as it was; there is
+/// nothing better to do on load, so its result is ignored.
 fn restore_sigchld() {
-    // SAFETY: see above.
+    // SAFETY: `libc::sigaction` is a raw system call over C structs. An
+    // all-zero `sigaction` is valid (`SIG_DFL`, no flags, empty mask) on every
+    // platform `libc` supports, and every pointer passed points to a local or
+    // is null, and outlives the call.
     unsafe {
         let mut current: libc::sigaction = std::mem::zeroed();
         if libc::sigaction(libc::SIGCHLD, std::ptr::null(), &mut current) != 0 {

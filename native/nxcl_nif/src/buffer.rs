@@ -3,7 +3,7 @@ use opencl3::types::{CL_FALSE, CL_TRUE};
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use crate::device_ctx::{lock, DeviceCtx};
+use crate::device_ctx::{cl_error, lock, DeviceCtx};
 
 pub struct DeviceBuffer {
     pub buffer: Buffer<u8>,
@@ -26,7 +26,7 @@ impl DeviceBuffer {
                 std::ptr::null_mut(),
             )
         }
-        .map_err(|e| format!("Failed to create buffer: {:?}", e))?;
+        .map_err(|e| cl_error("Failed to create buffer", e))?;
 
         Ok(Self { buffer, size })
     }
@@ -46,7 +46,7 @@ impl DeviceBuffer {
                 data.as_ptr() as *mut c_void,
             )
         }
-        .map_err(|e| format!("Failed to create buffer with data: {:?}", e))?;
+        .map_err(|e| cl_error("Failed to create buffer with data", e))?;
 
         Ok(Self {
             buffer,
@@ -54,12 +54,17 @@ impl DeviceBuffer {
         })
     }
 
+    /// `size`, cut to the buffer's size.
+    fn clamp(&self, size: usize) -> usize {
+        std::cmp::min(size, self.size)
+    }
+
     /// Reads up to `size` bytes through the context's own queue. A run on that
     /// queue may still be queued when this is called; the read comes after it.
     /// A run on another queue always finishes before it returns, so its output
     /// is ready for this read too.
     pub fn read(&self, ctx: &DeviceCtx, size: usize) -> Result<Vec<u8>, String> {
-        let read_size = std::cmp::min(size, self.size);
+        let read_size = self.clamp(size);
         if read_size == 0 {
             return Ok(Vec::new());
         }
@@ -70,7 +75,7 @@ impl DeviceBuffer {
         // SAFETY: `output` holds `read_size` bytes, at most the buffer's size,
         // and the read is blocking, so it finishes before `output` moves or drops.
         unsafe { queue.enqueue_read_buffer(&self.buffer, CL_TRUE, 0, &mut output, &[]) }
-            .map_err(|e| format!("Failed to read buffer: {:?}", e))?;
+            .map_err(|e| cl_error("Failed to read buffer", e))?;
 
         Ok(output)
     }
@@ -83,7 +88,7 @@ impl DeviceBuffer {
     ) -> Result<Vec<Vec<u8>>, String> {
         let mut outputs: Vec<Vec<u8>> = items
             .iter()
-            .map(|(buf, size)| vec![0u8; std::cmp::min(*size, buf.size)])
+            .map(|(buf, size)| vec![0u8; buf.clamp(*size)])
             .collect();
 
         let queue = lock(&ctx.queue);
@@ -100,19 +105,23 @@ impl DeviceBuffer {
             match unsafe { queue.enqueue_read_buffer(&buf.buffer, CL_FALSE, 0, output, &[]) } {
                 Ok(event) => events.push(event),
                 Err(e) => {
-                    failure = Some(format!("Failed to read buffer: {:?}", e));
+                    failure = Some(cl_error("Failed to read buffer", e));
                     break;
                 }
             }
         }
 
         // The output vectors must outlive every queued read, even after an error.
-        let finished = queue.finish().map_err(|e| format!("Device error: {:?}", e));
+        let finished = queue.finish().map_err(|e| cl_error("Device error", e));
         drop(events);
-        if let Some(e) = failure {
-            return Err(e);
+        if let Err(e) = finished {
+            // The driver may still write into the vectors, so they leak.
+            std::mem::forget(outputs);
+            return Err(failure.unwrap_or(e));
         }
-        finished?;
-        Ok(outputs)
+        match failure {
+            Some(e) => Err(e),
+            None => Ok(outputs),
+        }
     }
 }

@@ -16,10 +16,13 @@
 //! `M` comes from the device's local memory size and key width, capped at 4096.
 //! No atomics.
 
-use super::index;
+use super::index::{self, LINE};
 use super::movement::{ints, pragmas, Kernel};
 use super::types::{bf16_helpers, load_as, math_bytes, math_of, store_as, type_info, TypeInfo};
-use super::{checked_product, entry_name, Attr, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::{
+    checked_product, entry_name, expect_operands, Attr, Caps, Instr, KernelArg, KernelSpec, Limits,
+    Plan,
+};
 
 const OPS: [&str; 2] = ["sort", "argsort"];
 
@@ -100,11 +103,12 @@ impl Ctx<'_> {
     fn spec(
         &self,
         pass: &str,
-        k: Kernel,
+        mut k: Kernel,
         body: String,
         groups: usize,
     ) -> Result<KernelSpec, String> {
         let global = checked_product("the sort launch size", &[groups, self.t])?;
+        let body = format!("{}{body}", k.guard_groups(groups)?);
         Ok(k.into_spec(
             &self.head,
             self.entry(pass),
@@ -118,12 +122,14 @@ impl Ctx<'_> {
     fn spec_items(
         &self,
         pass: &str,
-        k: Kernel,
+        mut k: Kernel,
         body: String,
         items: usize,
     ) -> Result<KernelSpec, String> {
         let groups = items.div_ceil(self.t);
         let global = checked_product("the sort launch size", &[groups, self.t])?;
+        // The launch rounds up to whole groups, so the extra items stop here.
+        let body = format!("{}{body}", k.guard(items)?);
         Ok(k.into_spec(
             &self.head,
             self.entry(pass),
@@ -133,7 +139,7 @@ impl Ctx<'_> {
         ))
     }
 
-    /// The value written for local slot `t`: the key for `sort`, the index for `argsort`.
+    /// The output element for a sorted pair: `key` for `sort`, `idx` for `argsort`.
     fn result(&self, key: &str, idx: &str) -> String {
         if self.arg {
             store_as(&self.out_info, idx)
@@ -162,7 +168,7 @@ fn before_fn(key: &TypeInfo, desc: bool) -> String {
 }
 
 /// One compare-exchange over the pairs `t` of a local or global array.
-/// `lo`, `hi`, `asc` are in scope; `sk`/`si` name the arrays.
+/// `lo`, `hi`, `asc` are in scope; `key` and `idx` name the arrays.
 fn exchange(key: &str, idx: &str, kt: &str, n: &str) -> String {
     format!(
         "      int sw = asc ? before({key}[hi], {idx}[hi], {key}[lo], {idx}[lo], {n}) : before({key}[lo], {idx}[lo], {key}[hi], {idx}[hi], {n});\n      if (sw) {{ {kt} tk = {key}[lo]; {key}[lo] = {key}[hi]; {key}[hi] = tk; int ti = {idx}[lo]; {idx}[lo] = {idx}[hi]; {idx}[hi] = ti; }}\n"
@@ -171,9 +177,6 @@ fn exchange(key: &str, idx: &str, kt: &str, n: &str) -> String {
 
 const PAIR: &str =
     "      long lo = ((t & ~(j - 1)) << 1) | (t & (j - 1));\n      long hi = lo + j;\n";
-
-/// `base` for line `line`, from the axis size and the inner stride.
-const LINE: &str = "  long outer = line / inner;\n  long inn = line % inner;\n  long base = outer * N * inner + inn;\n";
 
 fn geometry(ctx: &Ctx, k: &mut Kernel) {
     k.long("N".to_string(), ctx.n as i64);
@@ -263,14 +266,12 @@ fn pass_global(ctx: &Ctx, kk: usize, j: usize) -> Result<KernelSpec, String> {
         "  long g = (long)get_global_id(0);
   long line = g / {half};
   long t = g % {half};
-  if (line >= {lines}) return;
   __global {kt}* key = skeys + line * P;
   __global int* idx = sidx + line * P;
 {PAIR_G}  int asc = (lo & kk) == 0;
   {{
 {ex}  }}
 ",
-        lines = ctx.lines,
         ex = exchange("key", "idx", kt, "N"),
         PAIR_G = PAIR.replace("      ", "  "),
     );
@@ -336,10 +337,8 @@ fn pass_out(ctx: &Ctx) -> Result<KernelSpec, String> {
         "  long g = (long)get_global_id(0);
   long line = g / N;
   long kpos = g % N;
-  if (line >= {lines}) return;
 {LINE}  out[base + kpos * inner] = {r};
 ",
-        lines = ctx.lines,
         r = ctx.result("skeys[line * P + kpos]", "sidx[line * P + kpos]"),
     );
     let items = checked_product("the sort output size", &[ctx.lines, ctx.n])?;
@@ -347,13 +346,7 @@ fn pass_out(ctx: &Ctx) -> Result<KernelSpec, String> {
 }
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
-    if instr.operands.len() != 1 {
-        return Err(format!(
-            "{} takes 1 operand, got {}",
-            instr.op,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, 1)?;
     let input = &instr.operands[0];
     let rank = input.shape.len();
     index::check_rank(&instr.op, rank)?;
@@ -452,9 +445,9 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::plan;
+    use super::super::test_support::{self, plan};
     use super::super::types::Kind;
-    use super::super::{Attr, DType, Operand};
+    use super::super::{Attr, DType};
     use super::*;
 
     const S32: DType = DType::new(Kind::S, 32);
@@ -465,17 +458,13 @@ mod tests {
 
     fn instr(op: &str, dtype: DType, shape: &[usize], axis: i64, dir: &str) -> Instr {
         let out = if op == "argsort" { S32 } else { dtype };
-        Instr {
-            op: op.to_string(),
-            operands: vec![Operand {
-                dtype,
-                shape: shape.to_vec(),
-                constant: None,
-            }],
+        test_support::instr(
+            op,
+            vec![test_support::buf(dtype, shape)],
             out,
-            out_shape: shape.to_vec(),
-            attrs: vec![Attr::Int(axis), Attr::Atom(dir.to_string())],
-        }
+            shape,
+            vec![Attr::Int(axis), Attr::Atom(dir.to_string())],
+        )
     }
 
     #[test]
@@ -569,6 +558,14 @@ mod tests {
                 p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)),
                 "{shape:?}"
             );
+            // The one item the launch would run must find nothing to do.
+            for s in &p.passes {
+                assert!(
+                    test_support::starts_guarded(&s.source),
+                    "{shape:?} {}",
+                    s.entry
+                );
+            }
         }
     }
 

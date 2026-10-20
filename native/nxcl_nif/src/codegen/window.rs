@@ -15,10 +15,10 @@
 
 use super::elementwise::{scalar_binary, ScalarCode};
 use super::index::{self, coords, dims, strides};
-use super::movement::{ints, pragmas, Kernel};
+use super::movement::{ints, Kernel};
 use super::reduce::{combiner, parse_steps, Canon, CombKind};
 use super::types::{bf16_helpers, load_as, math_of, store_as, type_info};
-use super::{element_count, Caps, Instr, Plan};
+use super::{expect_operands, Caps, Instr, Plan};
 
 const OPS: [&str; 7] = [
     "window_sum",
@@ -54,12 +54,18 @@ fn parse_window(attrs: &[super::Attr], rank: usize) -> Result<Window, String> {
         ));
     }
     let take = |from: usize| a[from * rank..(from + 1) * rank].to_vec();
+    let pads = |side: usize| -> Result<Vec<i64>, String> {
+        (0..rank)
+            .map(|d| index::check_pad("window", a[3 * rank + 2 * d + side]))
+            .collect()
+    };
     let w = Window {
         dims: take(0),
         strides: take(1),
         dilations: take(2),
-        low: (0..rank).map(|d| a[3 * rank + 2 * d]).collect(),
+        low: pads(0)?,
     };
+    pads(1)?;
     if w.dims.iter().any(|&v| v < 1)
         || w.strides.iter().any(|&v| v < 1)
         || w.dilations.iter().any(|&v| v < 1)
@@ -69,20 +75,10 @@ fn parse_window(attrs: &[super::Attr], rank: usize) -> Result<Window, String> {
     Ok(w)
 }
 
-/// Opens one `for` loop per axis with `header(d)` and puts `inner` inside.
+/// Opens one `for` loop per axis with `header(d)` and puts `inner` inside. The
+/// loops indent from one level.
 fn nest(rank: usize, header: impl Fn(usize) -> String, inner: &str) -> String {
-    let mut s = String::new();
-    for d in 0..rank {
-        s.push_str(&"  ".repeat(d + 1));
-        s.push_str(&header(d));
-        s.push_str(" {\n");
-    }
-    s.push_str(inner);
-    for d in (0..rank).rev() {
-        s.push_str(&"  ".repeat(d + 1));
-        s.push_str("}\n");
-    }
-    s
+    nest_at(rank, 1, header, inner)
 }
 
 /// `a >= 0 && a < n` over every axis, for coordinates `p0..`.
@@ -106,23 +102,11 @@ fn input_index(rank: usize) -> String {
         .join(" + ")
 }
 
-fn finish(instr: &Instr, k: Kernel, head: &str, entry: String, body: &str) -> Plan {
-    let global = vec![element_count(&instr.out_shape)];
-    Plan::single(k.into_spec(head, entry, body, global, Vec::new()))
-}
-
 /// `window_sum`, `window_product`, `window_max`, `window_min` and `window_reduce`.
 fn fold(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let generic = instr.op == "window_reduce";
     let want = if generic { 2 } else { 1 };
-    if instr.operands.len() != want {
-        return Err(format!(
-            "{} takes {} operands, got {}",
-            instr.op,
-            want,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, want)?;
     let input = &instr.operands[0];
     let rank = input.shape.len();
     index::check_rank(&instr.op, rank)?;
@@ -139,16 +123,19 @@ fn fold(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     } else {
         let canon = Canon::from_op(&instr.op)
             .ok_or_else(|| format!("{}: not a window reduction", instr.op))?;
-        (CombKind::Canon(canon), &instr.attrs[..], canon_tag(canon))
+        (
+            CombKind::Canon(canon),
+            &instr.attrs[..],
+            canon.tag().to_string(),
+        )
     };
     let w = parse_window(window_attrs, rank)?;
     let acc = math_of(instr.out)?;
     let comb = combiner(&kind, acc.dtype)?;
     let in_info = type_info(input.dtype)?;
     let out_info = type_info(instr.out)?;
-    let head = format!(
-        "{}{}{}",
-        pragmas(&instr.dtypes(), caps)?,
+    let helpers = format!(
+        "{}{}",
         bf16_helpers(&[&in_info, &out_info]),
         comb.code.render()
     );
@@ -209,28 +196,12 @@ fn fold(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
         out_info.dtype.name(),
         rank
     );
-    Ok(finish(instr, k, &head, entry, &body))
-}
-
-fn canon_tag(canon: Canon) -> String {
-    match canon {
-        Canon::Sum => "sum",
-        Canon::Product => "prod",
-        Canon::Max => "max",
-        Canon::Min => "min",
-    }
-    .to_string()
+    k.finish(caps, entry, &helpers, &body).map(Plan::single)
 }
 
 /// `window_scatter_max` and `window_scatter_min`.
 fn scatter(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
-    if instr.operands.len() != 3 {
-        return Err(format!(
-            "{} takes 3 operands, got {}",
-            instr.op,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, 3)?;
     let (input, source) = (&instr.operands[0], &instr.operands[1]);
     let rank = input.shape.len();
     index::check_rank(&instr.op, rank)?;
@@ -241,6 +212,10 @@ fn scatter(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
         ));
     }
     let w = parse_window(&instr.attrs, rank)?;
+    // The kernel finds the windows that cover a cell from the strides alone.
+    if w.dilations.iter().any(|&v| v != 1) {
+        return Err(format!("{}: window dilations must be 1", instr.op));
+    }
     let max = instr.op == "window_scatter_max";
     let acc = math_of(instr.out)?;
     let cmp_t = math_of(input.dtype)?;
@@ -253,9 +228,8 @@ fn scatter(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let out_info = type_info(instr.out)?;
     let mut code = ScalarCode::default();
     code.merge(scalar_binary("add", acc.dtype, "add_fn")?);
-    let head = format!(
-        "{}{}{}static long fdiv(long a, long b) {{ return a >= 0 ? a / b : -((-a + b - 1) / b); }}\nstatic long cdiv(long a, long b) {{ return -fdiv(-a, b); }}\n",
-        pragmas(&instr.dtypes(), caps)?,
+    let helpers = format!(
+        "{}{}static long fdiv(long a, long b) {{ return a >= 0 ? a / b : -((-a + b - 1) / b); }}\nstatic long cdiv(long a, long b) {{ return -fdiv(-a, b); }}\n",
         bf16_helpers(&[&in_info, &src_info, &init_info, &out_info]),
         code.render()
     );
@@ -348,10 +322,10 @@ fn scatter(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
         out_info.dtype.name(),
         rank
     );
-    Ok(finish(instr, k, &head, entry, &body))
+    k.finish(caps, entry, &helpers, &body).map(Plan::single)
 }
 
-/// Like `nest`, with the first loop's indent at `depth - rank`.
+/// Like `nest`, with the first loop indented `depth` levels.
 fn nest_at(rank: usize, depth: usize, header: impl Fn(usize) -> String, inner: &str) -> String {
     let mut s = String::new();
     for d in 0..rank {
@@ -518,5 +492,31 @@ mod tests {
             ..i
         };
         assert!(generate(&c, &Caps::all()).is_err());
+    }
+
+    #[test]
+    fn scatter_rejects_a_dilation_other_than_one() {
+        let attrs = |dilation: i64| ints(&[2, 2, 2, 2, dilation, 1, 0, 0, 0, 0]);
+        let scatter = |dilation: i64| Instr {
+            op: "window_scatter_max".to_string(),
+            operands: vec![buf(F32, &[6, 8]), buf(F32, &[3, 4]), buf(F32, &[])],
+            out: F32,
+            out_shape: vec![6, 8],
+            attrs: attrs(dilation),
+        };
+        assert!(generate(&scatter(1), &Caps::all()).is_ok());
+        let err = generate(&scatter(2), &Caps::all()).unwrap_err();
+        assert!(err.contains("dilations must be 1"), "{err}");
+    }
+
+    #[test]
+    fn a_padding_beyond_32_bits_is_an_error() {
+        for pad in [i64::MIN, i64::MAX, 1 << 32] {
+            let attrs = window([2, 2], [1, 1], [(pad, 0), (0, 0)]);
+            let err = generate(&fold("window_sum", F32, attrs, &[5, 7]), &Caps::all()).unwrap_err();
+            assert!(err.contains("does not fit in 32 bits"), "{err}");
+        }
+        let attrs = window([2, 2], [1, 1], [(0, 0), (0, i64::MAX)]);
+        assert!(generate(&fold("window_sum", F32, attrs, &[5, 7]), &Caps::all()).is_err());
     }
 }

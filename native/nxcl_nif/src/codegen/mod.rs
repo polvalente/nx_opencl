@@ -17,6 +17,7 @@ pub mod sort;
 pub mod types;
 pub mod window;
 
+use std::sync::Arc;
 use types::DType;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,7 +64,7 @@ pub enum KernelArg {
     Output,
     Scratch(usize),
     /// A read-only table the host built (twiddles, chirp), uploaded at decode.
-    Table(Vec<u8>),
+    Table(Arc<[u8]>),
     /// The program's error flag, one `int` the kernel sets to a nonzero code on a
     /// bad index. The run fails after the queue drains if it is set.
     ErrorFlag,
@@ -212,6 +213,21 @@ pub fn checked_product(what: &str, factors: &[usize]) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Fails unless the instruction has `n` operands.
+pub(super) fn expect_operands(instr: &Instr, n: usize) -> Result<(), String> {
+    if instr.operands.len() == n {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} takes {} operand{}, got {}",
+            instr.op,
+            n,
+            if n == 1 { "" } else { "s" },
+            instr.operands.len()
+        ))
+    }
+}
+
 pub(super) fn entry_name(prefix: &str, parts: &[&str]) -> String {
     let mut name = prefix.to_string();
     for part in parts {
@@ -349,11 +365,28 @@ pub mod test_support {
         generate_plan(i, &Caps::all(), &Limits::apple()).unwrap()
     }
 
+    /// The statements of the kernel in `source`, after its parameter list.
+    pub fn kernel_body(source: &str) -> &str {
+        let start = source.find("__kernel void").expect("a kernel");
+        source[start..].split_once(") {\n").expect("a body").1
+    }
+
+    /// True when the body starts by ending the items or groups that have no work.
+    pub fn starts_guarded(source: &str) -> bool {
+        let body = kernel_body(source);
+        body.starts_with("  if ((long)get_global_id(0) >= total) return;\n")
+            || body.starts_with("  if ((long)get_group_id(0) >= groups) return;\n")
+    }
+
     /// The error of a plan that must fail.
     pub fn plan_err(i: &Instr) -> String {
         generate_plan(i, &Caps::all(), &Limits::apple()).unwrap_err()
     }
 }
+
+#[cfg(test)]
+#[path = "tests/device.rs"]
+mod device_tests;
 
 #[cfg(test)]
 mod tests {
@@ -410,5 +443,21 @@ mod tests {
         // Local memory bounds it too: 8 bytes per item in 256 bytes.
         assert_eq!(Limits::new(256, 256).group_size(8), 32);
         assert_eq!(Limits::new(1, 0).group_size(0), 1);
+    }
+
+    #[test]
+    fn the_operand_count_is_checked_with_one_message() {
+        let f32 = DType::new(Kind::F, 32);
+        let i = instr("add", vec![buf(f32, &[2])], f32, &[2], vec![]);
+        assert_eq!(
+            expect_operands(&i, 2).unwrap_err(),
+            "add takes 2 operands, got 1"
+        );
+        assert_eq!(expect_operands(&i, 1).map(|_| ()), Ok(()),);
+        let none = instr("iota", vec![], f32, &[2], vec![]);
+        assert_eq!(
+            expect_operands(&none, 1).unwrap_err(),
+            "iota takes 1 operand, got 0"
+        );
     }
 }

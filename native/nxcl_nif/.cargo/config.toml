@@ -1,12 +1,11 @@
 # Cross-compilation targets.
 #
-# Nerves sets CC, CFLAGS, LDFLAGS etc. for the target toolchain.
-# Cargo picks up the linker from the CARGO_TARGET_<TRIPLE>_LINKER env var,
-# or from the [target.<triple>.linker] setting here.
+# Cargo takes the linker from the CARGO_TARGET_<TRIPLE>_LINKER env var, or
+# from the [target.<triple>.linker] setting here.
 #
-# When building under Nerves, the linker is derived from CC automatically
-# by our build.rs. These defaults are fallbacks for manual cross-compilation
-# outside of Nerves.
+# Under Nerves, `NxCL.Native` sets that env var from the CC of the target
+# toolchain, so it wins over this file. The values below apply to manual
+# cross-compilation outside Nerves.
 
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"

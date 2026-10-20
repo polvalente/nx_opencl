@@ -17,6 +17,15 @@ pub fn check_rank(op: &str, rank: usize) -> Result<(), String> {
     }
 }
 
+/// A padding amount from the wire. Kernels subtract it from `long` coordinates,
+/// so it must stay far from the `long` limits; 32 bits is more than any tensor
+/// axis needs.
+pub fn check_pad(op: &str, v: i64) -> Result<i64, String> {
+    i32::try_from(v)
+        .map(i64::from)
+        .map_err(|_| format!("{}: padding {} does not fit in 32 bits", op, v))
+}
+
 /// Row-major element strides of `shape`.
 pub fn strides(shape: &[usize]) -> Vec<i64> {
     let mut out = vec![1i64; shape.len()];
@@ -31,6 +40,14 @@ pub fn strides(shape: &[usize]) -> Vec<i64> {
 pub fn dims(shape: &[usize]) -> Vec<i64> {
     shape.iter().map(|&d| d as i64).collect()
 }
+
+/// Source that sets `base`, the offset of element 0 of line `line`, for a
+/// tensor scanned or sorted along an axis of `N` elements with stride `inner`.
+/// `line` counts the lines in row-major order of the other axes.
+pub const LINE: &str = "  long outer = line / inner;
+  long inn = line % inner;
+  long base = outer * N * inner + inn;
+";
 
 /// Source that splits the flat id `i` into `c0..c{rank-1}`, given the output
 /// dimensions `o0..`.

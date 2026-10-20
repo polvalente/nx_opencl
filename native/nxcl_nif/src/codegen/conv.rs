@@ -17,10 +17,13 @@
 //! them against a direct convolution.
 
 use super::gemm::{self, Binding, Gemm};
-use super::index::MAX_RANK;
+use super::index::{check_pad, MAX_RANK};
 use super::movement::{assemble, ints, pragmas};
 use super::types::type_info;
-use super::{checked_product, element_count, Caps, Instr, KernelArg, KernelSpec, Limits, Plan};
+use super::{
+    checked_product, element_count, expect_operands, Caps, Instr, KernelArg, KernelSpec, Limits,
+    Plan,
+};
 
 pub fn handles(op: &str) -> bool {
     op == "conv"
@@ -222,12 +225,7 @@ fn expand(c: &Conv, out_shape: &[usize]) -> Result<Expansion, String> {
 /// Reads the instruction attrs: `D, strides, (lo, hi) per axis, kernel dilation,
 /// input dilation, feature groups, batch groups`.
 fn parse(instr: &Instr) -> Result<Conv, String> {
-    if instr.operands.len() != 2 {
-        return Err(format!(
-            "conv takes 2 operands, got {}",
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, 2)?;
     let (x, w) = (&instr.operands[0], &instr.operands[1]);
     if x.constant.is_some() || w.constant.is_some() {
         return Err("conv operands must be buffers".to_string());
@@ -278,8 +276,13 @@ fn parse(instr: &Instr) -> Result<Conv, String> {
         kernel_sp: w.shape[2..].to_vec(),
         strides: take(0, "stride")?,
         pad: (0..d)
-            .map(|i| (a[pad_at + 2 * i], a[pad_at + 2 * i + 1]))
-            .collect(),
+            .map(|i| {
+                Ok((
+                    check_pad("conv", a[pad_at + 2 * i])?,
+                    check_pad("conv", a[pad_at + 2 * i + 1])?,
+                ))
+            })
+            .collect::<Result<_, String>>()?,
         kernel_dilation: take(3, "kernel dilation")?,
         input_dilation: take(4, "input dilation")?,
         feature_groups: size(a[1 + 5 * d], "feature group count")?,
@@ -373,7 +376,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         b: KernelArg::Scratch(0),
         out: KernelArg::Output,
     };
-    let gemm_pass = gemm::kernel(&g, &bind, caps, limits, gemm::forced_tile()?)?;
+    let gemm_pass = gemm::kernel(&g, &bind, caps, limits)?;
     if empty {
         return Ok(Plan::single(gemm_pass));
     }
@@ -778,6 +781,17 @@ mod tests {
         // Zero is still a different error: it is not negative.
         let err = conv_err(&with_attr(1, 0));
         assert!(err.contains("must be positive"), "{err}");
+    }
+
+    #[test]
+    fn a_padding_beyond_32_bits_is_an_error() {
+        // Attrs for two spatial axes: D, strides (1-2), pads (3-6).
+        for at in [3, 4, 5, 6] {
+            for pad in [i64::MIN, 1 << 32] {
+                let err = conv_err(&with_attr(at, pad));
+                assert!(err.contains("does not fit in 32 bits"), "{err}");
+            }
+        }
     }
 
     #[test]

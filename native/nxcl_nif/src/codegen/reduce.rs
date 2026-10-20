@@ -36,8 +36,8 @@ use super::types::{
     bf16_helpers, load_as, math_bytes, math_of, store_as, type_info, DType, TypeInfo,
 };
 use super::{
-    checked_product, element_count, entry_name, Attr, Caps, Instr, KernelArg, KernelSpec, Limits,
-    Plan,
+    checked_product, element_count, entry_name, expect_operands, Attr, Caps, Instr, KernelArg,
+    KernelSpec, Limits, Plan,
 };
 
 const OPS: [&str; 9] = [
@@ -165,7 +165,7 @@ impl Canon {
         }
     }
 
-    fn tag(&self) -> &'static str {
+    pub(super) fn tag(&self) -> &'static str {
         match self {
             Canon::Sum => "sum",
             Canon::Product => "prod",
@@ -446,7 +446,7 @@ impl Geometry {
     }
 }
 
-enum Kind {
+enum Reduction {
     Fold {
         kind: CombKind,
         /// `all` and `any` fold truth values of the input.
@@ -459,14 +459,14 @@ enum Kind {
 }
 
 struct Decoded {
-    kind: Kind,
+    kind: Reduction,
     axes: Vec<i64>,
     tag: String,
 }
 
 fn decode(instr: &Instr) -> Result<Decoded, String> {
     let op = instr.op.as_str();
-    let canon = |c| Kind::Fold {
+    let canon = |c| Reduction::Fold {
         kind: CombKind::Canon(c),
         truth: false,
         init: false,
@@ -480,7 +480,7 @@ fn decode(instr: &Instr) -> Result<Decoded, String> {
             tag: op.to_string(),
         }),
         "all" | "any" => Ok(Decoded {
-            kind: Kind::Fold {
+            kind: Reduction::Fold {
                 kind: if op == "all" {
                     CombKind::All
                 } else {
@@ -499,7 +499,7 @@ fn decode(instr: &Instr) -> Result<Decoded, String> {
                 _ => return Err(format!("{}: tie_break must be low or high", op)),
             };
             Ok(Decoded {
-                kind: Kind::Arg {
+                kind: Reduction::Arg {
                     max: op == "argmax",
                     low,
                 },
@@ -519,7 +519,7 @@ fn decode(instr: &Instr) -> Result<Decoded, String> {
                 (_, true) => {
                     let tag = combiner(&CombKind::Steps(steps.clone()), instr.out)?.tag;
                     (
-                        Kind::Fold {
+                        Reduction::Fold {
                             kind: CombKind::Steps(steps),
                             truth: false,
                             init: true,
@@ -559,7 +559,7 @@ impl Ctx<'_> {
         )
     }
 
-    /// Value of input element `idx` for folding.
+    /// The value to fold for the input element `raw` (an expression).
     fn value(&self, truth: bool, raw: &str) -> Result<String, String> {
         if truth {
             return Ok(if self.in_info.is_complex() {
@@ -576,15 +576,23 @@ impl Ctx<'_> {
         load_as(&self.in_info, raw, &self.acc)
     }
 
+    /// The spec of a pass over `global` items, in groups of `local` when it
+    /// has one. The guard comes first: no item of a launch that is empty
+    /// reads or writes.
     fn spec(
         &self,
         pass: &str,
-        k: Kernel,
+        mut k: Kernel,
         body: String,
         global: usize,
         local: Vec<usize>,
-    ) -> KernelSpec {
-        k.into_spec(&self.head, self.entry(pass), &body, vec![global], local)
+    ) -> Result<KernelSpec, String> {
+        let guard = match local.first() {
+            Some(&wg) => k.guard_groups(global / wg)?,
+            None => k.guard(global)?,
+        };
+        let body = format!("{guard}{body}");
+        Ok(k.into_spec(&self.head, self.entry(pass), &body, vec![global], local))
     }
 }
 
@@ -693,7 +701,7 @@ fn fold_input_pass(
                 "  long o = (long)get_global_id(0);\n{base}{decl}  for (long j = 0; j < R; j++) {{\n{offs}{fold}  }}\n  {dst}[o] = {};\n",
                 store("acc")
             );
-            Ok(ctx.spec("t", k, body, ctx.geo.n_out, Vec::new()))
+            ctx.spec("t", k, body, ctx.geo.n_out, Vec::new())
         }
         Mode::Group { slices } => {
             let wg = ctx.wg;
@@ -704,7 +712,7 @@ fn fold_input_pass(
             );
             let global =
                 checked_product("the reduction launch size", &[ctx.geo.n_out, slices, wg])?;
-            Ok(ctx.spec("g", k, body, global, vec![wg]))
+            ctx.spec("g", k, body, global, vec![wg])
         }
     }
 }
@@ -731,7 +739,7 @@ fn fold_partials_pass(ctx: &Ctx, comb: &Combiner, slices: usize) -> Result<Kerne
         s = store_as(&ctx.out_info, "sh[0]")
     );
     let global = checked_product("the reduction launch size", &[ctx.geo.n_out, wg])?;
-    Ok(ctx.spec("p2", k, body, global, vec![wg]))
+    ctx.spec("p2", k, body, global, vec![wg])
 }
 
 fn better_fn(ctx: &Ctx, max: bool, low: bool) -> String {
@@ -785,7 +793,7 @@ fn arg_input_pass(ctx: &Ctx, mode: Mode) -> Result<KernelSpec, String> {
                 "  long o = (long)get_global_id(0);\n{base}  {t} bv;\n  long bi = -1;\n  for (long j = 0; j < R; j++) {{\n{fold}  }}\n  out[o] = {};\n",
                 store_as(&ctx.out_info, "bi")
             );
-            Ok(ctx.spec("t", k, body, ctx.geo.n_out, Vec::new()))
+            ctx.spec("t", k, body, ctx.geo.n_out, Vec::new())
         }
         Mode::Group { slices } => {
             let wg = ctx.wg;
@@ -803,7 +811,7 @@ fn arg_input_pass(ctx: &Ctx, mode: Mode) -> Result<KernelSpec, String> {
             );
             let global =
                 checked_product("the reduction launch size", &[ctx.geo.n_out, slices, wg])?;
-            Ok(ctx.spec("g", k, body, global, vec![wg]))
+            ctx.spec("g", k, body, global, vec![wg])
         }
     }
 }
@@ -824,21 +832,14 @@ fn arg_partials_pass(ctx: &Ctx, slices: usize) -> Result<KernelSpec, String> {
         s = store_as(&ctx.out_info, "shi[0]")
     );
     let global = checked_product("the reduction launch size", &[ctx.geo.n_out, wg])?;
-    Ok(ctx.spec("p2", k, body, global, vec![wg]))
+    ctx.spec("p2", k, body, global, vec![wg])
 }
 
 pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String> {
     let decoded = decode(instr)?;
-    let init = matches!(decoded.kind, Kind::Fold { init: true, .. });
+    let init = matches!(decoded.kind, Reduction::Fold { init: true, .. });
     let want = if init { 2 } else { 1 };
-    if instr.operands.len() != want {
-        return Err(format!(
-            "{} takes {} operands, got {}",
-            instr.op,
-            want,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, want)?;
     let input = &instr.operands[0];
     let geo = Geometry::new(&instr.op, &input.shape, &instr.out_shape, &decoded.axes)?;
     let in_info = type_info(input.dtype)?;
@@ -846,8 +847,8 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     let pragma_text = pragmas(&instr.dtypes(), caps)?;
 
     let acc = match &decoded.kind {
-        Kind::Fold { .. } => math_of(instr.out)?,
-        Kind::Arg { .. } => {
+        Reduction::Fold { .. } => math_of(instr.out)?,
+        Reduction::Arg { .. } => {
             if in_info.is_complex() {
                 return Err(format!("{} does not accept complex values", instr.op));
             }
@@ -869,11 +870,11 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
     };
 
     let comb = match &decoded.kind {
-        Kind::Fold { kind, .. } => Some(combiner(kind, acc.dtype)?),
-        Kind::Arg { .. } => None,
+        Reduction::Fold { kind, .. } => Some(combiner(kind, acc.dtype)?),
+        Reduction::Arg { .. } => None,
     };
     match (&decoded.kind, &comb) {
-        (Kind::Fold { truth, .. }, Some(c)) => {
+        (Reduction::Fold { truth, .. }, Some(c)) => {
             ctx.head = fold_head(&ctx, c, &pragma_text);
             ctx.tag = c.tag.clone();
             // `all` and `any` read truth values of the input type.
@@ -882,7 +883,7 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
                     .push_str(&complex::preamble(&ctx.in_info, &["nonzero"]));
             }
         }
-        (Kind::Arg { max, low }, _) => {
+        (Reduction::Arg { max, low }, _) => {
             ctx.head = format!(
                 "{pragma_text}{}{}",
                 bf16_helpers(&[&ctx.in_info, &ctx.out_info]),
@@ -901,8 +902,8 @@ pub fn generate(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, Str
         return empty_extent(&ctx, comb.as_ref());
     }
 
-    let truth = matches!(decoded.kind, Kind::Fold { truth: true, .. });
-    let is_arg = matches!(decoded.kind, Kind::Arg { .. });
+    let truth = matches!(decoded.kind, Reduction::Fold { truth: true, .. });
+    let is_arg = matches!(decoded.kind, Reduction::Arg { .. });
     let first = |mode: Mode| -> Result<KernelSpec, String> {
         match &comb {
             Some(c) => fold_input_pass(&ctx, c, truth, init, mode),
@@ -952,251 +953,10 @@ fn empty_extent(ctx: &Ctx, comb: Option<&Combiner>) -> Result<Plan, String> {
         "  size_t i = get_global_id(0);\n  out[i] = {};\n",
         store_as(&ctx.out_info, &id)
     );
-    Ok(Plan::single(ctx.spec(
-        "empty",
-        k,
-        body,
-        ctx.geo.n_out,
-        Vec::new(),
-    )))
+    ctx.spec("empty", k, body, ctx.geo.n_out, Vec::new())
+        .map(Plan::single)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::super::test_support::{buf, ints, plan};
-    use super::super::types::Kind as K;
-    use super::*;
-
-    const S32: DType = DType::new(K::S, 32);
-    const S64: DType = DType::new(K::S, 64);
-    const U8: DType = DType::new(K::U, 8);
-    const U64: DType = DType::new(K::U, 64);
-    const F32: DType = DType::new(K::F, 32);
-    const F64: DType = DType::new(K::F, 64);
-    const BF16: DType = DType::new(K::Bf, 16);
-    const C64: DType = DType::new(K::C, 64);
-
-    fn instr(
-        op: &str,
-        input: DType,
-        shape: &[usize],
-        out: DType,
-        out_shape: &[usize],
-        attrs: Vec<Attr>,
-    ) -> Instr {
-        Instr {
-            op: op.to_string(),
-            operands: vec![buf(input, shape)],
-            out,
-            out_shape: out_shape.to_vec(),
-            attrs,
-        }
-    }
-
-    fn sources(p: &Plan) -> Vec<&str> {
-        p.passes.iter().map(|s| s.source.as_str()).collect()
-    }
-
-    #[test]
-    fn strategy_follows_extent_and_output_count() {
-        let wg = 256;
-        // Up to 64 elements one thread folds a line.
-        assert_eq!(strategy(1, 1, wg), Strategy::Thread);
-        assert_eq!(strategy(63, 1, wg), Strategy::Thread);
-        assert_eq!(strategy(64, 1, wg), Strategy::Thread);
-        // Past that, a group folds a line; 65 elements need one slice only.
-        assert_eq!(strategy(65, 1, wg), Strategy::Group);
-        assert_eq!(strategy(4096, 1, wg), Strategy::Group);
-        // 4097 elements at 16 per item need two slices.
-        assert_eq!(strategy(4097, 1, wg), Strategy::Sliced(2));
-        assert_eq!(strategy(1 << 20, 1, wg), Strategy::Sliced(256));
-        // Many outputs fill the device with one group each, however long the line.
-        assert_eq!(strategy(4097, 64, wg), Strategy::Group);
-        assert_eq!(strategy(1 << 20, 4096, wg), Strategy::Group);
-        assert_eq!(strategy(4097, 63, wg), Strategy::Sliced(2));
-        // The slice count stops at 1024.
-        assert_eq!(strategy(1 << 30, 1, wg), Strategy::Sliced(1024));
-        // A smaller group gives more slices.
-        assert_eq!(strategy(4097, 1, 64), Strategy::Sliced(5));
-    }
-
-    #[test]
-    fn accumulator_has_the_width_of_the_nx_output_type() {
-        let acc = |out: DType| {
-            combiner(&CombKind::Canon(Canon::Sum), out)
-                .unwrap()
-                .acc
-                .math
-        };
-        assert_eq!(acc(S32), "int");
-        assert_eq!(acc(S64), "long");
-        assert_eq!(acc(U64), "ulong");
-        assert_eq!(acc(F32), "float");
-        assert_eq!(acc(F64), "double");
-        // Half-width floats accumulate in float.
-        assert_eq!(acc(BF16), "float");
-        assert_eq!(acc(C64), "float2");
-
-        // `sum` of `u8` has output type `u64`: the kernel folds in `ulong`.
-        let p = plan(&instr("sum", U8, &[100], U64, &[], ints(&[0])));
-        assert!(sources(&p)[0].contains("ulong acc"));
-    }
-
-    #[test]
-    fn identities_per_op_and_dtype() {
-        let id = |c, d| identity_of(c, &type_info(d).unwrap()).unwrap();
-        assert_eq!(id(Canon::Sum, F32), "(float)0");
-        assert_eq!(id(Canon::Product, F32), "(float)1");
-        assert_eq!(id(Canon::Max, F32), "(-INFINITY)");
-        assert_eq!(id(Canon::Min, F32), "INFINITY");
-        assert_eq!(id(Canon::Sum, S64), "(long)0");
-        // Integers use the limits of their own type.
-        for d in [S32, S64, U8, U64] {
-            let info = type_info(d).unwrap();
-            assert_eq!(id(Canon::Max, d), info.min);
-            assert_eq!(id(Canon::Min, d), info.max);
-        }
-        // Complex values have no order, so max and min have no identity.
-        let c = type_info(C64).unwrap();
-        assert!(identity_of(Canon::Max, &c).is_err());
-        assert!(identity_of(Canon::Sum, &c).is_ok());
-    }
-
-    #[test]
-    fn argmax_orders_nan_first_and_ties_by_tie_break() {
-        let src = |op: &str, tie: &str| {
-            let a = vec![Attr::Atom(tie.to_string()), Attr::Int(0)];
-            sources(&plan(&instr(op, F32, &[100], S64, &[], a)))[0].to_string()
-        };
-        // NaN beats a number; of two NaNs the later index wins.
-        assert!(src("argmax", "low").contains("if (isnan(v)) return isnan(w) ? i > k : 1;"));
-        assert!(src("argmax", "low").contains("if (isnan(w)) return 0;"));
-        // Ties go to the lowest or highest index.
-        assert!(src("argmax", "low").contains("return i < k;"));
-        assert!(src("argmax", "high").contains("return i > k;"));
-        assert!(src("argmax", "low").contains("v > w"));
-        assert!(src("argmin", "low").contains("v < w"));
-        // Integers have no NaN arm.
-        let a = vec![Attr::Atom("low".to_string()), Attr::Int(0)];
-        let int = plan(&instr("argmax", S32, &[100], S64, &[], a));
-        assert!(!sources(&int)[0].contains("isnan"));
-        // The tie break is part of the kernel hash.
-        assert_ne!(src("argmax", "low"), src("argmax", "high"));
-    }
-
-    #[test]
-    fn reduce_with_an_add_body_generates_the_source_of_sum() {
-        let sum = plan(&instr("sum", F32, &[3, 100], F32, &[3], ints(&[1])));
-        // One step, `add(v0, v1)`, then the axes.
-        let attrs = vec![
-            Attr::Int(1),
-            Attr::Atom("add".to_string()),
-            Attr::Int(0),
-            Attr::Int(1),
-            Attr::Int(1),
-        ];
-        let reduce = plan(&instr("reduce", F32, &[3, 100], F32, &[3], attrs));
-        assert_eq!(sources(&sum), sources(&reduce));
-        assert_eq!(
-            sum.passes.iter().map(|p| &p.entry).collect::<Vec<_>>(),
-            reduce.passes.iter().map(|p| &p.entry).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn a_body_without_an_initial_value_must_be_a_monoid() {
-        let attrs = vec![
-            Attr::Int(2),
-            Attr::Atom("multiply".to_string()),
-            Attr::Int(0),
-            Attr::Int(0),
-            Attr::Atom("add".to_string()),
-            Attr::Int(2),
-            Attr::Int(1),
-            Attr::Int(1),
-        ];
-        let err = generate(
-            &instr("reduce", F32, &[3, 100], F32, &[3], attrs),
-            &Caps::all(),
-            &Limits::apple(),
-        )
-        .unwrap_err();
-        assert!(err.contains("initial accumulator"), "{err}");
-    }
-
-    #[test]
-    fn plans_have_the_passes_the_strategy_names() {
-        // One thread per line.
-        let p = plan(&instr("sum", F32, &[3, 20], F32, &[3], ints(&[1])));
-        assert_eq!((p.passes.len(), p.scratch.len()), (1, 0));
-        // One group per line.
-        let p = plan(&instr("sum", F32, &[128, 1000], F32, &[128], ints(&[1])));
-        assert_eq!((p.passes.len(), p.scratch.len()), (1, 0));
-        assert_eq!(p.passes[0].local, vec![256]);
-        // Slices: partials in scratch, then a fold of them.
-        let p = plan(&instr("sum", F32, &[2, 100_000], F32, &[2], ints(&[1])));
-        assert_eq!(p.passes.len(), 2);
-        assert_eq!(p.scratch, vec![2 * 25 * 4]);
-        // The kernel never uses atomics.
-        for s in sources(&p) {
-            assert!(!s.contains("atomic"));
-        }
-    }
-
-    #[test]
-    fn group_size_obeys_the_device_limits() {
-        // A device with 64 threads and 1 KiB of local memory.
-        let small = Limits::new(64, 1024);
-        let i = instr("sum", F64, &[2, 100_000], F64, &[2], ints(&[1]));
-        let p = generate(&i, &Caps::all(), &small).unwrap();
-        for s in &p.passes {
-            let wg = s.local.first().copied().unwrap_or(1);
-            assert!(wg <= 64 && wg * 8 <= 1024, "{wg}");
-        }
-    }
-
-    #[test]
-    fn an_empty_axis_fills_with_the_identity_and_arg_ops_refuse() {
-        let p = plan(&instr("reduce_max", F32, &[3, 0], F32, &[3], ints(&[1])));
-        assert_eq!(p.passes.len(), 1);
-        assert!(p.passes[0].source.contains("-INFINITY"));
-        let a = vec![Attr::Atom("low".to_string()), Attr::Int(1)];
-        let err = generate(
-            &instr("argmax", F32, &[3, 0], S64, &[3], a),
-            &Caps::all(),
-            &Limits::apple(),
-        );
-        assert!(err.unwrap_err().contains("empty axis"));
-    }
-
-    #[test]
-    fn a_step_count_beyond_the_attrs_is_an_error_not_an_allocation() {
-        let mut attrs = vec![Attr::Int(i64::MAX)];
-        attrs.extend([Attr::Atom("add".to_string()), Attr::Int(0), Attr::Int(1)]);
-        let err = parse_steps(&attrs).unwrap_err();
-        assert!(err.contains("steps need"), "{err}");
-        // One step is declared and none follows.
-        let err = parse_steps(&ints(&[1])).unwrap_err();
-        assert!(err.contains("steps need"), "{err}");
-        assert!(parse_steps(&ints(&[0])).is_err());
-        assert!(parse_steps(&ints(&[-3])).is_err());
-    }
-
-    #[test]
-    fn an_extent_that_overflows_is_an_error() {
-        let big = 1usize << 40;
-        let i = instr("sum", F32, &[big, big], F32, &[], ints(&[0, 1]));
-        let err = generate(&i, &Caps::all(), &Limits::apple()).unwrap_err();
-        assert!(err.contains("the reduced extent is too large"), "{err}");
-    }
-
-    #[test]
-    fn an_empty_output_still_has_a_positive_global_size() {
-        // Three empty lines of 5: the executor never launches this, and the
-        // spec stays well formed.
-        let p = plan(&instr("sum", F32, &[0, 5], F32, &[0], ints(&[1])));
-        assert!(p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)));
-        let p = plan(&instr("sum", F32, &[0, 5000], F32, &[0], ints(&[1])));
-        assert!(p.passes.iter().all(|s| s.global.iter().all(|&g| g > 0)));
-    }
-}
+#[path = "tests/reduce.rs"]
+mod tests;

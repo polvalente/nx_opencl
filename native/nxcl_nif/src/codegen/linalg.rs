@@ -18,7 +18,7 @@
 use super::complex;
 use super::movement::{pragmas, Kernel};
 use super::types::{bf16_helpers, load_as, math_of, store_as, TypeInfo};
-use super::{checked_product, Attr, Caps, Instr, Limits, Plan};
+use super::{checked_product, expect_operands, Attr, Caps, Instr, Limits, Plan};
 
 const OPS: [&str; 2] = ["triangular_solve", "cholesky"];
 
@@ -118,14 +118,7 @@ impl Arith {
 }
 
 fn check_operands(instr: &Instr, n: usize) -> Result<(), String> {
-    if instr.operands.len() != n {
-        return Err(format!(
-            "{} takes {} operands, got {}",
-            instr.op,
-            n,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, n)?;
     for (k, o) in instr.operands.iter().enumerate() {
         if o.dtype != instr.out {
             return Err(format!(
@@ -232,7 +225,6 @@ fn triangular_solve(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let backward = step("j < n", "i + 1")?;
     let body = format!(
         "  long gid = (long)get_global_id(0);
-  if (gid >= total) return;
   long batch = gid / m;
   long r = gid % m;
   long abase = batch * n * n;
@@ -254,7 +246,6 @@ fn triangular_solve(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     k.long("n".to_string(), n as i64);
     k.long("m".to_string(), m as i64);
     let total = checked_product("the solve count", &[batch, m])?;
-    k.long("total".to_string(), total as i64);
     k.long("a_rs".to_string(), a_rs as i64);
     k.long("a_cs".to_string(), a_cs as i64);
     k.long("sx".to_string(), sx as i64);
@@ -263,9 +254,8 @@ fn triangular_solve(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
 
     let entry = format!("ts_{}{}", instr.out.name(), if conj { "_conj" } else { "" });
     let helpers = arith.helpers(&["sub", "mul", "div", "conj"]);
-    let mut spec = k.finish(caps, entry, &helpers, &body)?;
-    spec.global = vec![total.max(1)];
-    Ok(Plan::single(spec))
+    k.finish_over(caps, entry, &helpers, &body, total)
+        .map(Plan::single)
 }
 
 /// No attrs. One group per matrix.
@@ -412,24 +402,24 @@ mod tests {
         let p = plan(&ts(F32, &[3, 5, 5], &[3, 5, 4], (1, 1, "none")));
         assert_eq!(p.passes.len(), 1);
         assert_eq!(p.passes[0].global, vec![12]);
-        // n, m, total, a_rs, a_cs, sx, so, lower
-        assert_eq!(scalars(&p.passes[0]), vec![5, 4, 12, 5, 1, 4, 1, 1]);
+        // n, m, a_rs, a_cs, sx, so, lower, then the guard's total.
+        assert_eq!(scalars(&p.passes[0]), vec![5, 4, 5, 1, 4, 1, 1, 12]);
     }
 
     #[test]
     fn the_right_side_and_a_transpose_swap_the_strides() {
         // X A = B with A lower is the left solve of A^T, which is upper.
         let p = plan(&ts(F32, &[5, 5], &[4, 5], (0, 1, "none")));
-        assert_eq!(scalars(&p.passes[0]), vec![5, 4, 4, 1, 5, 1, 5, 0]);
+        assert_eq!(scalars(&p.passes[0]), vec![5, 4, 1, 5, 1, 5, 0, 4]);
         let p = plan(&ts(F32, &[5, 5], &[5, 4], (1, 1, "transpose")));
-        assert_eq!(scalars(&p.passes[0]), vec![5, 4, 4, 1, 5, 4, 1, 0]);
+        assert_eq!(scalars(&p.passes[0]), vec![5, 4, 1, 5, 4, 1, 0, 4]);
     }
 
     #[test]
     fn a_vector_b_has_one_column_per_batch() {
         let p = plan(&ts(F32, &[2, 3, 3], &[2, 3], (1, 0, "none")));
         assert_eq!(p.passes[0].global, vec![2]);
-        assert_eq!(scalars(&p.passes[0]), vec![3, 1, 2, 3, 1, 1, 0, 0]);
+        assert_eq!(scalars(&p.passes[0]), vec![3, 1, 3, 1, 1, 0, 0, 2]);
     }
 
     #[test]

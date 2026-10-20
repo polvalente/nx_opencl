@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use crate::buffer::DeviceBuffer;
 use crate::codegen::types::{encode_const, type_info, ConstVal, DType};
 use crate::codegen::{self, Attr, Instr, KernelArg, Operand};
-use crate::device_ctx::{lock, DeviceCtx};
+use crate::device_ctx::{cl_error, lock, DeviceCtx};
 use crate::kernel::{self, CompiledKernel};
 
 const MAX_DIMS: usize = 3;
@@ -425,14 +425,7 @@ impl Program {
             ));
         }
 
-        let mut slots: Vec<Option<Arc<DeviceBuffer>>> = externals;
-        slots.resize(self.n_external + self.steps.len(), None);
-        for (s, buf) in &self.const_buffers {
-            slots[*s] = Some(buf.clone());
-        }
-        for &s in &self.free_first {
-            slots[s] = None;
-        }
+        let mut slots = self.prepare_slots(externals);
         let flag = if self.uses_flag {
             Some(DeviceBuffer::create_with_data(ctx, &[0u8; 4])?)
         } else {
@@ -451,7 +444,7 @@ impl Program {
             // run takes this queue's lock, so the two are never held together.
             lock(&ctx.queue)
                 .finish()
-                .map_err(|e| format!("Device error: {:?}", e))?;
+                .map_err(|e| cl_error("Device error", e))?;
         }
         let queue = lock(queue);
 
@@ -460,19 +453,16 @@ impl Program {
         // Drain the queue even after an error, before any buffer goes away.
         let finished = if lazy && run.is_ok() {
             // Flush so the device starts now; a read waits for the rest.
-            queue.flush().map_err(|e| format!("Device error: {:?}", e))
+            queue.flush()
         } else {
-            queue.finish().map_err(|e| format!("Device error: {:?}", e))
-        };
+            queue.finish()
+        }
+        .map_err(|e| cl_error("Device error", e));
         drop(queue);
         run?;
         finished?;
         if let Some(flag) = &flag {
-            let bytes = flag.read(ctx, 4)?;
-            let code = i32::from_ne_bytes(bytes.try_into().map_err(|_| "short flag read")?);
-            if code != 0 {
-                return Err(codegen::indexing::error_message(code));
-            }
+            check_flag(ctx, flag)?;
         }
 
         self.outputs
@@ -483,6 +473,23 @@ impl Program {
                     .ok_or_else(|| "an output buffer was not given".to_string())
             })
             .collect()
+    }
+
+    /// The slots of a run: the externals, the shared constants, and room for
+    /// each step's result. Slots nothing reads are dropped at once.
+    fn prepare_slots(
+        &self,
+        externals: Vec<Option<Arc<DeviceBuffer>>>,
+    ) -> Vec<Option<Arc<DeviceBuffer>>> {
+        let mut slots = externals;
+        slots.resize(self.n_external + self.steps.len(), None);
+        for (s, buf) in &self.const_buffers {
+            slots[*s] = Some(buf.clone());
+        }
+        for &s in &self.free_first {
+            slots[s] = None;
+        }
+        slots
     }
 
     /// Enqueue every step in order, with no wait between. OpenCL keeps a buffer
@@ -506,6 +513,16 @@ impl Program {
         }
         Ok(())
     }
+}
+
+/// Reads the error flag after a run and turns a nonzero code into an error.
+fn check_flag(ctx: &DeviceCtx, flag: &DeviceBuffer) -> Result<(), String> {
+    let bytes = flag.read(ctx, 4)?;
+    let code = i32::from_ne_bytes(bytes.try_into().map_err(|_| "short flag read")?);
+    if code != 0 {
+        return Err(codegen::indexing::error_message(code));
+    }
+    Ok(())
 }
 
 impl Launch {
@@ -549,38 +566,28 @@ impl Pass {
         let mut exec = ExecuteKernel::new(&self.kernel.kernel);
         for a in &self.args {
             // SAFETY: `set_arg` reads `size_of` the value it is given. Each
-            // value below has the type the kernel parameter has, because
-            // codegen declares the parameters and the args in one order
-            // (`KernelArg`) from the same type table: a `cl_mem` for every
+            // value has the type the kernel parameter has: a `cl_mem` for a
             // buffer, and for a scalar the bytes of one `long`, `int` or
-            // element the parameter declares.
-            unsafe {
-                match a {
-                    Arg::Slot(s) => {
-                        let buf = slots[*s].as_ref().ok_or_else(|| {
-                            "an input buffer the program reads was not given".to_string()
-                        })?;
-                        exec.set_arg(&buf.buffer.get());
-                    }
-                    Arg::Out => {
-                        exec.set_arg(&out.buffer.get());
-                    }
-                    Arg::Scratch(n) => {
-                        let buf = scratch
-                            .get(*n)
-                            .ok_or_else(|| format!("scratch buffer {} was not planned", n))?;
-                        exec.set_arg(&buf.buffer.get());
-                    }
-                    Arg::Table(t) => {
-                        exec.set_arg(&t.buffer.get());
-                    }
-                    Arg::Scalar(bytes) => set_scalar(&mut exec, bytes)?,
-                    Arg::ErrorFlag => {
-                        let f = flag.ok_or("the run has no error flag")?;
-                        exec.set_arg(&f.buffer.get());
-                    }
+            // element the parameter declares. Generated kernels have this by
+            // construction (codegen writes the parameters and `KernelArg`s
+            // from one table). A `launch` kernel is user code and must match
+            // its signature: `decode_launch` checks only the argument count.
+            let buf: &DeviceBuffer = match a {
+                Arg::Scalar(bytes) => {
+                    unsafe { set_scalar(&mut exec, bytes)? };
+                    continue;
                 }
-            }
+                Arg::Slot(s) => slots[*s]
+                    .as_deref()
+                    .ok_or_else(|| "an input buffer the program reads was not given".to_string())?,
+                Arg::Out => out,
+                Arg::Scratch(n) => scratch
+                    .get(*n)
+                    .ok_or_else(|| format!("scratch buffer {} was not planned", n))?,
+                Arg::Table(t) => t,
+                Arg::ErrorFlag => flag.ok_or("the run has no error flag")?,
+            };
+            unsafe { exec.set_arg(&buf.buffer.get()) };
         }
         exec.set_global_work_sizes(&self.global);
         if !self.local.is_empty() {
@@ -592,7 +599,7 @@ impl Pass {
         // or a read of an output waits for the command.
         unsafe {
             exec.enqueue_nd_range(queue)
-                .map_err(|e| format!("Failed to enqueue kernel: {:?}", e))?;
+                .map_err(|e| cl_error("Failed to enqueue kernel", e))?;
         }
         Ok(())
     }
@@ -633,7 +640,8 @@ fn array<const N: usize>(bytes: &[u8]) -> Result<[u8; N], String> {
 /// Set a scalar argument from the bytes of one element.
 ///
 /// # Safety
-/// The argument index and the kernel must match the value size.
+/// The next argument of the kernel must be a scalar parameter of
+/// `bytes.len()` bytes, the size `set_arg` reads from the value it is given.
 unsafe fn set_scalar(exec: &mut ExecuteKernel, bytes: &[u8]) -> Result<(), String> {
     match bytes.len() {
         1 => exec.set_arg(&bytes[0]),
@@ -790,8 +798,8 @@ fn plan_step(
     out_bytes: usize,
 ) -> Result<Step, String> {
     let mut passes = Vec::with_capacity(plan.passes.len());
-    // A table that several passes share is uploaded once.
-    let mut tables: Vec<(Vec<u8>, Arc<DeviceBuffer>)> = Vec::new();
+    // A table that several passes share (one `Arc`) is uploaded once.
+    let mut tables: Vec<(Arc<[u8]>, Arc<DeviceBuffer>)> = Vec::new();
     for spec in plan.passes {
         let kernel = kernel::cached(ctx, &spec.source, &spec.entry, &spec.build_options)?;
         let mut args = Vec::with_capacity(spec.args.len());
@@ -814,7 +822,7 @@ fn plan_step(
                 }
                 KernelArg::ErrorFlag => Arg::ErrorFlag,
                 KernelArg::Table(bytes) => {
-                    let buf = match tables.iter().find(|(b, _)| *b == bytes) {
+                    let buf = match tables.iter().find(|(b, _)| Arc::ptr_eq(b, &bytes)) {
                         Some((_, buf)) => buf.clone(),
                         None => {
                             let buf = Arc::new(DeviceBuffer::create_with_data(ctx, &bytes)?);
@@ -826,6 +834,7 @@ fn plan_step(
                 }
             });
         }
+        kernel.expect_args(args.len())?;
         passes.push(Pass {
             kernel,
             args,
@@ -844,6 +853,11 @@ fn plan_step(
 /// Attrs: source, entry, build options, dims, global sizes, local sizes, scalars.
 /// Local sizes all zero means the driver picks. The kernel takes the operand
 /// buffers, then the output buffer, then the scalars as `int`.
+///
+/// The kernel is user code, so only its argument count is checked, against the
+/// attrs. It must declare each parameter with the type given here: a scalar
+/// for a `cl_mem` or a write to an operand corrupts memory the program shares
+/// (constants, aliased inputs). The kernel must write only its output buffer.
 fn decode_launch(ctx: &DeviceCtx, d: &Decoded, out_bytes: usize) -> Result<Step, String> {
     let attrs = &d.attrs[..];
     let source = attr_str(attrs, 0, "source")?;
@@ -875,6 +889,7 @@ fn decode_launch(ctx: &DeviceCtx, d: &Decoded, out_bytes: usize) -> Result<Step,
         args.push(Arg::Scalar(v.to_ne_bytes().to_vec()));
     }
     let kernel = kernel::cached(ctx, &source, &entry, &opts)?;
+    kernel.expect_args(args.len())?;
     Ok(Step::Launch(Launch {
         passes: vec![Pass {
             kernel,

@@ -49,7 +49,6 @@ defmodule NxOpencl.MixProject do
         native/nxcl_nif/src
         native/nxcl_nif/Cargo.toml
         native/nxcl_nif/Cargo.lock
-        native/nxcl_nif/build.rs
         native/nxcl_nif/.cargo
         mix.exs
         README.md

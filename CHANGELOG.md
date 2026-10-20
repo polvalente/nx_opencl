@@ -34,7 +34,7 @@ same programs and kernels.
 - A NIF that can fail returns `{:error, message}`, and Elixir raises
   `ArgumentError`. Reading a freed buffer raises `ArgumentError`, not `ErlangError`.
 - FFT axis length is at most 2^26 for a power of two and 2^22 for other lengths
-  (Bluestein). A bad `NXCL_GEMM_TILE` value is an error.
+  (Bluestein).
 - Complex `log1p` and `atanh` are accurate near `z = -1`. Before, `log1p(-0.99988, 0)`
   gave `-inf` instead of `-9.01`.
 - The `SIGCHLD` reset at load time used signal number 20, which is `SIGTSTP` on

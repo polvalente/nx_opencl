@@ -5,7 +5,7 @@
 //! on store). `f16` is stored as `half`, computed as `float`, and needs
 //! `cl_khr_fp16`; a device without it gets a missing-extension error. Bool is
 //! `u8`. `c64` is `float2` and `c128` is `double2` (needs `cl_khr_fp64`), real
-//! part first, with the helpers of `complex.rs` as a `Preamble`.
+//! part first; `complex.rs` holds their helper functions.
 
 use std::fmt;
 
@@ -250,7 +250,7 @@ pub fn type_info(dtype: DType) -> Result<TypeInfo, String> {
         (Kind::F, 64) => float(d, "double", "double", None, Some(Ext::Fp64)),
         (Kind::C, 64) => complex(d, "float2", "float", None),
         (Kind::C, 128) => complex(d, "double2", "double", Some(Ext::Fp64)),
-        _ => return Err(format!("dtype {} has no OpenCL type yet", dtype)),
+        _ => return Err(format!("dtype {} has no OpenCL type", dtype)),
     })
 }
 

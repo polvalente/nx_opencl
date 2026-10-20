@@ -157,6 +157,39 @@ defmodule NxCL.NativeRuntimeTest do
     end
   end
 
+  describe "launch and buffer checks" do
+    test "a launch whose kernel declares another argument count is an error" do
+      ctx = Native.device_ctx_create(0)
+
+      # `@add_one` has three parameters; this launch passes two.
+      launch =
+        Ops.launch([{:input, 0}], @f32, {3}, @add_one, "add_one",
+          global: [64],
+          local: [64],
+          scalars: []
+        )
+
+      encoded = {launch.op, launch.operands, @f32, {3}, launch.attrs}
+      assert {:error, reason} = Native.compile_program(ctx, wire([encoded], [{:result, 0}]))
+      assert reason =~ "declares 3 arguments"
+    end
+
+    test "a buffer from another context is rejected" do
+      ctx = Native.device_ctx_create(0)
+      other = Native.device_ctx_create(0)
+      foreign = upload(other, [1.0, 2.0, 3.0])
+
+      {:ok, program} =
+        Native.compile_program(ctx, wire([instr(:negate, [{:input, 0}], {3})], [{:result, 0}]))
+
+      assert {:error, reason} = Native.eval_program(program, [foreign])
+      assert reason =~ "another device context"
+
+      assert {:error, reason} = Native.buffer_read_many(ctx, [{foreign, 12}])
+      assert reason =~ "another device context"
+    end
+  end
+
   describe "program cache" do
     test "a jitted function adds no program after its first call" do
       jitted =

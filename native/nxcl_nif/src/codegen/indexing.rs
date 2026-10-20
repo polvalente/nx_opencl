@@ -25,7 +25,10 @@
 use super::index::{self, dims, strides};
 use super::movement::{ints, type_names, Kernel};
 use super::types::{type_info, Half, Kind, TypeInfo, BF16_HELPERS};
-use super::{checked_product, element_count, Caps, Instr, KernelArg, KernelSpec, Plan};
+use super::{
+    checked_element_count, checked_product, expect_operands, Caps, Instr, KernelArg, KernelSpec,
+    Plan,
+};
 
 const OPS: [&str; 3] = ["gather", "indexed_add", "indexed_put"];
 
@@ -105,19 +108,6 @@ fn check_index_type(instr: &Instr, k: usize) -> Result<TypeInfo, String> {
     Ok(info)
 }
 
-fn expect(instr: &Instr, n: usize) -> Result<(), String> {
-    if instr.operands.len() == n {
-        Ok(())
-    } else {
-        Err(format!(
-            "{} takes {} operands, got {}",
-            instr.op,
-            n,
-            instr.operands.len()
-        ))
-    }
-}
-
 fn flag(k: &mut Kernel) {
     k.params.push("__global int* err".to_string());
     k.args.push(KernelArg::ErrorFlag);
@@ -156,7 +146,7 @@ fn index_offset(count: usize) -> String {
 
 /// Operands: the tensor, the indices `[batch..., k]`. Attrs: the gathered axes.
 fn gather(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
-    expect(instr, 2)?;
+    expect_operands(instr, 2)?;
     let (tensor, indices) = (&instr.operands[0], &instr.operands[1]);
     if tensor.dtype != instr.out {
         return Err(format!(
@@ -212,9 +202,7 @@ fn gather(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     body.push_str(&format!("  if (bad) *err = {CODE_GATHER};\n"));
     body.push_str(&format!("  out[i] = {};\n", kern.read(0, "off")));
     let entry = format!("ix_gather_k{k}_r{r}_{}", type_names(instr));
-    let mut spec = kern.finish(caps, entry, "", &body)?;
-    spec.global = vec![element_count(&instr.out_shape).max(1)];
-    Ok(Plan::single(spec))
+    Ok(Plan::single(kern.finish(caps, entry, "", &body)?))
 }
 
 /// Checked shapes of an indexed op: operands `[target, indices {n, k}, updates {n, window...}]`.
@@ -226,7 +214,7 @@ struct Indexed {
 }
 
 fn indexed(instr: &Instr) -> Result<Indexed, String> {
-    expect(instr, 3)?;
+    expect_operands(instr, 3)?;
     let (target, indices, updates) = (&instr.operands[0], &instr.operands[1], &instr.operands[2]);
     for (name, o) in [("target", target), ("updates", updates)] {
         if o.dtype != instr.out {
@@ -303,7 +291,6 @@ fn update_pass(
     declare(&mut k)?;
     flag(&mut k);
     let (gd, gs) = ix.geo.gathered();
-    k.long("nu".to_string(), ix.updates as i64);
     k.long("uc".to_string(), ix.row_len as i64);
     k.longs("ud", &dims(&ix.window));
     k.longs("rs", &ix.geo.rest_strides());
@@ -311,7 +298,7 @@ fn update_pass(
     k.longs("gs", &gs);
     let (kk, r) = (ix.geo.k(), ix.geo.r());
     let mut src = String::from(
-        "  size_t i = get_global_id(0);\n  if ((long)i >= nu) return;\n  long n = (long)i / uc;\n  long q = (long)i % uc;\n  int bad = 0;\n  long off = 0;\n",
+        "  size_t i = get_global_id(0);\n  long n = (long)i / uc;\n  long q = (long)i % uc;\n  int bad = 0;\n  long off = 0;\n",
     );
     for d in (0..r).rev() {
         src.push_str(&format!("  off += (q % ud{d}) * rs{d};\n  q /= ud{d};\n"));
@@ -321,9 +308,7 @@ fn update_pass(
     src.push_str(&format!("  if (bad) {{ *err = {code}; return; }}\n"));
     src.push_str(body);
     let entry = format!("{}_k{kk}_r{r}_{}", spec.name, type_names(instr));
-    let mut out = k.finish(caps, entry, spec.helpers, &src)?;
-    out.global = vec![ix.updates.max(1)];
-    Ok(out)
+    k.finish_over(caps, entry, spec.helpers, &src, ix.updates)
 }
 
 struct PassSpec<'a> {
@@ -351,9 +336,13 @@ fn target_pass(
     let mut src = index::coords(ix.geo.shape.len());
     src.push_str(body);
     let entry = format!("{}_r{}_{}", name, ix.geo.shape.len(), type_names(instr));
-    let mut out = k.finish(caps, entry, helpers, &src)?;
-    out.global = vec![element_count(&ix.geo.shape).max(1)];
-    Ok(out)
+    k.finish_over(
+        caps,
+        entry,
+        helpers,
+        &src,
+        checked_element_count(&ix.geo.shape)?,
+    )
 }
 
 /// `us{d}` of rest axis `d` applies to the coordinate `c{rest[d]}`.
@@ -368,18 +357,18 @@ fn window_offset(ix: &Indexed) -> String {
 
 fn indexed_put(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let ix = indexed(instr)?;
-    let tc = element_count(&ix.geo.shape);
+    let tc = checked_element_count(&ix.geo.shape)?;
 
     // Pass 1: winner[t] = -1.
     let mut k = Kernel::new(instr);
     scratch(&mut k, "int", "win", 0);
-    let mut init = k.finish(
+    let init = k.finish_over(
         caps,
         format!("ix_put_init_{}", instr.out.name()),
         "",
         "  win[get_global_id(0)] = -1;\n",
+        tc,
     )?;
-    init.global = vec![tc.max(1)];
 
     // Pass 2: each update claims the target element it covers; the highest row wins.
     let claim = update_pass(
@@ -530,7 +519,7 @@ fn narrow(info: &TypeInfo, x: &str) -> String {
 fn indexed_add(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
     let ix = indexed(instr)?;
     let info = type_info(instr.out)?;
-    let tc = element_count(&ix.geo.shape);
+    let tc = checked_element_count(&ix.geo.shape)?;
     // `c64` is two 32-bit parts; `c128` two 64-bit parts.
     let wide_value = matches!(
         (info.dtype.kind, info.dtype.bits),
@@ -846,7 +835,9 @@ mod tests {
     #[test]
     fn an_update_pass_ignores_threads_past_the_updates() {
         let p = plan(&indexed_instr("indexed_add", S32));
-        assert!(p.passes[1].source.contains("if ((long)i >= nu) return;"));
+        assert!(p.passes[1]
+            .source
+            .contains("if ((long)get_global_id(0) >= total) return;"));
     }
 
     #[test]

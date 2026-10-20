@@ -2,7 +2,7 @@ defmodule NxCL.GemmWireTest do
   @moduledoc """
   `batched_gemm` and `conv` through the native wire: sizes `Nx.BinaryBackend` cannot
   reach in reasonable time (answers stated), `K == 0` and zero-size products (Nx
-  1.0 builds no zero-size tensors), and the `NXCL_GEMM_TILE` override.
+  1.0 builds no zero-size tensors).
   """
   use ExUnit.Case, async: false
 
@@ -26,51 +26,6 @@ defmodule NxCL.GemmWireTest do
     {_, _, _, [{_, _, _, shape, _}], _} = wire
     size = shape |> Tuple.product() |> Kernel.*(div(elem(type, 1), 8))
     out |> Native.buffer_read(size) |> Nx.from_binary(type) |> Nx.reshape(shape)
-  end
-
-  # The override is read from the process environment, and the BEAM's `System.put_env`
-  # does not reach native code, so each override runs in a child VM that starts with it.
-  @child """
-  alias NxCL.Native
-  ctx = Native.device_ctx_create(0)
-  wire = {[{{:f, 32}, {1, 37, 29}}, {{:f, 32}, {1, 29, 41}}], [], [],
-          [{:batched_gemm, [{:input, 0}, {:input, 1}], {:f, 32}, {1, 37, 41}, [1, 37, 41, 29]}],
-          [{:result, 0}]}
-  up = fn t -> Native.buffer_write(ctx, Nx.to_binary(t)) end
-  a = Nx.iota({1, 37, 29}, type: :f32) |> Nx.divide(7)
-  b = Nx.iota({1, 29, 41}, type: :f32) |> Nx.divide(5)
-  case Native.compile_program(ctx, wire) do
-    {:ok, p} ->
-      {:ok, [out]} = Native.eval_program(p, [up.(a), up.(b)])
-      bin = Native.buffer_read(out, 37 * 41 * 4)
-      IO.puts("RESULT " <> Base.encode64(bin))
-
-    {:error, reason} ->
-      IO.puts("ERROR " <> Base.encode64(reason))
-  end
-  """
-
-  defp child_result(tile) do
-    env = [{"MIX_ENV", "test"}, {"NXCL_GEMM_TILE", tile}]
-
-    args = [
-      "run",
-      "--no-compile",
-      "--no-start",
-      "-e",
-      "Application.ensure_all_started(:nx); " <> @child
-    ]
-
-    {out, 0} = System.cmd("mix", args, env: env, stderr_to_stdout: true)
-
-    case Regex.run(~r/RESULT (\S+)/, out) do
-      [_, b64] ->
-        b64 |> Base.decode64!() |> Nx.from_binary(:f32)
-
-      nil ->
-        [_, b64] = Regex.run(~r/ERROR (\S+)/, out)
-        {:error, Base.decode64!(b64)}
-    end
   end
 
   describe "large products with stated answers" do
@@ -166,26 +121,6 @@ defmodule NxCL.GemmWireTest do
     end
   end
 
-  describe "NXCL_GEMM_TILE" do
-    test "a valid override gives the same answer as the table" do
-      a = Nx.iota({1, 37, 29}, type: :f32) |> Nx.divide(7)
-      b = Nx.iota({1, 29, 41}, type: :f32) |> Nx.divide(5)
-      ctx = Native.device_ctx_create(0)
-      default = run_gemm(ctx, gemm_wire(1, 37, 41, 29), a, b) |> Nx.reshape({:auto})
-
-      for tile <- ["16,16,8,2,2", "8,8,4,1,1"] do
-        assert_all_close(child_result(tile), default)
-      end
-    end
-
-    test "an override that is not valid is an error" do
-      assert {:error, message} = child_result("3,3,3,2,2")
-      assert message =~ "NXCL_GEMM_TILE"
-      assert {:error, message} = child_result("not a tile")
-      assert message =~ "NXCL_GEMM_TILE"
-    end
-  end
-
   describe "conv with stated answers" do
     test "all ones with same padding count the cells under the kernel" do
       {c, h, w, o} = {16, 40, 36, 8}
@@ -218,9 +153,5 @@ defmodule NxCL.GemmWireTest do
       assert Enum.uniq(Nx.to_flat_list(out[[0, 0]])) == [18.0]
       assert Enum.uniq(Nx.to_flat_list(out[[0, 1]])) == [270.0]
     end
-  end
-
-  defp assert_all_close(a, b) do
-    assert Nx.to_number(Nx.reduce_max(Nx.abs(Nx.subtract(a, b)))) < 1.0e-3
   end
 end

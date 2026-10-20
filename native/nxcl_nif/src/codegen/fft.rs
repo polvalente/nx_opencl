@@ -20,8 +20,11 @@ use super::complex;
 use super::index;
 use super::movement::{assemble, pragmas};
 use super::types::{type_info, TypeInfo};
-use super::{checked_product, long_arg, Attr, Caps, Instr, KernelArg, KernelSpec, Plan};
+use super::{
+    checked_product, expect_operands, long_arg, Attr, Caps, Instr, KernelArg, KernelSpec, Plan,
+};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 const OPS: [&str; 2] = ["fft", "ifft"];
 
@@ -98,7 +101,8 @@ fn filter_transform(n: usize, m: usize) -> Vec<C64> {
 }
 
 /// The table as bytes of the element type: two `f32` or two `f64` per entry.
-fn table_bytes(info: &TypeInfo, values: &[C64]) -> Vec<u8> {
+/// The passes that read it share the one allocation.
+fn table_bytes(info: &TypeInfo, values: &[C64]) -> Arc<[u8]> {
     let mut out = Vec::with_capacity(values.len() * info.bytes);
     for &(re, im) in values {
         if info.component == "double" {
@@ -109,7 +113,7 @@ fn table_bytes(info: &TypeInfo, values: &[C64]) -> Vec<u8> {
             out.extend_from_slice(&(im as f32).to_ne_bytes());
         }
     }
-    out
+    out.into()
 }
 
 fn scale_bytes(info: &TypeInfo, scale: f64) -> Vec<u8> {
@@ -120,6 +124,7 @@ fn scale_bytes(info: &TypeInfo, scale: f64) -> Vec<u8> {
     }
 }
 
+#[derive(Clone)]
 struct Ctx<'a> {
     instr: &'a Instr,
     info: TypeInfo,
@@ -172,11 +177,13 @@ impl Ctx<'_> {
         format!("({})(({v}).x * scale, ({v}).y * scale)", self.st(), v = v)
     }
 
-    /// One Stockham pass. Reads `src`, writes `dst`; `len` is the line length
-    /// of both, `inner` the axis stride, `n` and `s` the pass state.
+    /// One Stockham pass. Reads `src` and the twiddle table, writes `dst`.
+    /// `len` is the line length of both and `inner` the axis stride. `n` is the
+    /// length of the sub-transform this pass splits and `s` the stride between
+    /// its elements: `n` halves and `s` doubles from one pass to the next.
     fn stage(
         &self,
-        (src, dst, table): (KernelArg, KernelArg, &[u8]),
+        (src, dst, table): (KernelArg, KernelArg, &Arc<[u8]>),
         (len, inner): (usize, usize),
         (n, s): (usize, usize),
         scale: f64,
@@ -216,7 +223,7 @@ impl Ctx<'_> {
         let args = vec![
             src,
             dst,
-            KernelArg::Table(table.to_vec()),
+            KernelArg::Table(table.clone()),
             Self::long(len / 2)?,
             Self::long(len)?,
             Self::long(inner)?,
@@ -229,15 +236,16 @@ impl Ctx<'_> {
         Ok(self.spec("fft_stage", &params, &body, items, args))
     }
 
-    /// `L` passes of length `len` from `src`, ping-ponging with `other`; the
-    /// last pass writes `last`. Returns the passes. `lines` lines of length `len`
-    /// with axis stride `inner`. The first pass reads `first`.
+    /// The `L` passes of a transform of lines of length `len = 2^L` with axis
+    /// stride `inner` (`shape` is `(len, inner)`). The first pass reads `first`,
+    /// the passes ping-pong with `other`, and the last writes `last`. The last
+    /// pass multiplies by `scale`.
     fn run(
         &self,
         bufs: (KernelArg, KernelArg, KernelArg),
         shape: (usize, usize),
         scale: f64,
-        table: &[u8],
+        table: &Arc<[u8]>,
     ) -> Result<Vec<KernelSpec>, String> {
         let (first, other, last) = bufs;
         let (len, inner) = shape;
@@ -289,12 +297,27 @@ impl Ctx<'_> {
     }
 }
 
-/// The longest axis a power-of-two transform takes. The host builds a twiddle
-/// table of half this many entries, so the limit bounds host memory.
+// Memory per transform. Every pass reads one twiddle table, and `KernelArg::Table`
+// shares it by `Arc`, so the table exists once on the host and once on the device,
+// however many passes there are. Sizes are in bytes, `E` is the element size (8
+// for `c64`, 16 for `c128`) and `N` the axis length.
+//
+// - Power of two: the table has `N / 2` entries, `N * E / 2` bytes. While the
+//   host rounds it from `f64` it holds a second `N * 8` bytes. The device holds
+//   the table plus an input, an output and a scratch buffer of `N * E` bytes per
+//   line. At `N = 2^26`: host peak 768 MiB (`c64`) or 1 GiB (`c128`), and the
+//   table on the device is 256 MiB or 512 MiB.
+// - Bluestein: `M` is the next power of two at least `2N - 1`. Three tables
+//   hold `N`, `M` and `M / 2` entries, at most `2 * M * E` bytes. The forward
+//   and the inverse transform share the twiddle table. The device also holds two
+//   scratch buffers of `M * E` bytes per line. At `N = 2^22` (`M = 2^23`) the
+//   tables are 64 + 128 + 64 MiB for `c128` and half that for `c64`. The `f64`
+//   filter transform adds `M * 16` bytes on the host while it is built.
+
+/// The longest axis a power-of-two transform takes.
 const MAX_POWER_OF_TWO: usize = 1 << 26;
 
-/// The longest axis Bluestein's method takes. The host builds three tables
-/// of the padded length `M`, which is up to four times the axis.
+/// The longest axis Bluestein's method takes.
 const MAX_BLUESTEIN: usize = 1 << 22;
 
 /// The length `M` Bluestein convolves over: the next power of two at least
@@ -380,9 +403,9 @@ fn bluestein_plan(ctx: &Ctx) -> Result<Plan, String> {
     // Forward transform of length `m`, ping-ponging the two scratch buffers.
     let forward_ctx = Ctx {
         inverse: false,
-        ..clone_ctx(ctx)
+        ..ctx.clone()
     };
-    let (forward, at) = m_transform(&forward_ctx, m, 1.0, &tw_table)?;
+    let (forward, at) = m_transform(&forward_ctx, m, 0, 1.0, &tw_table)?;
 
     // Multiply by the transform of the filter, in place in scratch 0.
     let filter = {
@@ -406,9 +429,9 @@ fn bluestein_plan(ctx: &Ctx) -> Result<Plan, String> {
     // Inverse transform of length `m`, with the `1 / m` scale in its last pass.
     let backward_ctx = Ctx {
         inverse: true,
-        ..clone_ctx(ctx)
+        ..ctx.clone()
     };
-    let (backward, at) = m_transform_from(&backward_ctx, m, at, 1.0 / m as f64, &tw_table)?;
+    let (backward, at) = m_transform(&backward_ctx, m, at, 1.0 / m as f64, &tw_table)?;
 
     // Post: scale by the chirp, drop the padding, undo the conjugation.
     let post = {
@@ -456,25 +479,15 @@ fn bluestein_plan(ctx: &Ctx) -> Result<Plan, String> {
     })
 }
 
-/// Passes of a length-`m` transform that starts in scratch 0.
-fn m_transform(
-    ctx: &Ctx,
-    m: usize,
-    scale: f64,
-    table: &[u8],
-) -> Result<(Vec<KernelSpec>, usize), String> {
-    m_transform_from(ctx, m, 0, scale, table)
-}
-
 /// Passes of a length-`m` transform that starts in scratch `from`. The result
 /// lands in the buffer the second return value names. The last buffer is chosen
 /// so the first pass never writes the buffer it reads.
-fn m_transform_from(
+fn m_transform(
     ctx: &Ctx,
     m: usize,
     from: usize,
     scale: f64,
-    table: &[u8],
+    table: &Arc<[u8]>,
 ) -> Result<(Vec<KernelSpec>, usize), String> {
     let stages = m.trailing_zeros() as usize;
     let to = if stages.is_multiple_of(2) {
@@ -490,27 +503,9 @@ fn m_transform_from(
     Ok((ctx.run(bufs, (m, 1), scale, table)?, to))
 }
 
-fn clone_ctx<'a>(ctx: &Ctx<'a>) -> Ctx<'a> {
-    Ctx {
-        instr: ctx.instr,
-        info: ctx.info,
-        head: ctx.head.clone(),
-        n: ctx.n,
-        lines: ctx.lines,
-        inner: ctx.inner,
-        inverse: ctx.inverse,
-    }
-}
-
 /// Attrs: `[axis]`. The operand and the output are complex, of one type and shape.
 pub fn generate(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
-    if instr.operands.len() != 1 {
-        return Err(format!(
-            "{} takes 1 operand, got {}",
-            instr.op,
-            instr.operands.len()
-        ));
-    }
+    expect_operands(instr, 1)?;
     let input = &instr.operands[0];
     let info = type_info(instr.out)?;
     if !info.is_complex() || input.dtype != instr.out {
@@ -583,9 +578,9 @@ pub fn generate(instr: &Instr, caps: &Caps) -> Result<Plan, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::plan;
+    use super::super::test_support::{self, plan};
     use super::super::types::Kind;
-    use super::super::{DType, Operand};
+    use super::super::DType;
     use super::*;
 
     const C64: DType = DType::new(Kind::C, 64);
@@ -593,17 +588,13 @@ mod tests {
     const F32: DType = DType::new(Kind::F, 32);
 
     fn instr(op: &str, dtype: DType, shape: &[usize], axis: i64) -> Instr {
-        Instr {
-            op: op.to_string(),
-            operands: vec![Operand {
-                dtype,
-                shape: shape.to_vec(),
-                constant: None,
-            }],
-            out: dtype,
-            out_shape: shape.to_vec(),
-            attrs: vec![Attr::Int(axis)],
-        }
+        test_support::instr(
+            op,
+            vec![test_support::buf(dtype, shape)],
+            dtype,
+            shape,
+            vec![Attr::Int(axis)],
+        )
     }
 
     fn dft(x: &[C64]) -> Vec<C64> {
@@ -760,5 +751,36 @@ mod tests {
     fn an_empty_axis_is_an_error() {
         let err = generate(&instr("fft", C64, &[3, 0], 1), &Caps::all()).unwrap_err();
         assert!(err.contains("no elements"), "{err}");
+    }
+
+    #[test]
+    fn the_passes_of_one_transform_share_each_table() {
+        let tables = |p: &Plan| -> Vec<Arc<[u8]>> {
+            p.passes
+                .iter()
+                .flat_map(|s| s.args.iter())
+                .filter_map(|a| match a {
+                    KernelArg::Table(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // 2^10: ten passes, one twiddle table.
+        let p = plan(&instr("fft", C64, &[1024], 0));
+        let t = tables(&p);
+        assert_eq!(t.len(), 10);
+        assert!(t.iter().all(|x| Arc::ptr_eq(x, &t[0])));
+        // 100 is Bluestein: the chirp serves the first and last pass, and the
+        // twiddles serve both transforms. Three distinct allocations in all.
+        let p = plan(&instr("fft", C64, &[100], 0));
+        let t = tables(&p);
+        let mut distinct: Vec<&Arc<[u8]>> = Vec::new();
+        for x in &t {
+            if !distinct.iter().any(|d| Arc::ptr_eq(d, x)) {
+                distinct.push(x);
+            }
+        }
+        assert_eq!(distinct.len(), 3);
+        assert!(t.len() > 3);
     }
 }
