@@ -1,7 +1,12 @@
 defmodule NxCL.DeviceCtxTest do
+  @moduledoc """
+  `NxCL.Native` device context creation and device info.
+  """
+
   use ExUnit.Case, async: false
 
   @moduletag :opencl
+
   describe "device_ctx_create/1" do
     test "creates a device context for device 0" do
       ctx = NxCL.Native.device_ctx_create(0)
@@ -14,7 +19,6 @@ defmodule NxCL.DeviceCtxTest do
     end
   end
 
-  @moduletag :opencl
   describe "device_info/1" do
     test "returns device information" do
       ctx = NxCL.Native.device_ctx_create(0)
@@ -25,6 +29,8 @@ defmodule NxCL.DeviceCtxTest do
       assert Map.has_key?(info_map, "name")
       assert Map.has_key?(info_map, "vendor")
       assert Map.has_key?(info_map, "version")
+      assert Map.has_key?(info_map, "driver_version")
+      assert info_map["device_type"] in ["GPU", "CPU", "ACCELERATOR", "OTHER"]
       assert Map.has_key?(info_map, "max_workgroup_size")
       assert Map.has_key?(info_map, "max_compute_units")
       assert Map.has_key?(info_map, "global_mem_size")

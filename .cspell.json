@@ -19,16 +19,12 @@
     "npm"
   ],
   "ignorePaths": [
-    "architecture.md",
     "benchmarks",
-    "compiler_plan.md",
     "config",
     "mix.exs",
     "native",
     "priv",
-    "rel",
-    "test",
-    "test_plan.md"
+    "test"
   ],
   "words": [
     "nxcl",
@@ -49,6 +45,9 @@
     "clinfo",
     "libopencl",
     "ifft",
+    "irfft",
+    "rfft",
+    "eigh",
     "logits",
     "GFLOPS",
     "gflops",
@@ -75,6 +74,14 @@
     "musleabihf",
     "topo",
     "gelu",
-    "linalg"
+    "linalg",
+    "iommu",
+    "valhall",
+    "panfrost",
+    "panthor",
+    "freedreno",
+    "EMLX",
+    "Bluestein",
+    "clippy"
   ]
 }

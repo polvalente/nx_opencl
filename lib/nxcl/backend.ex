@@ -2,125 +2,98 @@ defmodule NxCL.Backend do
   @moduledoc """
   Nx backend for OpenCL GPUs.
 
-  Tensor data lives on the GPU as opaque NIF resource references.
-  For ops not yet implemented on GPU, data is transferred to the CPU
-  via `Nx.BinaryBackend`, computed there, and transferred back.
+  Tensor data lives on the device. Each callback builds a one-op program and
+  runs it with the kernels `NxCL.Compiler` uses. The program is cached by op,
+  operand types, shapes and attributes.
 
-  ## GPU-accelerated operations
+  No op runs on `Nx.BinaryBackend`. An op with no lowering raises
+  `ArgumentError` ("does not lower op ..."). `from_pointer/5` and
+  `to_pointer/2` raise, because OpenCL has no portable handle to share.
 
-  The following operations run on the GPU for `f32` tensors with matching
-  shapes (no broadcasting required):
+  ## Memory
 
-    * Binary elementwise: `add`, `subtract`, `multiply`, `divide`
-    * Unary elementwise: `negate`, `exp`, `log`, `tanh`, `sigmoid`, `abs`
-    * Linear algebra: `dot` (2D matrix multiply)
-    * Reductions: `sum`, `reduce_max`, `reduce_min` (full reduction)
-    * Shape: `reshape`, `squeeze`, `bitcast` (zero-copy, metadata only)
-
-  All other operations fall back to `Nx.BinaryBackend` automatically.
+  `Nx.backend_deallocate/1` frees the device buffer at once. Otherwise it goes
+  when the BEAM collects the tensor. A `reshape` or `squeeze` result shares its
+  operand's memory, which goes when both are freed.
 
   ## Usage
 
-      # Set as default backend
       Nx.default_backend(NxCL.Backend)
 
-      # Or transfer individual tensors
       gpu_tensor = Nx.backend_transfer(cpu_tensor, NxCL.Backend)
 
   ## Device selection
 
-  Currently uses the first available GPU device (index 0). A single
-  OpenCL context is shared across all processes via `persistent_term`.
+  The default is device 0. Pass `device:` to `Nx.default_backend/1`,
+  `Nx.backend_transfer` or `Nx.Defn.jit/2` to pick another (see
+  `NxCL.Devices`).
   """
 
   @behaviour Nx.Backend
 
+  alias NxCL.Compiler.Evaluator
+  alias NxCL.Compiler.Ops
+
   defstruct [:ref, :ctx]
 
-  # Shared device context across all processes via persistent_term
-  @ctx_key :nxcl_device_ctx
+  # A misspelled key would otherwise pick device 0 without a word. Nx calls
+  # `init/1` for `Nx.default_backend/1` only; the callbacks that take
+  # `backend_opts` check them too.
+  @impl true
+  def init(opts), do: check_opts!(opts)
 
-  defp get_ctx() do
-    case :persistent_term.get(@ctx_key, nil) do
-      nil ->
-        ctx = NxCL.Native.device_ctx_create(0)
-        :persistent_term.put(@ctx_key, ctx)
-        ctx
-
-      ctx ->
-        ctx
-    end
-  end
-
-  defp to_gpu(%Nx.Tensor{data: %__MODULE__{}} = tensor), do: tensor
-
-  defp to_gpu(%Nx.Tensor{} = tensor) do
-    from_binary(tensor, Nx.to_binary(tensor), [])
-  end
-
-  defp gpu_ref(%Nx.Tensor{data: %__MODULE__{ref: ref}}), do: ref
-
-  defp flat_size(%Nx.Tensor{} = t), do: Nx.size(t)
-
-  # Fallback: run on CPU and bring result back to GPU
-  defp fallback(callback, args) do
-    # Convert GPU tensors to BinaryBackend tensors
-    cpu_args = Enum.map(args, &to_cpu_arg/1)
-
-    # Run on CPU
-    result = apply(Nx.BinaryBackend, callback, cpu_args)
-
-    # Convert result back to GPU
-    case result do
-      %Nx.Tensor{} = t -> to_gpu(t)
-      other -> other
-    end
-  end
-
-  defp to_cpu_arg(%Nx.Tensor{data: %__MODULE__{}} = t) do
-    bin = to_binary(t, Nx.byte_size(t))
-    Nx.from_binary(bin, Nx.type(t)) |> Nx.reshape(Nx.shape(t))
-  end
-
-  defp to_cpu_arg(list) when is_list(list) do
-    Enum.map(list, &to_cpu_arg/1)
-  end
-
-  defp to_cpu_arg(other), do: other
-
-  # ── Lifecycle ──────────────────────────────────────
+  defp check_opts!(opts), do: Keyword.validate!(opts, [:device])
 
   @impl true
-  def init(opts) do
-    opts
-  end
-
-  # ── Data Transfer ──────────────────────────────────
-
-  @impl true
-  def from_binary(%Nx.Tensor{} = tensor, binary, _backend_opts) do
-    ctx = get_ctx()
-    ref = NxCL.Native.buffer_write(ctx, binary)
+  def from_binary(%Nx.Tensor{} = tensor, binary, backend_opts) do
+    ctx = device_ctx!(check_opts!(backend_opts))
+    ref = ctx |> NxCL.Native.buffer_write(binary) |> NxCL.Native.ok!("could not upload a tensor")
     put_in(tensor.data, %__MODULE__{ref: ref, ctx: ctx})
   end
 
+  # A bad device is an argument error here, not a compiler error.
+  defp device_ctx!(opts) do
+    case NxCL.Devices.fetch(opts) do
+      {:ok, %{ctx: ctx}} -> ctx
+      {:error, reason} -> raise ArgumentError, "cannot open the OpenCL device: #{reason}"
+    end
+  end
+
+  # `limit` counts elements, vectorized axes included.
   @impl true
-  def to_binary(%Nx.Tensor{data: %__MODULE__{ref: ref}} = tensor, _limit) do
-    NxCL.Native.buffer_read(ref, Nx.byte_size(tensor))
+  def to_binary(%Nx.Tensor{data: %__MODULE__{ref: ref}, type: {_, bits}} = tensor, limit) do
+    ref
+    |> NxCL.Native.buffer_read(div(bits * min(limit, Nx.flat_size(tensor)), 8))
+    |> NxCL.Native.ok!("could not read a tensor")
+  end
+
+  # Reads one element more than `opts.limit`, as `Nx.Backend.inspect/3`
+  # expects, so a large tensor does not come back whole to print a few values.
+  @impl true
+  def inspect(%Nx.Tensor{data: %__MODULE__{ref: ref}, type: {_, bits}} = tensor, opts) do
+    size = Nx.flat_size(tensor)
+    count = if opts.limit == :infinity, do: size, else: min(size, opts.limit + 1)
+
+    case NxCL.Native.buffer_read(ref, div(bits * count, 8)) do
+      {:error, "buffer was deallocated"} ->
+        "NxCL.Backend<deallocated>"
+
+      {:error, message} ->
+        raise ArgumentError, "could not read a tensor: #{message}"
+
+      binary ->
+        Nx.Backend.inspect(tensor, binary, opts)
+    end
   end
 
   @impl true
-  def inspect(%Nx.Tensor{} = tensor, opts) do
-    binary = to_binary(tensor, Nx.byte_size(tensor))
-    Nx.Backend.inspect(tensor, binary, opts)
+  def backend_deallocate(%Nx.Tensor{data: %__MODULE__{ref: ref}}) do
+    if NxCL.Native.buffer_free(ref), do: :ok, else: :already_deallocated
   end
-
-  @impl true
-  def backend_deallocate(%Nx.Tensor{data: %__MODULE__{}}), do: :ok
 
   @impl true
   def backend_copy(tensor, Nx.BinaryBackend, _opts) do
-    binary = to_binary(tensor, Nx.byte_size(tensor))
+    binary = to_binary(tensor, Nx.flat_size(tensor))
 
     Nx.BinaryBackend.from_binary(
       %{tensor | data: %Nx.BinaryBackend{}},
@@ -129,8 +102,10 @@ defmodule NxCL.Backend do
     )
   end
 
+  # Any other target, an `NxCL.Backend` tensor on another device included, takes
+  # the data through the host.
   def backend_copy(tensor, backend, opts) do
-    binary = to_binary(tensor, Nx.byte_size(tensor))
+    binary = to_binary(tensor, Nx.flat_size(tensor))
     backend.from_binary(%{tensor | data: %{__struct__: backend}}, binary, opts)
   end
 
@@ -141,434 +116,169 @@ defmodule NxCL.Backend do
     result
   end
 
-  # ── Constant / Eye / Iota ──────────────────────────
-
+  # Batches are cut from the host copy and uploaded again.
   @impl true
-  def constant(%Nx.Tensor{} = out, number, backend_opts) do
-    binary = Nx.BinaryBackend.constant(%{out | data: %Nx.BinaryBackend{}}, number, [])
-    bin = Nx.to_binary(binary)
-    from_binary(out, bin, backend_opts)
+  def to_batched(out, %Nx.Tensor{} = tensor, opts) do
+    batch_size = elem(out.shape, 0)
+    full = div(elem(tensor.shape, 0), batch_size)
+    repeat? = rem(elem(tensor.shape, 0), batch_size) != 0 and opts[:leftover] == :repeat
+    range = if repeat?, do: 0..full, else: 0..(full - 1)//1
+    binary = to_binary(tensor, Nx.flat_size(tensor))
+    bytes = Nx.byte_size(out)
+    device_opts = Evaluator.device_opts([tensor])
+
+    Stream.map(range, fn
+      # The short last batch wraps around: it takes the items from the start.
+      ^full ->
+        before = full * bytes
+        available = byte_size(binary) - before
+        rest = binary_part(binary, before, available) <> binary_part(binary, 0, bytes - available)
+        from_binary(out, rest, device_opts)
+
+      i ->
+        from_binary(out, binary_part(binary, i * bytes, bytes), device_opts)
+    end)
   end
 
   @impl true
-  def eye(%Nx.Tensor{} = out, backend_opts) do
-    cpu = Nx.BinaryBackend.eye(%{out | data: %Nx.BinaryBackend{}}, [])
-    bin = Nx.to_binary(cpu)
-    from_binary(out, bin, backend_opts)
-  end
+  def constant(%Nx.Tensor{} = out, number, backend_opts),
+    do: Evaluator.constant(out, number, check_opts!(backend_opts))
 
   @impl true
-  def iota(%Nx.Tensor{} = out, axis, backend_opts) do
-    cpu = Nx.BinaryBackend.iota(%{out | data: %Nx.BinaryBackend{}}, axis, [])
-    bin = Nx.to_binary(cpu)
-    from_binary(out, bin, backend_opts)
-  end
-
-  # ── Shape operations (many are zero-copy metadata changes) ──
+  def eye(%Nx.Tensor{} = out, backend_opts),
+    do: Evaluator.eye(out, check_opts!(backend_opts))
 
   @impl true
-  def reshape(%Nx.Tensor{} = out, %Nx.Tensor{data: %__MODULE__{} = data} = _tensor) do
-    # Reshape is metadata-only for contiguous tensors
-    put_in(out.data, data)
-  end
+  def iota(%Nx.Tensor{} = out, axis, backend_opts),
+    do: Evaluator.iota(out, axis, check_opts!(backend_opts))
 
-  @impl true
-  def squeeze(out, tensor, _axes) do
-    put_in(out.data, tensor.data)
-  end
-
-  @impl true
-  def as_type(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor) do
-    if Nx.type(out) == Nx.type(tensor) do
-      put_in(out.data, tensor.data)
-    else
-      fallback(:as_type, [out, tensor])
-    end
-  end
-
-  @impl true
-  def bitcast(%Nx.Tensor{} = out, %Nx.Tensor{data: %__MODULE__{} = data}) do
-    put_in(out.data, data)
-  end
-
-  # ── Elementwise Binary Ops ─────────────────────────
-
-  @gpu_binary_ops %{
-    add: "add",
-    subtract: "subtract",
-    multiply: "multiply",
-    divide: "divide"
-  }
-
-  for {op, kernel_name} <- @gpu_binary_ops do
+  # `logical_not` and `phase` reach the backend as blocks, not callbacks.
+  for op <- Ops.unary_ops() -- [:logical_not, :phase] do
     @impl true
-    def unquote(op)(%Nx.Tensor{} = out, %Nx.Tensor{} = left, %Nx.Tensor{} = right) do
-      # If shapes match (no broadcasting needed), use GPU kernel directly
-      if Nx.shape(left) == Nx.shape(out) and Nx.shape(right) == Nx.shape(out) and
-           Nx.type(left) == {:f, 32} and Nx.type(right) == {:f, 32} do
-        left = to_gpu(left)
-        right = to_gpu(right)
-        ctx = get_ctx()
-        n = flat_size(out)
-
-        ref =
-          NxCL.Native.elementwise_binary_op(
-            ctx,
-            unquote(kernel_name),
-            gpu_ref(left),
-            gpu_ref(right),
-            n
-          )
-
-        put_in(out.data, %NxCL.Backend{ref: ref, ctx: ctx})
-      else
-        # Broadcasting needed - fallback to CPU
-        fallback(unquote(op), [out, left, right])
-      end
-    end
+    def unquote(op)(out, tensor), do: Evaluator.unary(unquote(op), out, tensor)
   end
 
-  # ── Elementwise Unary Ops ──────────────────────────
-
-  @gpu_unary_ops %{
-    negate: "negate",
-    exp: "exp",
-    log: "log",
-    tanh: "tanh",
-    sigmoid: "sigmoid",
-    abs: "abs"
-  }
-
-  for {op, kernel_name} <- @gpu_unary_ops do
+  for op <- Ops.binary_ops() do
     @impl true
-    def unquote(op)(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor) do
-      if Nx.type(tensor) == {:f, 32} do
-        tensor = to_gpu(tensor)
-        ctx = get_ctx()
-        n = flat_size(out)
-
-        ref =
-          NxCL.Native.elementwise_unary_op(
-            ctx,
-            unquote(kernel_name),
-            gpu_ref(tensor),
-            n
-          )
-
-        put_in(out.data, %NxCL.Backend{ref: ref, ctx: ctx})
-      else
-        fallback(unquote(op), [out, tensor])
-      end
-    end
+    def unquote(op)(out, left, right), do: Evaluator.binary(unquote(op), out, left, right)
   end
-
-  # ── Dot / Matmul ───────────────────────────────────
 
   @impl true
-  def dot(
-        %Nx.Tensor{} = out,
-        %Nx.Tensor{} = left,
-        [left_contract_axis],
-        [],
-        %Nx.Tensor{} = right,
-        [right_contract_axis],
-        []
-      ) do
-    left = to_gpu(left)
-    right = to_gpu(right)
+  def as_type(out, tensor), do: Evaluator.as_type(out, tensor)
 
-    left_shape = Nx.shape(left)
-    right_shape = Nx.shape(right)
+  @impl true
+  def bitcast(out, tensor), do: Evaluator.bitcast(out, tensor)
 
-    # Only handle 2D matmul for now
-    if tuple_size(left_shape) == 2 and tuple_size(right_shape) == 2 and
-         left_contract_axis == 1 and right_contract_axis == 0 do
-      {m, k} = left_shape
-      {_k, n} = right_shape
-      ctx = get_ctx()
+  @impl true
+  def select(out, pred, on_true, on_false), do: Evaluator.select(out, pred, on_true, on_false)
 
-      ref = NxCL.Native.matmul_op(ctx, gpu_ref(left), gpu_ref(right), m, n, k)
-      put_in(out.data, %NxCL.Backend{ref: ref, ctx: ctx})
-    else
-      fallback(:dot, [out, left, [left_contract_axis], [], right, [right_contract_axis], []])
-    end
-  end
+  @impl true
+  def clip(out, tensor, min, max), do: Evaluator.clip(out, tensor, min, max)
 
+  @impl true
   def dot(out, left, left_contract, left_batch, right, right_contract, right_batch) do
-    fallback(:dot, [out, left, left_contract, left_batch, right, right_contract, right_batch])
-  end
-
-  # ── Reductions ─────────────────────────────────────
-
-  @impl true
-  def sum(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor, opts) do
-    axes = opts[:axes]
-
-    if axes == nil or axes == Nx.axes(tensor) do
-      # Full reduction
-      tensor = to_gpu(tensor)
-      ctx = get_ctx()
-      n = flat_size(tensor)
-
-      ref = NxCL.Native.reduce_op(ctx, "sum", gpu_ref(tensor), n)
-      put_in(out.data, %NxCL.Backend{ref: ref, ctx: ctx})
-    else
-      fallback(:sum, [out, tensor, opts])
-    end
+    Evaluator.dot(out, left, left_contract, left_batch, right, right_contract, right_batch)
   end
 
   @impl true
-  def reduce_max(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor, opts) do
-    axes = opts[:axes]
-
-    if axes == nil or axes == Nx.axes(tensor) do
-      tensor = to_gpu(tensor)
-      ctx = get_ctx()
-      n = flat_size(tensor)
-
-      ref = NxCL.Native.reduce_op(ctx, "max", gpu_ref(tensor), n)
-      put_in(out.data, %NxCL.Backend{ref: ref, ctx: ctx})
-    else
-      fallback(:reduce_max, [out, tensor, opts])
-    end
-  end
+  def conv(out, tensor, kernel, opts), do: Evaluator.conv(out, tensor, kernel, opts)
 
   @impl true
-  def reduce_min(%Nx.Tensor{} = out, %Nx.Tensor{} = tensor, opts) do
-    axes = opts[:axes]
-
-    if axes == nil or axes == Nx.axes(tensor) do
-      tensor = to_gpu(tensor)
-      ctx = get_ctx()
-      n = flat_size(tensor)
-
-      ref = NxCL.Native.reduce_op(ctx, "min", gpu_ref(tensor), n)
-      put_in(out.data, %NxCL.Backend{ref: ref, ctx: ctx})
-    else
-      fallback(:reduce_min, [out, tensor, opts])
-    end
-  end
-
-  # ── To Batched ─────────────────────────────────────
+  def reshape(out, tensor), do: Evaluator.alias_op(:reshape, out, tensor)
 
   @impl true
-  def to_batched(out, tensor, opts) do
-    fallback(:to_batched, [out, tensor, opts])
-  end
+  def squeeze(out, tensor, _axes), do: Evaluator.alias_op(:squeeze, out, tensor)
 
-  # ── Fallback for everything else ───────────────────
-  # All required callbacks that we haven't implemented on GPU
-  # fall back to CPU computation.
+  @impl true
+  def broadcast(out, tensor, _shape, axes), do: Evaluator.broadcast(out, tensor, axes)
 
-  @fallback_binary_ops [
-    :pow,
-    :remainder,
-    :atan2,
-    :min,
-    :max,
-    :quotient,
-    :bitwise_and,
-    :bitwise_or,
-    :bitwise_xor,
-    :left_shift,
-    :right_shift,
-    :equal,
-    :not_equal,
-    :greater,
-    :less,
-    :greater_equal,
-    :less_equal,
-    :logical_and,
-    :logical_or,
-    :logical_xor
-  ]
+  @impl true
+  def transpose(out, tensor, axes), do: Evaluator.transpose(out, tensor, axes)
 
-  for op <- @fallback_binary_ops do
+  @impl true
+  def reverse(out, tensor, axes), do: Evaluator.reverse(out, tensor, axes)
+
+  @impl true
+  def pad(out, tensor, pad_value, padding_config),
+    do: Evaluator.pad(out, tensor, pad_value, padding_config)
+
+  @impl true
+  def slice(out, tensor, starts, lengths, strides),
+    do: Evaluator.slice(out, tensor, starts, lengths, strides)
+
+  @impl true
+  def put_slice(out, tensor, starts, slice), do: Evaluator.put_slice(out, tensor, starts, slice)
+
+  @impl true
+  def concatenate(out, tensors, axis), do: Evaluator.join(:concatenate, out, tensors, axis)
+
+  @impl true
+  def stack(out, tensors, axis), do: Evaluator.join(:stack, out, tensors, axis)
+
+  for op <- [:sum, :product, :reduce_max, :reduce_min, :all, :any] do
     @impl true
-    def unquote(op)(out, left, right) do
-      fallback(unquote(op), [out, left, right])
-    end
+    def unquote(op)(out, tensor, opts), do: Evaluator.reduce(unquote(op), out, tensor, opts)
   end
 
-  @all_unary_ops Enum.map(Nx.Shared.unary_math_funs(), &elem(&1, 0)) ++
-                   [
-                     :bitwise_not,
-                     :ceil,
-                     :conjugate,
-                     :floor,
-                     :round,
-                     :sign,
-                     :count_leading_zeros,
-                     :population_count,
-                     :real,
-                     :imag,
-                     :is_nan,
-                     :is_infinity,
-                     :logical_not,
-                     :phase
-                   ]
-
-  @fallback_unary_ops @all_unary_ops -- Map.keys(@gpu_unary_ops)
-
-  for op <- @fallback_unary_ops do
+  for op <- [:argmax, :argmin] do
     @impl true
-    def unquote(op)(out, tensor) do
-      fallback(unquote(op), [out, tensor])
-    end
+    def unquote(op)(out, tensor, opts), do: Evaluator.arg_reduce(unquote(op), out, tensor, opts)
   end
 
   @impl true
-  def broadcast(out, tensor, shape, axes) do
-    fallback(:broadcast, [out, tensor, shape, axes])
+  def reduce(out, tensor, acc, opts, fun), do: Evaluator.reduce_fun(out, tensor, acc, opts, fun)
+
+  for op <- [:window_sum, :window_product, :window_max, :window_min] do
+    @impl true
+    def unquote(op)(out, tensor, shape, opts),
+      do: Evaluator.window(unquote(op), out, tensor, shape, opts)
   end
 
   @impl true
-  def transpose(out, tensor, axes) do
-    fallback(:transpose, [out, tensor, axes])
+  def window_reduce(out, tensor, acc, shape, opts, fun),
+    do: Evaluator.window_reduce(out, tensor, acc, shape, opts, fun)
+
+  for op <- [:window_scatter_max, :window_scatter_min] do
+    @impl true
+    def unquote(op)(out, tensor, source, init, shape, opts),
+      do: Evaluator.window_scatter(unquote(op), out, tensor, source, init, shape, opts)
+  end
+
+  for op <- [:sort, :argsort] do
+    @impl true
+    def unquote(op)(out, tensor, opts), do: Evaluator.sort(unquote(op), out, tensor, opts)
   end
 
   @impl true
-  def pad(out, tensor, pad_value, padding_config) do
-    fallback(:pad, [out, tensor, pad_value, padding_config])
+  def gather(out, input, indices, opts), do: Evaluator.gather(out, input, indices, opts)
+
+  for op <- [:indexed_add, :indexed_put] do
+    @impl true
+    def unquote(op)(out, tensor, indices, updates, opts),
+      do: Evaluator.indexed(unquote(op), out, tensor, indices, updates, opts)
   end
 
   @impl true
-  def reverse(out, tensor, axes) do
-    fallback(:reverse, [out, tensor, axes])
-  end
+  def triangular_solve(out, a, b, opts), do: Evaluator.triangular_solve(out, a, b, opts)
 
   @impl true
-  def clip(out, tensor, min, max) do
-    fallback(:clip, [out, tensor, min, max])
-  end
+  def fft(out, tensor, opts), do: Evaluator.fft(:fft, out, tensor, opts)
 
   @impl true
-  def slice(out, tensor, starts, lengths, strides) do
-    fallback(:slice, [out, tensor, starts, lengths, strides])
-  end
+  def ifft(out, tensor, opts), do: Evaluator.fft(:ifft, out, tensor, opts)
 
   @impl true
-  def put_slice(out, tensor, start_tensor, starts) do
-    fallback(:put_slice, [out, tensor, start_tensor, starts])
-  end
-
-  @impl true
-  def gather(out, input, indices, opts) do
-    fallback(:gather, [out, input, indices, opts])
-  end
-
-  @impl true
-  def concatenate(out, tensors, axis) do
-    fallback(:concatenate, [out, tensors, axis])
-  end
-
-  @impl true
-  def stack(out, tensors, axis) do
-    fallback(:stack, [out, tensors, axis])
-  end
-
-  @impl true
-  def select(out, pred, on_true, on_false) do
-    fallback(:select, [out, pred, on_true, on_false])
-  end
-
-  @impl true
-  def conv(out, tensor, kernel, opts) do
-    fallback(:conv, [out, tensor, kernel, opts])
-  end
-
-  @impl true
-  def all(out, tensor, opts), do: fallback(:all, [out, tensor, opts])
-
-  @impl true
-  def any(out, tensor, opts), do: fallback(:any, [out, tensor, opts])
-
-  @impl true
-  def product(out, tensor, opts), do: fallback(:product, [out, tensor, opts])
-
-  @impl true
-  def argmax(out, tensor, opts), do: fallback(:argmax, [out, tensor, opts])
-
-  @impl true
-  def argmin(out, tensor, opts), do: fallback(:argmin, [out, tensor, opts])
-
-  @impl true
-  def reduce(out, tensor, acc, opts, fun) do
-    fallback(:reduce, [out, tensor, acc, opts, fun])
-  end
-
-  @impl true
-  def window_reduce(out, tensor, acc, shape, opts, fun) do
-    fallback(:window_reduce, [out, tensor, acc, shape, opts, fun])
-  end
-
-  @impl true
-  def window_sum(out, tensor, shape, opts) do
-    fallback(:window_sum, [out, tensor, shape, opts])
-  end
-
-  @impl true
-  def window_product(out, tensor, shape, opts) do
-    fallback(:window_product, [out, tensor, shape, opts])
-  end
-
-  @impl true
-  def window_max(out, tensor, shape, opts) do
-    fallback(:window_max, [out, tensor, shape, opts])
-  end
-
-  @impl true
-  def window_min(out, tensor, shape, opts) do
-    fallback(:window_min, [out, tensor, shape, opts])
-  end
-
-  @impl true
-  def sort(out, tensor, opts), do: fallback(:sort, [out, tensor, opts])
-
-  @impl true
-  def argsort(out, tensor, opts), do: fallback(:argsort, [out, tensor, opts])
-
-  @impl true
-  def window_scatter_max(out, tensor, source, init, shape, opts) do
-    fallback(:window_scatter_max, [out, tensor, source, init, shape, opts])
-  end
-
-  @impl true
-  def window_scatter_min(out, tensor, source, init, shape, opts) do
-    fallback(:window_scatter_min, [out, tensor, source, init, shape, opts])
-  end
-
-  @impl true
-  def indexed_add(out, tensor, indices, updates, opts) do
-    fallback(:indexed_add, [out, tensor, indices, updates, opts])
-  end
-
-  @impl true
-  def indexed_put(out, tensor, indices, updates, opts) do
-    fallback(:indexed_put, [out, tensor, indices, updates, opts])
-  end
-
-  @impl true
-  def fft(out, tensor, opts), do: fallback(:fft, [out, tensor, opts])
-
-  @impl true
-  def ifft(out, tensor, opts), do: fallback(:ifft, [out, tensor, opts])
-
-  @impl true
-  def triangular_solve(out, a, b, opts) do
-    fallback(:triangular_solve, [out, a, b, opts])
-  end
-
-  @impl true
-  def lu(out, tensor, opts), do: fallback(:lu, [out, tensor, opts])
+  def block(struct, out, args, fun), do: Evaluator.block(struct, out, args, fun)
 
   @impl true
   def from_pointer(_out, _pointer, _backend_opts, _offset, _byte_size) do
-    raise "NxCL does not support from_pointer"
+    raise ArgumentError,
+          "NxCL.Backend does not support from_pointer: OpenCL has no portable handle to import"
   end
 
   @impl true
   def to_pointer(_tensor, _opts) do
-    raise "NxCL does not support to_pointer"
+    raise ArgumentError,
+          "NxCL.Backend does not support to_pointer: OpenCL has no portable handle to export"
   end
 end

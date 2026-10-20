@@ -1,100 +1,124 @@
-# Common setup for all benchmarks.
-# Installs dependencies and detects available backends.
-
-Mix.install(
-  [
-    {:nx, "~> 0.9"},
-    {:nx_opencl, path: Path.expand("..", __DIR__)},
-    {:benchee, "~> 1.0"},
-    {:exla, "~> 0.11", optional: true},
-    {:nx_eigen, "~> 0.1", optional: true}
-  ],
-  force: true
-)
+# Common setup for all benchmarks. See README.md for how to run them, and for
+# BENCH_BUDGET_MS and BENCH_BACKENDS.
 
 defmodule BenchHelper do
   @moduledoc false
 
-  def has_exla? do
-    Code.ensure_loaded?(EXLA.Backend) and
-      function_exported?(EXLA.Backend, :__info__, 1)
-      and exla_nif_loaded?()
-  end
-
-  defp exla_nif_loaded? do
-    try do
-      Code.ensure_loaded!(EXLA.NIF)
-      true
-    rescue
-      _ -> false
-    end
-  end
-
-  def has_eigen? do
-    Code.ensure_loaded?(NxEigen)
-  end
-
-  def has_opencl? do
-    case NxCL.Native.device_ctx_create(0) do
-      ref when is_reference(ref) -> true
-      _ -> false
-    end
-  end
+  def exla?, do: Code.ensure_loaded?(EXLA)
 
   def device_name do
-    ctx = NxCL.Native.device_ctx_create(0)
-    info = NxCL.Native.device_info(ctx) |> Map.new()
-    info["name"]
+    info = NxCL.Devices.fetch!().ctx |> NxCL.Native.device_info() |> Map.new()
+    "#{info["name"]} (#{info["device_type"]})"
   end
 
-  def report_backends do
-    IO.puts("\n=== Available backends ===")
-    IO.puts("  BinaryBackend: always")
-    IO.puts("  NxCL.Backend:  #{if has_opencl?(), do: "yes (#{device_name()})", else: "no"}")
-    IO.puts("  EXLA:          #{if has_exla?(), do: "yes", else: "no"}")
-    IO.puts("  NxEigen:       #{if has_eigen?(), do: "yes", else: "no"}")
+  def report do
+    IO.puts("device: #{device_name()}")
+    IO.puts("EXLA:   #{if exla?(), do: "loaded", else: "not run: not installed in this project"}")
     IO.puts("")
   end
 
-  @doc "Build a map of backend name => setup function, filtering to what's available"
-  def eager_backends do
-    backends = %{"BinaryBackend" => fn -> Nx.BinaryBackend end}
+  # name, compiler for Nx.Defn.jit, backend that holds the inputs.
+  def backends do
+    base = [
+      {"Evaluator/Binary", Nx.Defn.Evaluator, Nx.BinaryBackend},
+      {"NxCL.Backend", Nx.Defn.Evaluator, NxCL.Backend},
+      {"NxCL.Compiler", NxCL.Compiler, NxCL.Backend}
+    ]
 
-    backends =
-      if has_opencl?() do
-        Map.put(backends, "NxCL.Backend", fn -> NxCL.Backend end)
-      else
-        backends
-      end
+    all = if exla?(), do: base ++ [{"EXLA", EXLA, EXLA.Backend}], else: base
 
-    backends =
-      if has_exla?() do
-        Map.put(backends, "EXLA", fn -> EXLA.Backend end)
-      else
-        backends
-      end
-
-    backends =
-      if has_eigen?() do
-        Map.put(backends, "NxEigen", fn -> NxEigen end)
-      else
-        backends
-      end
-
-    backends
+    case System.get_env("BENCH_BACKENDS") do
+      nil -> all
+      list -> Enum.filter(all, fn {name, _, _} -> name in String.split(list, ",") end)
+    end
   end
 
-  @doc "Run a function with a given backend set as default"
-  def with_backend(backend_mod, fun) do
-    Nx.with_default_backend(backend_mod, fun)
+  def rand(shape, scale \\ 1.0) do
+    key = Nx.Random.key(:erlang.phash2(shape))
+    {t, _} = Nx.Random.normal(key, 0.0, scale, shape: shape, type: :f32)
+    Nx.backend_copy(t, Nx.BinaryBackend)
   end
 
-  @doc "Generate a random f32 tensor with a given shape on a specific backend"
-  def rand(shape, backend \\ Nx.BinaryBackend) do
-    key = Nx.Random.key(:rand.uniform(1_000_000))
-    {t, _key} = Nx.Random.uniform(key, shape: shape, type: :f32)
-    Nx.backend_transfer(t, backend)
+  defp force(result) do
+    Nx.Defn.Composite.flatten_list([result]) |> Enum.each(&Nx.to_binary/1)
+  end
+
+  @doc """
+  Times `fun.(args...)` on every backend. Inputs sit on the backend before timing.
+  Each call reads its outputs back to the host. Returns `{first_us, median_us, reps}`
+  per backend, or an error string.
+  """
+  def measure(fun, args, opts \\ []) do
+    budget = String.to_integer(System.get_env("BENCH_BUDGET_MS") || "1500") * 1000
+    skip = Keyword.get(opts, :skip, [])
+
+    for {name, compiler, backend} <- backends(), into: %{} do
+      if name in skip do
+        {name, "skipped"}
+      else
+        try do
+          {name, measure_one(fun, args, compiler, backend, budget)}
+        rescue
+          e -> {name, "error: " <> String.slice(Exception.message(e), 0, 60)}
+        end
+      end
+    end
+  end
+
+  defp measure_one(fun, args, compiler, backend, budget) do
+    args = Enum.map(args, &Nx.backend_copy(&1, backend))
+
+    # A fresh closure per backend, so columns share no compile cache.
+    jitted = Nx.Defn.jit(fn a -> apply(fun, Tuple.to_list(a)) end, compiler: compiler)
+    call = fn -> jitted.(List.to_tuple(args)) |> force() end
+
+    {first, _} = :timer.tc(call)
+    call.()
+    call.()
+
+    start = System.monotonic_time(:microsecond)
+    times = collect(call, start, budget, [])
+    sorted = Enum.sort(times)
+    {first, Enum.at(sorted, div(length(sorted), 2)), length(sorted)}
+  end
+
+  defp collect(call, start, budget, acc) do
+    {us, _} = :timer.tc(call)
+    acc = [us | acc]
+    elapsed = System.monotonic_time(:microsecond) - start
+
+    if (elapsed >= budget and length(acc) >= 3) or length(acc) >= 500 do
+      acc
+    else
+      collect(call, start, budget, acc)
+    end
+  end
+
+  @doc "Runs a list of `{label, fun, args}` cases and prints one table: first / per call in us."
+  def run_cases(title, cases, opts \\ []) do
+    names = Enum.map(backends(), &elem(&1, 0))
+    IO.puts("### #{title}\n")
+    IO.puts("Cell: first call us / median per call us. Device: #{device_name()}\n")
+    IO.puts("| case | " <> Enum.join(names, " | ") <> " |")
+    IO.puts("|---|" <> String.duplicate("---|", length(names)))
+
+    for {label, fun, args} <- cases do
+      result = measure(fun, args, opts)
+
+      cells =
+        for n <- names do
+          case result[n] do
+            {first, med, _reps} -> "#{first} / #{med}"
+            msg -> msg
+          end
+        end
+
+      IO.puts("| #{label} | " <> Enum.join(cells, " | ") <> " |")
+    end
+
+    unless exla?(), do: IO.puts("\nEXLA column: not run: not installed in this project.")
+    IO.puts("")
   end
 end
 
-BenchHelper.report_backends()
+BenchHelper.report()

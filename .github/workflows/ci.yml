@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch or pull request cancels the run in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pocl:
+    name: Tests and checks on PoCL
+    runs-on: ubuntu-24.04
+    # The PoCL suite takes about 30 minutes. With cold caches, the run also builds
+    # the Rust crate and the PLTs, and mise may build Erlang from source.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Elixir, Erlang and Rust at the versions in mise.toml. mise must find
+      # Erlang 28.5.0.1 and Elixir 1.20.1-otp-28. The Rust entry there lists
+      # rustfmt and clippy as components, which the Cargo checks need.
+      - uses: jdx/mise-action@v2
+
+      # PoCL is a CPU OpenCL device. It has cl_khr_fp64 and 64-bit atomics, so it
+      # runs every test except the ones that need cl_khr_fp16.
+      - name: Install PoCL and the ICD loader
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pocl-opencl-icd ocl-icd-libopencl1 ocl-icd-opencl-dev clinfo
+          clinfo --list
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+            native/nxcl_nif/target
+          key: build-${{ runner.os }}-${{ hashFiles('mise.toml', 'mix.lock', 'native/nxcl_nif/Cargo.lock') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+
+      # The dialyzer PLTs (`plt_local_path` and `plt_core_path` in mix.exs).
+      - uses: actions/cache@v4
+        with:
+          path: priv/plts
+          key: plt-${{ runner.os }}-${{ hashFiles('mise.toml', 'mix.lock') }}
+          restore-keys: |
+            plt-${{ runner.os }}-
+
+      - name: Install Hex and Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - run: mix deps.get
+
+      - name: Cargo checks
+        working-directory: native/nxcl_nif
+        run: |
+          cargo fmt --check
+          cargo clippy -- -D warnings
+
+      # `cargo test --lib` is unverified on Linux; it has run on macOS only. The
+      # crate is a Rustler cdylib that leaves `enif_*` symbols undefined, and a test
+      # binary may fail to link because of them. The step may fail until it passes
+      # once. If it fails with undefined `enif_*` symbols, drop it.
+      - name: Cargo unit tests
+        working-directory: native/nxcl_nif
+        continue-on-error: true
+        run: cargo test --lib
+
+      # `mix test` runs in the test env and `mix check` in dev. Both use the same
+      # `native/nxcl_nif/target` (cached above), so Cargo builds the crate once.
+      # `mix check` stays in dev because dialyzer reports errors in `test/support`
+      # when it runs in the test env.
+      - name: Tests
+        env:
+          MIX_ENV: test
+        run: mix test
+
+      - name: mix check
+        run: mix check

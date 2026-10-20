@@ -1,20 +1,17 @@
 defmodule NxCL.E2E.MLPTest do
   @moduledoc """
-  End-to-end test: run a simple MLP through the NxCL backend
-  and compare against the CPU backend.
+  A simple MLP run repeatedly on the NxCL backend. The comparison with the CPU
+  backend is in `NxCL.E2E.ModelsTest`.
   """
   use ExUnit.Case, async: false
-  import NxCL.TestHelpers
 
   @moduletag :opencl
 
   defp run_mlp(params, input) do
-    # Layer 1: matmul + bias + relu
     h = Nx.dot(input, params.w1)
     h = Nx.add(h, params.b1)
     h = Nx.max(h, Nx.tensor(0.0))
 
-    # Layer 2: matmul + bias
     out = Nx.dot(h, params.w2)
     Nx.add(out, params.b2)
   end
@@ -31,40 +28,10 @@ defmodule NxCL.E2E.MLPTest do
     Map.new(params, fn {k, v} -> {k, Nx.backend_transfer(v, NxCL.Backend)} end)
   end
 
-  test "2-layer MLP matches CPU backend" do
-    key = Nx.Random.key(42)
-    params = build_params(key)
-    {input, _key} = Nx.Random.uniform(key, shape: {1, 4}, type: :f32)
-
-    # Run on CPU
-    cpu_result = run_mlp(params, input)
-
-    # Run on GPU
-    gpu_params = transfer_params_to_gpu(params)
-    gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-    gpu_result = run_mlp(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-    assert_tensors_close(gpu_result, cpu_result, 1.0e-4)
-  end
-
-  test "MLP with batch of inputs" do
-    key = Nx.Random.key(99)
-    params = build_params(key)
-    {input, _key} = Nx.Random.uniform(key, shape: {4, 4}, type: :f32)
-
-    cpu_result = run_mlp(params, input)
-
-    gpu_params = transfer_params_to_gpu(params)
-    gpu_input = Nx.backend_transfer(input, NxCL.Backend)
-    gpu_result = run_mlp(gpu_params, gpu_input) |> Nx.backend_transfer(Nx.BinaryBackend)
-
-    assert_tensors_close(gpu_result, cpu_result, 1.0e-4)
-  end
-
   test "MLP is deterministic (same result every time)" do
-    key = Nx.Random.key(42)
-    params = build_params(key)
-    {input, _key} = Nx.Random.uniform(key, shape: {1, 4}, type: :f32)
+    {params_key, input_key} = {Nx.Random.key(42), Nx.Random.key(43)}
+    params = build_params(params_key)
+    {input, _key} = Nx.Random.uniform(input_key, shape: {1, 4}, type: :f32)
 
     gpu_params = transfer_params_to_gpu(params)
     gpu_input = Nx.backend_transfer(input, NxCL.Backend)

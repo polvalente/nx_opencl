@@ -1,18 +1,12 @@
 defmodule NxCL.Compiler do
   @moduledoc """
-  `Nx.Defn.Compiler` implementation for OpenCL.
+  `Nx.Defn.Compiler` for OpenCL.
 
-  Receives a computation graph from `defn`, flattens it into a linear
-  op sequence, and executes each op on the GPU via the NIF layer.
-
-  Unlike the eager backend (`NxCL.Backend`) which dispatches one op at
-  a time, the compiler sees the entire computation graph up front. This
-  enables future optimisations like elementwise fusion, GEMM+bias+activation
-  fusion, and buffer reuse via liveness analysis.
+  It lowers the whole `defn` graph to an `NxCL.Compiler.Program` and runs it on
+  the device. Results stay on the device between ops, and each buffer is freed
+  after its last reader. `NxCL.Backend` runs one op at a time instead.
 
   ## Usage
-
-  Use with `Nx.Defn.jit/2`:
 
       defn predict(x, w, b) do
         x |> Nx.dot(w) |> Nx.add(b) |> Nx.sigmoid()
@@ -21,24 +15,52 @@ defmodule NxCL.Compiler do
       jitted = Nx.Defn.jit(&predict/3, compiler: NxCL.Compiler)
       result = jitted.(input, weights, bias)
 
-  Or set as the default compiler:
+  Or set it as the default: `Nx.Defn.default_options(compiler: NxCL.Compiler)`.
+  Arguments and results can be containers (tuples, maps).
 
-      Nx.Defn.default_options(compiler: NxCL.Compiler)
+  ## Options
 
-  ## Supported operations
+    * `:device` - device index or `{platform, index}` (see `NxCL.Devices`).
+      Default 0.
+    * `:command_queue` - a queue from `NxCL.Devices.new_queue/1`. Default: the
+      device's own queue.
+    * `:max_concurrency` - how many queues `__partitions_options__/1` opens. A
+      positive integer; default 1.
+    * `:hooks` - must be empty.
 
-  The compiler supports the same GPU-accelerated ops as `NxCL.Backend`:
-  elementwise arithmetic (`add`, `subtract`, `multiply`, `divide`),
-  unary math (`exp`, `log`, `tanh`, `sigmoid`, `negate`, `abs`),
-  `dot` (2D matmul), plus `reshape` and `squeeze` as zero-copy ops.
+  An unknown option raises `ArgumentError` that names the key.
 
-  Unsupported ops raise `NxCL.CompilerError` at runtime. For full op
-  coverage with automatic CPU fallback, use `NxCL.Backend` instead.
+  ## Unsupported operations
+
+  The compiler never falls back to the CPU. An op it cannot lower raises
+  `ArgumentError` ("does not lower op ...") at compile time. A dtype the
+  device cannot run (`f64` without `cl_khr_fp64`, or a type with no OpenCL
+  mapping) raises `NxCL.CompilerError` when the function runs.
+
+  ## Host callbacks
+
+  `Nx.runtime_call/4`, `Nx.io_call/2` and `Nx.Defn.Kernel.print_value/2` run
+  Elixir code in the calling process, between device steps. Only the tensors the
+  callback takes are read back.
+
+  ## Caches
+
+  `NxCL.Compiler.CompileCache` keeps the compiled closure per function, input
+  templates and run options, so a repeat call does not trace or lower.
+  `NxCL.Compiler.ProgramCache` keeps programs by structure, so functions that
+  lower alike share one. A cached closure keeps the tensors its function
+  captured on the device; see `NxCL.Compiler.CompileCache` to bound that.
   """
 
   @behaviour Nx.Defn.Compiler
 
-  alias NxCL.Compiler.{FlatOp, Flatten}
+  alias Nx.Defn.Composite
+  alias NxCL.Compiler.CompileCache
+  alias NxCL.Compiler.Executor
+  alias NxCL.Compiler.Lower
+  alias NxCL.Compiler.Options
+  alias NxCL.Compiler.Program
+  alias NxCL.Devices
 
   @impl true
   def __jit__(key, vars, fun, args_list, opts) do
@@ -46,196 +68,63 @@ defmodule NxCL.Compiler do
   end
 
   @impl true
-  def __compile__(_key, vars, fun, _opts) do
-    # Trace: build the expression tree
+  def __compile__(key, vars, fun, opts) do
+    opts = Options.validate!(opts)
+    run_opts = Keyword.take(opts, [:device, :command_queue])
+
+    cache_key =
+      {key, Enum.map(vars, &Composite.traverse(&1, fn t -> Nx.to_template(t) end)), run_opts}
+
+    case CompileCache.fetch(cache_key) do
+      {:ok, closure} ->
+        closure
+
+      {:error, :cache_miss} ->
+        CompileCache.put(cache_key, build_closure(vars, fun, run_opts))
+    end
+  end
+
+  defp build_closure(vars, fun, run_opts) do
+    # Fail on a bad device at compile time.
+    Devices.fetch!(run_opts)
+
     expr = fun.(vars)
+    num_inputs = vars |> Composite.flatten_list() |> length()
+    program = Lower.lower(expr, num_inputs)
+    program = %Program{program | signature: Program.signature(program)}
+    # Captured tensors upload once; each run reuses the buffers.
+    program = Executor.with_resident_captures(program, run_opts)
 
-    # Flatten the expr tree into a linear op sequence
-    flat_ops = Flatten.flatten(expr)
-
-    # Return a function that executes the plan
     fn [args] ->
-      [execute(flat_ops, args, expr)]
+      [Executor.run(program, args, run_opts)]
     end
   end
 
   @impl true
   def __partitions_options__(opts) do
-    [opts]
+    opts = Options.validate!(opts)
+    {n, opts} = Keyword.pop(opts, :max_concurrency, 1)
+
+    if not (is_integer(n) and n > 0) do
+      raise ArgumentError,
+            ":max_concurrency must be a positive integer, got: #{inspect(n)}"
+    end
+
+    for _ <- 1..n do
+      {:ok, queue} = new_queue(opts)
+      Keyword.put(opts, :command_queue, queue)
+    end
+  end
+
+  defp new_queue(opts) do
+    case Devices.new_queue(opts) do
+      {:ok, queue} -> {:ok, queue}
+      {:error, reason} -> raise NxCL.CompilerError, message: "cannot open a queue: #{reason}"
+    end
   end
 
   @impl true
-  def __to_backend__(_opts) do
-    {NxCL.Backend, []}
+  def __to_backend__(opts) do
+    {NxCL.Backend, Keyword.take(opts, [:device])}
   end
-
-  # Execute the flat op sequence naively (Phase C0: no fusion, no buffer reuse)
-  # Buffer map stores {nif_ref, shape} tuples
-  defp execute(flat_ops, args, output_expr) do
-    ctx = get_ctx()
-
-    buffers =
-      Enum.reduce(flat_ops, %{}, fn op, bufs ->
-        {ref, shape} = execute_op(ctx, op, bufs, args)
-        Map.put(bufs, op.id, {ref, shape})
-      end)
-
-    # Read back the output
-    output_id = output_expr.data.id
-    {output_ref, _shape} = buffers[output_id]
-    output_type = output_expr.type
-    output_shape = output_expr.shape
-
-    bin = NxCL.Native.buffer_read(output_ref, byte_size(output_shape, output_type))
-
-    Nx.from_binary(bin, output_type)
-    |> Nx.reshape(output_shape)
-  end
-
-  defp execute_op(ctx, %FlatOp{op: :parameter, param_index: idx}, _bufs, args) do
-    tensor = Enum.at(args, idx).()
-    tensor = Nx.as_type(tensor, :f32)
-    ref = NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
-    {ref, tensor.shape}
-  end
-
-  defp execute_op(
-         ctx,
-         %FlatOp{op: :constant, value: value, shape: shape, type: type},
-         _bufs,
-         _args
-       ) do
-    tensor = Nx.broadcast(Nx.tensor(value, type: type), shape)
-    tensor = Nx.as_type(tensor, :f32)
-    ref = NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
-    {ref, shape}
-  end
-
-  defp execute_op(ctx, %FlatOp{op: :tensor, tensor: tensor, shape: shape}, _bufs, _args) do
-    tensor = Nx.as_type(tensor, :f32)
-    ref = NxCL.Native.buffer_write(ctx, Nx.to_binary(tensor))
-    {ref, shape}
-  end
-
-  # Unary elementwise ops with GPU kernels
-  @gpu_unary %{
-    negate: "negate",
-    exp: "exp",
-    log: "log",
-    tanh: "tanh",
-    sigmoid: "sigmoid",
-    abs: "abs"
-  }
-
-  for {op, kernel_name} <- @gpu_unary do
-    defp execute_op(
-           ctx,
-           %FlatOp{op: unquote(op), args: [{:ref, input_id}], shape: shape},
-           bufs,
-           _args
-         ) do
-      {input_ref, _} = bufs[input_id]
-      n = tuple_product(shape)
-      ref = NxCL.Native.elementwise_unary_op(ctx, unquote(kernel_name), input_ref, n)
-      {ref, shape}
-    end
-  end
-
-  # Binary elementwise ops with GPU kernels
-  @gpu_binary %{
-    add: "add",
-    subtract: "subtract",
-    multiply: "multiply",
-    divide: "divide"
-  }
-
-  for {op, kernel_name} <- @gpu_binary do
-    defp execute_op(
-           ctx,
-           %FlatOp{op: unquote(op), args: [{:ref, left_id}, {:ref, right_id}], shape: shape},
-           bufs,
-           _args
-         ) do
-      {left_ref, _} = bufs[left_id]
-      {right_ref, _} = bufs[right_id]
-      n = tuple_product(shape)
-      ref = NxCL.Native.elementwise_binary_op(ctx, unquote(kernel_name), left_ref, right_ref, n)
-      {ref, shape}
-    end
-  end
-
-  # Matrix multiply (2D only for C0)
-  defp execute_op(
-         ctx,
-         %FlatOp{
-           op: :dot,
-           args: [{:ref, left_id}, {:ref, right_id}],
-           shape: {m, n} = shape,
-           contract_axes: {_, _},
-           batch_axes: {[], []}
-         },
-         bufs,
-         _args
-       ) do
-    {left_ref, left_shape} = bufs[left_id]
-    {right_ref, _right_shape} = bufs[right_id]
-
-    # K is the contracted dimension
-    k = elem(left_shape, tuple_size(left_shape) - 1)
-
-    ref = NxCL.Native.matmul_op(ctx, left_ref, right_ref, m, n, k)
-    {ref, shape}
-  end
-
-  # Reshape: zero-copy, just pass through the buffer with new shape
-  defp execute_op(
-         _ctx,
-         %FlatOp{op: :reshape, args: [{:ref, input_id}], shape: shape},
-         bufs,
-         _args
-       ) do
-    {ref, _old_shape} = bufs[input_id]
-    {ref, shape}
-  end
-
-  # Squeeze: same as reshape
-  defp execute_op(
-         _ctx,
-         %FlatOp{op: :squeeze, args: [{:ref, input_id} | _], shape: shape},
-         bufs,
-         _args
-       ) do
-    {ref, _old_shape} = bufs[input_id]
-    {ref, shape}
-  end
-
-  # Fallback: unsupported ops
-  defp execute_op(_ctx, %FlatOp{op: op}, _bufs, _args) do
-    raise NxCL.CompilerError,
-      message: "Unsupported op in NxCL.Compiler: #{inspect(op)}"
-  end
-
-  defp get_ctx() do
-    case :persistent_term.get(:nxcl_device_ctx, nil) do
-      nil ->
-        ctx = NxCL.Native.device_ctx_create(0)
-        :persistent_term.put(:nxcl_device_ctx, ctx)
-        ctx
-
-      ctx ->
-        ctx
-    end
-  end
-
-  defp byte_size(shape, {_, bit_size}) do
-    tuple_product(shape) * div(bit_size, 8)
-  end
-
-  defp tuple_product(shape) when is_tuple(shape) do
-    shape |> Tuple.to_list() |> Enum.product()
-  end
-end
-
-defmodule NxCL.CompilerError do
-  defexception [:message]
 end

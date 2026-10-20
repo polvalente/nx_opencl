@@ -1,0 +1,100 @@
+defmodule NxCL.TestSupport.Gen do
+  @moduledoc """
+  Seeded input generators for `NxCL.TestSupport.Compare`. The seed is ExUnit's seed, which
+  `Compare` prints on failure.
+  """
+
+  @shapes [
+    {},
+    {1},
+    {63},
+    {65},
+    {1000},
+    {4097},
+    {3, 5},
+    {2, 3, 4},
+    {2, 1, 3, 1, 2}
+  ]
+
+  @dtypes for kind <- [:s, :u, :f, :bf, :c],
+              size <- [2, 4, 8, 16, 32, 64, 128],
+              (try do
+                 Nx.Type.normalize!({kind, size}) == {kind, size}
+               rescue
+                 _ -> false
+               end),
+              do: {kind, size}
+
+  @doc "Shapes the generators cover: scalar, one element, off-by-one around 64, large, ranks 2, 3, and 5. Nx 1.0 rejects zero-size dimensions, so `{0}` is absent."
+  @spec shapes() :: [tuple()]
+  def shapes, do: @shapes
+
+  @doc "Every dtype the pinned Nx accepts, by kind and size."
+  @spec dtypes() :: [Nx.Type.t()]
+  def dtypes, do: @dtypes
+
+  @doc """
+  Random tensor on `Nx.BinaryBackend`. Floats lie in [-4, 4]; integers span a small range.
+
+  Without `:seed`, each call draws new data: ExUnit's seed plus the number of
+  earlier unseeded calls in the process. Two operands of one row then differ
+  (`subtract` of equal data would give zeros) and a failing seed reproduces the
+  data. With `:seed`, the data depends on that seed alone.
+  """
+  @spec random(tuple(), Nx.Type.t(), keyword()) :: Nx.Tensor.t()
+  def random(shape, type, opts \\ []) do
+    seed = Keyword.get_lazy(opts, :seed, fn -> NxCL.TestSupport.Compare.seed() + salt() end)
+    key = Nx.Random.key(seed)
+    {tensor, _key} = do_random(key, shape, type)
+    tensor
+  end
+
+  defp salt do
+    n = Process.get({__MODULE__, :salt}, 0)
+    Process.put({__MODULE__, :salt}, n + 1)
+    n
+  end
+
+  defp do_random(key, shape, {:c, size}) do
+    part = {:f, div(size, 2)}
+    {re, key} = do_random(key, shape, part)
+    {im, key} = do_random(key, shape, part)
+    {Nx.as_type(Nx.complex(Nx.as_type(re, :f32), Nx.as_type(im, :f32)), {:c, size}), key}
+  end
+
+  defp do_random(key, shape, {kind, _} = type) when kind in [:f, :bf] do
+    {t, key} = Nx.Random.uniform(key, -4.0, 4.0, shape: shape, type: :f32)
+    {Nx.as_type(t, type), key}
+  end
+
+  defp do_random(key, shape, {:s, _} = type) do
+    {t, key} = Nx.Random.randint(key, -8, 8, shape: shape, type: :s32)
+    {Nx.as_type(t, type), key}
+  end
+
+  defp do_random(key, shape, {:u, _} = type) do
+    {t, key} = Nx.Random.randint(key, 0, 8, shape: shape, type: :s32)
+    {Nx.as_type(t, type), key}
+  end
+
+  @doc """
+  Edge values for `type` as a 1-D tensor: zeros, signed zero, NaN, infinities
+  for floats; minimum and maximum for integers.
+  """
+  @spec edge_values(Nx.Type.t()) :: Nx.Tensor.t()
+  def edge_values({kind, _} = type) when kind in [:f, :bf] do
+    Nx.tensor([0.0, -0.0, 1.0, -1.0, :nan, :infinity, :neg_infinity], type: type)
+  end
+
+  def edge_values({kind, _} = type) when kind in [:s, :u] do
+    Nx.tensor(
+      [
+        0,
+        1,
+        Nx.to_number(Nx.Constants.min_finite(type)),
+        Nx.to_number(Nx.Constants.max_finite(type))
+      ],
+      type: type
+    )
+  end
+end

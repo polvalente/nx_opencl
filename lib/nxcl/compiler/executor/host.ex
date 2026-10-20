@@ -1,0 +1,63 @@
+defmodule NxCL.Compiler.Executor.Host do
+  @moduledoc false
+  # Runs one `:host_call` step: read the operands, call the callback in the
+  # calling process, check the result, upload it. The callback gets tensors on
+  # the default backend. An `:io_call` returns its input buffers unchanged.
+
+  alias Nx.Defn.Composite
+  alias NxCL.Compiler.Program
+
+  @doc """
+  Runs `entry` on the operand `buffers` and returns one buffer per output leaf.
+  """
+  @spec run(Program.host_call(), reference(), [reference()]) :: [reference()]
+  def run(%{kind: :io_call, fun: nil}, _ctx, buffers), do: buffers
+
+  def run(%{kind: :io_call, fun: fun} = entry, _ctx, buffers) do
+    fun.(read(entry.in_template, buffers))
+    buffers
+  end
+
+  def run(%{kind: :runtime_call} = entry, ctx, buffers) do
+    result = entry.fun.(read(entry.in_template, buffers), entry.opts)
+
+    if not Nx.compatible?(entry.out_template, result) do
+      raise ArgumentError,
+            "expected the runtime_call function to match the given output template " <>
+              "#{inspect(entry.out_template)}, got: #{inspect(actual_template(result))}"
+    end
+
+    leaves = Composite.flatten_list([result])
+
+    Enum.map(leaves, fn leaf ->
+      ctx
+      |> NxCL.Native.buffer_write(leaf |> Nx.to_tensor() |> Nx.to_binary())
+      |> NxCL.Native.ok!("could not upload a callback result")
+    end)
+  end
+
+  defp read(in_template, buffers) do
+    {container, []} =
+      Composite.traverse(in_template, buffers, fn template, [buf | rest] ->
+        size = Nx.byte_size(template)
+
+        tensor =
+          buf
+          |> NxCL.Native.buffer_read(size)
+          |> NxCL.Native.ok!("could not read a callback argument")
+          |> Nx.from_binary(template.type)
+          |> Nx.reshape(template.shape, names: template.names)
+
+        {tensor, rest}
+      end)
+
+    container
+  end
+
+  # For the error text.
+  defp actual_template(result) do
+    Composite.traverse(result, &(&1 |> Nx.to_tensor() |> Nx.to_template()))
+  rescue
+    _ in [ArgumentError, Protocol.UndefinedError] -> result
+  end
+end

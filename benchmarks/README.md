@@ -1,35 +1,80 @@
 # NxCL Benchmarks
 
-Standalone benchmark scripts comparing NxCL against other Nx backends
-and compilers. Each script uses `Mix.install` so it can be run directly:
+Scripts that time `NxCL.Compiler` and `NxCL.Backend` against the Nx Evaluator on
+`Nx.BinaryBackend` and, if installed, EXLA.
+
+## Run
+
+From the repo root, without EXLA:
 
 ```bash
-# Run individual benchmarks
-elixir benchmarks/elementwise.exs
-elixir benchmarks/matmul.exs
-elixir benchmarks/mlp_inference.exs
-elixir benchmarks/reduction.exs
-elixir benchmarks/compiler_vs_eager.exs
+mix run benchmarks/elementwise.exs
+mix run benchmarks/matmul.exs
+mix run benchmarks/reduction.exs
+mix run benchmarks/mlp_inference.exs
+mix run benchmarks/compiler_vs_eager.exs
 ```
 
-## What's compared
+From `benchmarks/`, with EXLA (a separate Mix project that depends on the library
+by path):
+
+```bash
+cd benchmarks
+BENCH_EXLA=1 mix deps.get
+BENCH_EXLA=1 mix run elementwise.exs
+```
+
+Set `BENCH_EXLA=1` on every command in this project, `mix deps.get` included.
+`mix.exs` reads it to decide whether EXLA is a dependency. `mix.lock` depends on
+that choice, so a command without `BENCH_EXLA=1` can change the file.
+
+EXLA 1.0 downloads an XLA binary on first build, and on a Mac it runs on the CPU
+only. Do not load EXLA and PoCL in one process: their C++ runtimes clash and the VM
+aborts.
+
+`BENCH_BUDGET_MS` sets the time per cell (default 1500). `BENCH_BACKENDS` (for
+example `NxCL.Compiler,EXLA`) runs some columns only. For PoCL, set
+`OPENCL_DYLIB_PATH` and `OCL_ICD_VENDORS` as the library README describes.
+
+## What each script measures
 
 | Script | What it measures |
 |---|---|
-| `elementwise.exs` | Unary/binary elementwise ops at various sizes |
-| `matmul.exs` | Matrix multiply sweep (32x32 to 512x512) |
-| `mlp_inference.exs` | Dense layer and full MLP inference |
-| `reduction.exs` | Sum reduction at various sizes |
-| `compiler_vs_eager.exs` | NxCL.Compiler vs NxCL.Backend vs Evaluator |
+| `elementwise.exs` | `exp`, `add` and a three-op chain at 1e3, 1e5 and 1e6 elements |
+| `matmul.exs` | Square matmul from 32 to 512, and three non-square shapes |
+| `reduction.exs` | `sum`, `reduce_max`, 2D sums and softmax |
+| `mlp_inference.exs` | Dense layer, two and three layer MLPs, batch sizes |
+| `compiler_vs_eager.exs` | MLP forward and training step, CNN forward, transformer block |
 
-## Backends tested
+Each cell reads `first call us / median per call us`. The first call includes
+tracing, lowering and kernel builds; the per-call time comes after warmup. Inputs
+sit on the backend before timing, and every call reads its outputs back. Rows in
+one process share the kernel cache, so a later row's first call can cost less than
+a cold start.
 
-- **BinaryBackend** — Nx's pure-Elixir CPU backend (baseline)
-- **NxCL.Backend** — NxCL eager backend (OpenCL GPU)
-- **NxCL.Compiler** — NxCL defn compiler (OpenCL GPU)
-- **Evaluator** — Nx's default defn evaluator (CPU)
-- **EXLA** — Google XLA compiler (CPU/GPU, if installed)
-- **NxEigen** — Eigen-based CPU backend (if installed)
+## Columns
 
-EXLA and NxEigen are optional. If they fail to install the benchmarks
-still run with the available backends.
+- **Evaluator/Binary**: `Nx.Defn.Evaluator` on `Nx.BinaryBackend`.
+- **NxCL.Backend**: `Nx.Defn.Evaluator` with tensors on `NxCL.Backend`, one op at a time.
+- **NxCL.Compiler**: `Nx.Defn.jit` with `compiler: NxCL.Compiler`.
+- **EXLA**: `compiler: EXLA` with tensors on `EXLA.Backend`, when loaded.
+
+## Profile split
+
+Author tool, macOS only. `benchmarks/profile/` splits a model call into transfer,
+kernel and host time. It runs on macOS only: the shim builds as a `.dylib` with `cc -dynamiclib`, and the
+default OpenCL library is Apple's framework. A small C shim stands in for
+`libOpenCL`, so `lib/` and `native/` do not change. It reads the
+`CL_QUEUE_PROFILING_ENABLE` events for kernel time and times buffer uploads and reads.
+
+```bash
+benchmarks/profile/run.sh                  # Apple
+CALLS=100 ONLY=Transformer benchmarks/profile/run.sh
+benchmarks/profile/run.sh cold_start.exs   # first call and program build time
+```
+
+Environment: `OPENCL_DYLIB_PATH` is the real `libOpenCL` (default: Apple's framework),
+`NXCL_PROF_FILE` the counters file (default `/tmp/nxcl_prof.bin`), `NXCL_MIX` the
+command that runs Mix (default `mise exec -- mix`). `NXCL_PROF_FINISH=1` makes every
+queue flush wait for the device, which shows the split of a run that ends in
+`clFinish`.

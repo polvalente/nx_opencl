@@ -1,0 +1,737 @@
+//! Data-movement kernels: `broadcast`, `transpose`, `reverse`, `slice`,
+//! `put_slice`, `pad`, `concatenate`, `stack`, `iota` and `eye`.
+//!
+//! The kernel splits the flat output id into coordinates and maps them to an
+//! input index with strides, offsets and clamps, or to a constant. These reach
+//! the kernel as `long` arguments, so the source depends on rank and types, not
+//! sizes. Values move as whole buffer elements (`float2` for `c64`, `ushort` for
+//! `bf16`), so one template serves every dtype. Every op writes a fresh buffer.
+
+use super::complex;
+use super::index::{self, coords, dims, strides};
+use super::types::{bf16_helpers, type_info, DType, Half, TypeInfo};
+use super::{
+    checked_element_count, checked_product, expect_operands, long_arg, Attr, Caps, Instr,
+    KernelArg, KernelSpec,
+};
+
+const OPS: [&str; 10] = [
+    "broadcast",
+    "transpose",
+    "reverse",
+    "slice",
+    "put_slice",
+    "pad",
+    "concatenate",
+    "stack",
+    "iota",
+    "eye",
+];
+
+pub fn handles(op: &str) -> bool {
+    OPS.contains(&op)
+}
+
+/// Collects the parameter list and the matching argument list in one order.
+pub(super) struct Kernel<'a> {
+    pub(super) instr: &'a Instr,
+    pub(super) params: Vec<String>,
+    pub(super) args: Vec<KernelArg>,
+}
+
+impl<'a> Kernel<'a> {
+    pub(super) fn new(instr: &'a Instr) -> Self {
+        Self {
+            instr,
+            params: Vec::new(),
+            args: Vec::new(),
+        }
+    }
+
+    pub(super) fn operand(&mut self, k: usize) -> Result<(), String> {
+        let o = self
+            .instr
+            .operands
+            .get(k)
+            .ok_or_else(|| format!("{} is missing operand {}", self.instr.op, k))?;
+        let storage = type_info(o.dtype)?.storage;
+        match &o.constant {
+            Some(bytes) => {
+                self.params.push(format!("const {} in{}", storage, k));
+                self.args.push(KernelArg::Scalar(bytes.clone()));
+            }
+            None => {
+                self.params
+                    .push(format!("__global const {}* in{}", storage, k));
+                self.args.push(KernelArg::Operand(k));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn output(&mut self) -> Result<(), String> {
+        let storage = type_info(self.instr.out)?.storage;
+        self.params.push(format!("__global {}* out", storage));
+        self.args.push(KernelArg::Output);
+        Ok(())
+    }
+
+    pub(super) fn long(&mut self, name: String, v: i64) {
+        self.params.push(format!("const long {}", name));
+        self.args.push(KernelArg::Scalar(v.to_ne_bytes().to_vec()));
+    }
+
+    pub(super) fn longs(&mut self, prefix: &str, values: &[i64]) {
+        for (d, v) in values.iter().enumerate() {
+            self.long(format!("{}{}", prefix, d), *v);
+        }
+    }
+
+    /// Operand `k` as a C expression: the scalar itself for a constant,
+    /// else the element at `idx`.
+    pub(super) fn read(&self, k: usize, idx: &str) -> String {
+        operand_expr(self.instr, k, idx)
+    }
+
+    /// Declares `const long total`, the number of items with work, and returns
+    /// the line that ends every other item. It goes first in a body, before any
+    /// division by a size: a launch of an empty output is one item wide (OpenCL
+    /// rejects an empty launch), and that item must not touch memory.
+    pub(super) fn guard(&mut self, total: usize) -> Result<&'static str, String> {
+        self.params.push("const long total".to_string());
+        self.args.push(KernelArg::Scalar(long_arg(total)?));
+        Ok("  if ((long)get_global_id(0) >= total) return;\n")
+    }
+
+    /// Like `guard`, for a kernel that works in groups: it declares
+    /// `const long groups` and returns the line that ends the items of every
+    /// group past it. The test is the same for every item of a group, so it is
+    /// safe before a barrier.
+    pub(super) fn guard_groups(&mut self, groups: usize) -> Result<&'static str, String> {
+        self.params.push("const long groups".to_string());
+        self.args.push(KernelArg::Scalar(long_arg(groups)?));
+        Ok("  if ((long)get_group_id(0) >= groups) return;\n")
+    }
+
+    /// The spec of a kernel with one item per output element, guarded.
+    pub(super) fn finish(
+        self,
+        caps: &Caps,
+        entry: String,
+        helpers: &str,
+        body: &str,
+    ) -> Result<KernelSpec, String> {
+        let total = checked_element_count(&self.instr.out_shape)?;
+        self.finish_over(caps, entry, helpers, body, total)
+    }
+
+    /// Like `finish`, for a kernel with `total` items.
+    pub(super) fn finish_over(
+        self,
+        caps: &Caps,
+        entry: String,
+        helpers: &str,
+        body: &str,
+        total: usize,
+    ) -> Result<KernelSpec, String> {
+        let head = format!("{}{}", pragmas(&self.instr.dtypes(), caps)?, helpers);
+        self.seal(&head, entry, body, total)
+    }
+
+    /// Like `finish_over`, with the whole `head` (pragmas and helpers) given.
+    pub(super) fn seal(
+        mut self,
+        head: &str,
+        entry: String,
+        body: &str,
+        total: usize,
+    ) -> Result<KernelSpec, String> {
+        let guard = self.guard(total)?;
+        let body = format!("{guard}{body}");
+        Ok(self.into_spec(head, entry, &body, vec![total], Vec::new()))
+    }
+
+    /// The spec for a kernel named `entry` with the parameters declared so far,
+    /// after `head` (pragmas and helper source). A global size of 0 becomes 1:
+    /// OpenCL rejects an empty launch. The executor never launches a kernel
+    /// whose output is empty; the guard (see `guard`) covers a launch that
+    /// happens anyway.
+    pub(super) fn into_spec(
+        self,
+        head: &str,
+        entry: String,
+        body: &str,
+        global: Vec<usize>,
+        local: Vec<usize>,
+    ) -> KernelSpec {
+        KernelSpec {
+            source: assemble(head, &entry, &self.params.join(", "), body),
+            entry,
+            build_options: String::new(),
+            global: global.into_iter().map(|g| g.max(1)).collect(),
+            local,
+            args: self.args,
+        }
+    }
+}
+
+/// Operand `k` of `instr` as a C expression: the scalar itself for a constant,
+/// else the element at `idx`.
+pub(super) fn operand_expr(instr: &Instr, k: usize, idx: &str) -> String {
+    if instr.operands[k].constant.is_some() {
+        format!("in{}", k)
+    } else {
+        format!("in{}[{}]", k, idx)
+    }
+}
+
+pub(super) fn assemble(head: &str, entry: &str, params: &str, body: &str) -> String {
+    format!("{head}__kernel void {entry}({params}) {{\n{body}}}\n")
+}
+
+/// The extension pragmas for every type in `dtypes`, or an error when the
+/// device lacks one.
+pub(super) fn pragmas(dtypes: &[DType], caps: &Caps) -> Result<String, String> {
+    let mut out = String::new();
+    for &dtype in dtypes {
+        if let Some(ext) = type_info(dtype)?.ext {
+            if !caps.has(ext) {
+                return Err(format!(
+                    "missing extension {}: the device cannot run {}",
+                    ext.name(),
+                    dtype
+                ));
+            }
+            let pragma = format!("#pragma OPENCL EXTENSION {} : enable\n", ext.name());
+            if !out.contains(&pragma) {
+                out.push_str(&pragma);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn check_instr_rank(instr: &Instr) -> Result<usize, String> {
+    let widest = instr
+        .operands
+        .iter()
+        .map(|o| o.shape.len())
+        .chain(std::iter::once(instr.out_shape.len()))
+        .max()
+        .unwrap_or(0);
+    index::check_rank(&instr.op, widest)?;
+    Ok(instr.out_shape.len())
+}
+
+pub(super) fn ints(attrs: &[Attr], what: &str) -> Result<Vec<i64>, String> {
+    attrs
+        .iter()
+        .map(|a| match a {
+            Attr::Int(v) => Ok(*v),
+            _ => Err(format!("{} attrs must be integers", what)),
+        })
+        .collect()
+}
+
+fn same_type(instr: &Instr, ks: &[usize]) -> Result<(), String> {
+    for &k in ks {
+        let o = instr
+            .operands
+            .get(k)
+            .ok_or_else(|| format!("{} is missing operand {}", instr.op, k))?;
+        if o.dtype != instr.out {
+            return Err(format!(
+                "{}: operand {} is {}, the output {}",
+                instr.op, k, o.dtype, instr.out
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Names of the operand types, for the entry name.
+pub(super) fn type_names(instr: &Instr) -> String {
+    let mut names: Vec<String> = instr.operands.iter().map(|o| o.dtype.name()).collect();
+    names.push(instr.out.name());
+    names.join("_")
+}
+
+/// `out[i] = in0[off + sum(c_d * s_d)]`. A stride is 0 on a broadcast axis and
+/// negative on a reversed one.
+fn strided(instr: &Instr, caps: &Caps, off: i64, s: &[i64]) -> Result<KernelSpec, String> {
+    let rank = instr.out_shape.len();
+    let mut k = Kernel::new(instr);
+    k.operand(0)?;
+    k.output()?;
+    k.long("off".to_string(), off);
+    k.longs("o", &dims(&instr.out_shape));
+    k.longs("s", s);
+    let mut body = coords(rank);
+    let terms: String = (0..rank).map(|d| format!(" + c{d} * s{d}")).collect();
+    body.push_str(&format!("  long j = off{};\n", terms));
+    body.push_str(&format!("  out[i] = {};\n", k.read(0, "j")));
+    let entry = format!("mv_{}_r{}_{}", instr.op, rank, type_names(instr));
+    k.finish(caps, entry, "", &body)
+}
+
+fn broadcast(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    expect_operands(instr, 1)?;
+    same_type(instr, &[0])?;
+    let input = &instr.operands[0];
+    // A constant fills the output; no index math.
+    if input.constant.is_some() {
+        let mut k = Kernel::new(instr);
+        k.operand(0)?;
+        k.output()?;
+        let body = format!(
+            "  size_t i = get_global_id(0);\n  out[i] = {};\n",
+            k.read(0, "0")
+        );
+        let entry = format!("mv_broadcast_fill_{}", instr.out.name());
+        return k.finish(caps, entry, "", &body);
+    }
+    let axes = ints(&instr.attrs, "broadcast axes")?;
+    let out = &instr.out_shape;
+    if axes.len() != input.shape.len() {
+        return Err(format!(
+            "broadcast: {} axes for an operand of rank {}",
+            axes.len(),
+            input.shape.len()
+        ));
+    }
+    let in_strides = strides(&input.shape);
+    let mut s = vec![0i64; out.len()];
+    for (j, &axis) in axes.iter().enumerate() {
+        let a = usize::try_from(axis)
+            .ok()
+            .filter(|&a| a < out.len())
+            .ok_or_else(|| format!("broadcast: axis {} is out of range", axis))?;
+        let dim = input.shape[j];
+        if dim != 1 && dim != out[a] {
+            return Err(format!(
+                "broadcast: dimension {} of size {} does not fit output axis {} of size {}",
+                j, dim, a, out[a]
+            ));
+        }
+        if dim != 1 {
+            s[a] = in_strides[j];
+        }
+    }
+    strided(instr, caps, 0, &s)
+}
+
+fn transpose(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    expect_operands(instr, 1)?;
+    same_type(instr, &[0])?;
+    let axes = ints(&instr.attrs, "transpose axes")?;
+    let input = &instr.operands[0].shape;
+    if axes.len() != input.len() || input.len() != instr.out_shape.len() {
+        return Err("transpose: axes must name every dimension".to_string());
+    }
+    let in_strides = strides(input);
+    let mut s = Vec::with_capacity(axes.len());
+    let mut seen = vec![false; axes.len()];
+    for (d, &axis) in axes.iter().enumerate() {
+        let a = usize::try_from(axis)
+            .ok()
+            .filter(|&a| a < axes.len() && !seen[a])
+            .ok_or_else(|| format!("transpose: axes {:?} are not a permutation", axes))?;
+        seen[a] = true;
+        if instr.out_shape[d] != input[a] {
+            return Err("transpose: the output shape does not follow the axes".to_string());
+        }
+        s.push(in_strides[a]);
+    }
+    strided(instr, caps, 0, &s)
+}
+
+fn reverse(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    expect_operands(instr, 1)?;
+    same_type(instr, &[0])?;
+    let axes = ints(&instr.attrs, "reverse axes")?;
+    let input = &instr.operands[0].shape;
+    if *input != instr.out_shape {
+        return Err("reverse: the output shape must equal the input shape".to_string());
+    }
+    let mut s = strides(input);
+    let mut off = 0i64;
+    let mut done = vec![false; input.len()];
+    for &axis in &axes {
+        let a = usize::try_from(axis)
+            .ok()
+            .filter(|&a| a < input.len())
+            .ok_or_else(|| format!("reverse: axis {} is out of range", axis))?;
+        if !done[a] {
+            done[a] = true;
+            off += (input[a] as i64 - 1).max(0) * s[a];
+            s[a] = -s[a];
+        }
+    }
+    strided(instr, caps, off, &s)
+}
+
+/// Statements that read start operand `k` for axis `d` into `s{d}`, clamped
+/// to `[0, h{d}]`. A `u64` start compares as unsigned.
+fn clamp_start(kernel: &Kernel, k: usize, d: usize) -> Result<String, String> {
+    let dtype = kernel.instr.operands[k].dtype;
+    let info = type_info(dtype)?;
+    if info.is_float() || info.is_complex() {
+        return Err(format!(
+            "{}: start indices must be integers",
+            kernel.instr.op
+        ));
+    }
+    let v = kernel.read(k, "0");
+    Ok(if !info.is_signed() && dtype.bits == 64 {
+        format!("  ulong u{d} = {v};\n  long s{d} = u{d} > (ulong)h{d} ? h{d} : (long)u{d};\n")
+    } else {
+        format!(
+            "  long s{d} = (long)({v});\n  s{d} = s{d} < 0 ? 0 : (s{d} > h{d} ? h{d} : s{d});\n"
+        )
+    })
+}
+
+/// Operands: the tensor, then one start per axis. Attrs: the input span of
+/// each axis, then the stride of each axis.
+fn slice(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    let input = &instr.operands.first().ok_or("slice needs a tensor")?.shape;
+    let rank = input.len();
+    expect_operands(instr, 1 + rank)?;
+    same_type(instr, &[0])?;
+    let a = ints(&instr.attrs, "slice")?;
+    if a.len() != 2 * rank || instr.out_shape.len() != rank {
+        return Err("slice: attrs must hold a length and a stride per axis".to_string());
+    }
+    let (lens, steps) = a.split_at(rank);
+    let in_st = strides(input);
+    let (mut hi, mut step) = (Vec::new(), Vec::new());
+    for d in 0..rank {
+        let (len, st) = (lens[d], steps[d]);
+        if len < 0 || len > input[d] as i64 || st < 1 {
+            return Err(format!(
+                "slice: bad length {} or stride {} on axis {}",
+                len, st, d
+            ));
+        }
+        let want = if len == 0 { 0 } else { (len - 1) / st + 1 };
+        if instr.out_shape[d] as i64 != want {
+            return Err(format!("slice: axis {} should give {} elements", d, want));
+        }
+        hi.push(input[d] as i64 - len);
+        step.push(
+            st.checked_mul(in_st[d])
+                .ok_or_else(|| format!("slice: stride {} on axis {} is too large", st, d))?,
+        );
+    }
+    let mut k = Kernel::new(instr);
+    for n in 0..=rank {
+        k.operand(n)?;
+    }
+    k.output()?;
+    k.longs("o", &dims(&instr.out_shape));
+    k.longs("h", &hi);
+    k.longs("ss", &step);
+    k.longs("is", &in_st);
+    let mut body = coords(rank);
+    for d in 0..rank {
+        body.push_str(&clamp_start(&k, 1 + d, d)?);
+    }
+    let terms: String = (0..rank)
+        .map(|d| format!(" + s{d} * is{d} + c{d} * ss{d}"))
+        .collect();
+    body.push_str(&format!("  long j = 0{};\n", terms));
+    body.push_str(&format!("  out[i] = {};\n", k.read(0, "j")));
+    let entry = format!("mv_slice_r{}_{}", rank, type_names(instr));
+    k.finish(caps, entry, "", &body)
+}
+
+/// Operands: the tensor, the update, then one start per axis.
+fn put_slice(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    let rank = instr.out_shape.len();
+    expect_operands(instr, 2 + rank)?;
+    same_type(instr, &[0, 1])?;
+    let (target, update) = (&instr.operands[0].shape, &instr.operands[1].shape);
+    if *target != instr.out_shape || update.len() != rank {
+        return Err("put_slice: the update must have the tensor's rank".to_string());
+    }
+    if (0..rank).any(|d| update[d] > target[d]) {
+        return Err("put_slice: the update is larger than the tensor".to_string());
+    }
+    let hi: Vec<i64> = (0..rank).map(|d| (target[d] - update[d]) as i64).collect();
+    let mut k = Kernel::new(instr);
+    for n in 0..2 + rank {
+        k.operand(n)?;
+    }
+    k.output()?;
+    k.longs("o", &dims(&instr.out_shape));
+    k.longs("h", &hi);
+    k.longs("l", &dims(update));
+    k.longs("us", &strides(update));
+    let mut body = coords(rank);
+    for d in 0..rank {
+        body.push_str(&clamp_start(&k, 2 + d, d)?);
+    }
+    body.push_str("  int inside = 1;\n  long k = 0;\n");
+    for d in 0..rank {
+        body.push_str(&format!(
+            "  long p{d} = c{d} - s{d};\n  inside = inside && p{d} >= 0 && p{d} < l{d};\n  k += p{d} * us{d};\n"
+        ));
+    }
+    body.push_str(&format!(
+        "  out[i] = inside ? {} : {};\n",
+        k.read(1, "k"),
+        k.read(0, "i")
+    ));
+    let entry = format!("mv_put_slice_r{}_{}", rank, type_names(instr));
+    k.finish(caps, entry, "", &body)
+}
+
+/// Operands: the tensor and the pad value. Attrs: low, high and interior
+/// padding for each axis. Low and high may be negative.
+fn pad(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    expect_operands(instr, 2)?;
+    same_type(instr, &[0, 1])?;
+    let input = &instr.operands[0].shape;
+    let rank = input.len();
+    if !instr.operands[1].shape.is_empty() || instr.out_shape.len() != rank {
+        return Err("pad: the value must be a scalar and the rank must not change".to_string());
+    }
+    let a = ints(&instr.attrs, "pad config")?;
+    if a.len() != 3 * rank {
+        return Err("pad: the config needs low, high and interior per axis".to_string());
+    }
+    let in_st = strides(input);
+    let (mut lo, mut step, mut ext) = (Vec::new(), Vec::new(), Vec::new());
+    for d in 0..rank {
+        let (l, h, i) = (
+            index::check_pad("pad", a[3 * d])?,
+            index::check_pad("pad", a[3 * d + 1])?,
+            a[3 * d + 2],
+        );
+        let n = input[d] as i64;
+        if i < 0 {
+            return Err(format!("pad: interior padding {} is negative", i));
+        }
+        // The config comes from the wire, so the sums use wider integers.
+        let (wide_n, wide_i) = (n as i128, i as i128);
+        let want = l as i128 + h as i128 + wide_n + (wide_n - 1).max(0) * wide_i;
+        if instr.out_shape[d] as i128 != want {
+            return Err(format!("pad: axis {} should have {} elements", d, want));
+        }
+        let extent = if n == 0 {
+            0
+        } else {
+            (wide_n - 1) * (wide_i + 1) + 1
+        };
+        lo.push(l);
+        step.push(
+            i.checked_add(1)
+                .ok_or_else(|| format!("pad: interior padding {} is too large", i))?,
+        );
+        ext.push(
+            i64::try_from(extent)
+                .map_err(|_| format!("pad: the padded extent of axis {} is too large", d))?,
+        );
+    }
+    let mut k = Kernel::new(instr);
+    k.operand(0)?;
+    k.operand(1)?;
+    k.output()?;
+    k.longs("o", &dims(&instr.out_shape));
+    k.longs("lo", &lo);
+    k.longs("st", &step);
+    k.longs("ex", &ext);
+    k.longs("is", &in_st);
+    let mut body = coords(rank);
+    body.push_str("  int fill = 0;\n  long j = 0;\n");
+    for d in 0..rank {
+        // A negative low pad shifts p up; a negative high pad shortens `ex`.
+        body.push_str(&format!(
+            "  {{\n    long p = c{d} - lo{d};\n    if (p < 0 || p >= ex{d} || p % st{d} != 0) fill = 1;\n    else j += (p / st{d}) * is{d};\n  }}\n"
+        ));
+    }
+    body.push_str(&format!(
+        "  out[i] = fill ? {} : {};\n",
+        k.read(1, "0"),
+        k.read(0, "j")
+    ));
+    let entry = format!("mv_pad_r{}_{}", rank, type_names(instr));
+    k.finish(caps, entry, "", &body)
+}
+
+/// One kernel reads every input. Each input covers a run of the axis, so the
+/// output id picks the input by comparing the axis coordinate with the run
+/// ends. `stack` is the same kernel with a run of 1 per input.
+fn join(instr: &Instr, caps: &Caps, stack: bool) -> Result<KernelSpec, String> {
+    let n = instr.operands.len();
+    if n == 0 {
+        return Err(format!("{} needs at least one operand", instr.op));
+    }
+    let axis = match instr.attrs.as_slice() {
+        [Attr::Int(a)] => usize::try_from(*a).map_err(|_| "axis is negative".to_string())?,
+        _ => return Err(format!("{} takes one axis attr", instr.op)),
+    };
+    let out = &instr.out_shape;
+    if axis >= out.len() {
+        return Err(format!("{}: axis {} is out of range", instr.op, axis));
+    }
+    same_type(instr, &(0..n).collect::<Vec<_>>())?;
+    let mut lens = Vec::with_capacity(n);
+    for (idx, o) in instr.operands.iter().enumerate() {
+        let mut want = out.clone();
+        if stack {
+            want.remove(axis);
+            lens.push(1i64);
+        } else {
+            let len = *o
+                .shape
+                .get(axis)
+                .ok_or_else(|| format!("concatenate: operand {} has too few axes", idx))?;
+            want[axis] = len;
+            lens.push(len as i64);
+        }
+        if o.shape != want {
+            return Err(format!(
+                "{}: operand {} has shape {:?}",
+                instr.op, idx, o.shape
+            ));
+        }
+    }
+    let total: i64 = lens.iter().sum();
+    if total != out[axis] as i64 {
+        return Err(format!(
+            "{}: the runs add to {}, not {}",
+            instr.op, total, out[axis]
+        ));
+    }
+    let inner = checked_product("the join inner size", &out[axis + 1..])? as i64;
+    let mut k = Kernel::new(instr);
+    for idx in 0..n {
+        k.operand(idx)?;
+    }
+    k.output()?;
+    k.long("inner".to_string(), inner);
+    k.long("span".to_string(), total);
+    let mut begin = 0i64;
+    let (mut begins, mut ends) = (Vec::new(), Vec::new());
+    for len in &lens {
+        begins.push(begin);
+        begin += len;
+        ends.push(begin);
+    }
+    k.longs("b", &begins);
+    k.longs("e", &ends);
+    k.longs("l", &lens);
+    let mut body = String::from(
+        "  size_t i = get_global_id(0);\n  long id = (long)i;\n  long rr = id % inner;\n  long a = (id / inner) % span;\n  long oo = id / (inner * span);\n",
+    );
+    for idx in 0..n {
+        let src = k.read(idx, &format!("(oo * l{idx} + (a - b{idx})) * inner + rr"));
+        let lead = match (idx, idx + 1 == n) {
+            (0, true) => "  ".to_string(),
+            (0, false) => format!("  if (a < e{idx}) "),
+            (_, true) => "  else ".to_string(),
+            _ => format!("  else if (a < e{idx}) "),
+        };
+        body.push_str(&format!("{lead}out[i] = {src};\n"));
+    }
+    let entry = format!("mv_{}_n{}_{}", instr.op, n, instr.out.name());
+    k.finish(caps, entry, "", &body)
+}
+
+/// The integer expression `v` as a value of the output type.
+fn from_long(info: &TypeInfo, v: &str) -> String {
+    if info.is_complex() {
+        return format!(
+            "({})(({})({}), ({})0)",
+            info.math, info.component, v, info.component
+        );
+    }
+    match info.half {
+        Some(Half::Bf16) => format!("f32_to_bf16((float)({}))", v),
+        None if info.storage == "half" => format!("(half)({})", v),
+        None if info.is_float() => format!("({})({})", info.math, v),
+        None => format!("({})({})", info.storage, v),
+    }
+}
+
+/// Attrs: the axis, or the atom `nil` for the flat index.
+fn iota(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    expect_operands(instr, 0)?;
+    let out = &instr.out_shape;
+    let info = type_info(instr.out)?;
+    let mut k = Kernel::new(instr);
+    k.output()?;
+    let value = match instr.attrs.as_slice() {
+        [Attr::Atom(a)] if a == "nil" => "(long)i".to_string(),
+        [Attr::Int(a)] => {
+            let axis = usize::try_from(*a)
+                .ok()
+                .filter(|&a| a < out.len())
+                .ok_or_else(|| format!("iota: axis {} is out of range", a))?;
+            k.long(
+                "inner".to_string(),
+                checked_product("the iota inner size", &out[axis + 1..])? as i64,
+            );
+            k.long("dim".to_string(), out[axis] as i64);
+            "((long)i / inner) % dim".to_string()
+        }
+        _ => return Err("iota takes an axis or nil".to_string()),
+    };
+    let body = format!(
+        "  size_t i = get_global_id(0);\n  out[i] = {};\n",
+        from_long(&info, &value)
+    );
+    let flat = if instr.attrs == [Attr::Atom("nil".to_string())] {
+        "flat"
+    } else {
+        "axis"
+    };
+    let entry = format!("mv_iota_{}_{}", flat, instr.out.name());
+    k.finish(caps, entry, bf16_helpers(&[&info]), &body)
+}
+
+/// A batch of identity matrices: the last two axes are rows and columns.
+fn eye(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    expect_operands(instr, 0)?;
+    let out = &instr.out_shape;
+    if out.len() < 2 {
+        return Err("eye needs a shape of rank 2 or more".to_string());
+    }
+    let info = type_info(instr.out)?;
+    let (one, zero) = if info.is_complex() {
+        (complex::one(&info), complex::zero(&info))
+    } else {
+        (from_long(&info, "1"), from_long(&info, "0"))
+    };
+    let mut k = Kernel::new(instr);
+    k.output()?;
+    k.long("n".to_string(), out[out.len() - 2] as i64);
+    k.long("m".to_string(), out[out.len() - 1] as i64);
+    let body = format!(
+        "  size_t i = get_global_id(0);\n  long col = (long)i % m;\n  long row = ((long)i / m) % n;\n  out[i] = row == col ? {one} : {zero};\n"
+    );
+    let entry = format!("mv_eye_{}", instr.out.name());
+    k.finish(caps, entry, bf16_helpers(&[&info]), &body)
+}
+
+pub fn generate(instr: &Instr, caps: &Caps) -> Result<KernelSpec, String> {
+    check_instr_rank(instr)?;
+    match instr.op.as_str() {
+        "broadcast" => broadcast(instr, caps),
+        "transpose" => transpose(instr, caps),
+        "reverse" => reverse(instr, caps),
+        "slice" => slice(instr, caps),
+        "put_slice" => put_slice(instr, caps),
+        "pad" => pad(instr, caps),
+        "concatenate" => join(instr, caps, false),
+        "stack" => join(instr, caps, true),
+        "iota" => iota(instr, caps),
+        "eye" => eye(instr, caps),
+        other => Err(format!("no movement codegen for op {}", other)),
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/movement.rs"]
+mod tests;

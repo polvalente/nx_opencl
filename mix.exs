@@ -6,10 +6,11 @@ defmodule NxOpencl.MixProject do
       app: :nx_opencl,
       version: "0.1.0",
       elixir: "~> 1.19",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "NxOpenCL",
-      description: "Nx backend for OpenCL GPUs",
+      description: "Nx backend and defn compiler for OpenCL devices, with a Rust NIF",
       docs: docs(),
       package: package(),
       aliases: aliases(),
@@ -19,26 +20,49 @@ defmodule NxOpencl.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger],
+      mod: {NxCL.Application, []}
     ]
   end
 
-  def docs do
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
+
+  defp docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      source_url: "https://github.com/polvalente/nx_opencl",
+      source_ref: "v0.1.0",
+      extras: ["README.md", "docs/nerves.md", "CHANGELOG.md"]
     ]
   end
 
-  def package do
+  defp package do
     [
       name: :nx_opencl,
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => "https://github.com/TODO/nx_opencl"}
+      links: %{
+        "GitHub" => "https://github.com/polvalente/nx_opencl",
+        "Changelog" => "https://github.com/polvalente/nx_opencl/blob/main/CHANGELOG.md"
+      },
+      # The Rust crate ships as source; `target/` stays out.
+      files: ~w(
+        lib
+        native/nxcl_nif/src
+        native/nxcl_nif/Cargo.toml
+        native/nxcl_nif/Cargo.lock
+        native/nxcl_nif/.cargo
+        docs
+        mix.exs
+        README.md
+        CHANGELOG.md
+        LICENSE.md
+        .formatter.exs
+      )
     ]
   end
 
-  def aliases do
+  defp aliases do
     [
       check: [
         "hex.audit",
@@ -46,26 +70,28 @@ defmodule NxOpencl.MixProject do
         "format --check-formatted",
         "credo",
         "deps.unlock --check-unused",
-        "spellweaver.check",
-        "dialyzer"
+        "dialyzer",
+        # Last: `spellweaver.check` halts the VM, so a task after it never runs.
+        "spellweaver.check"
       ]
     ]
   end
 
-  def dialyzer do
+  defp dialyzer do
     [
-      plt_add_apps: [:mix],
+      plt_add_apps: [:mix, :ex_unit],
+      # One folder for both PLTs, so CI can cache it.
+      plt_local_path: "priv/plts",
+      plt_core_path: "priv/plts",
       ignore_warnings: ".dialyzer_ignore.exs"
     ]
   end
 
   defp deps do
     [
-      {:nx, "~> 0.9"},
-      {:axon, "~> 0.7", only: [:test]},
+      {:nx, "~> 1.0"},
+      {:axon, "~> 0.9", only: [:test]},
       {:rustler, "~> 0.36"},
-      {:nstandard, "~> 0.1"},
-      {:igniter, "~> 0.6", only: [:dev, :test]},
       {:ex_doc, "~> 0.31", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.0", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
