@@ -1,8 +1,9 @@
 defmodule NxCL.Compiler.ProgramCache do
   @moduledoc """
-  Bounded cache of compiled programs and executor plans. The key is
-  `NxCL.Compiler.Program.signature/1` plus the device, so functions that lower
-  alike share one entry.
+  Bounded cache of compiled programs and executor plans. A compiled program
+  is keyed by the device and `NxCL.Compiler.Program.signature/1`, so functions
+  that lower alike share one entry. A plan holds no device state and is keyed by
+  the signature alone.
 
   Callers use the public ETS table directly. If two processes build the same
   key at once, the first insert wins. Dropping an entry does not free a program

@@ -26,5 +26,8 @@ defmodule NxOpencl do
       cpu_tensor = Nx.backend_transfer(gpu_tensor, Nx.BinaryBackend)
 
   The README lists what works and what does not.
+
+  This module only holds the package docs. The package is `:nx_opencl`; every
+  other module is named `NxCL`.
   """
 end

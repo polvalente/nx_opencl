@@ -12,7 +12,21 @@ defmodule NxCL.Compiler.Executor.Plan do
   # constants stay until the run ends, because nested bodies share them.
   #
   # Segments share the bounded `NxCL.Compiler.ProgramCache`; an evicted segment
-  # compiles again on its next run.
+  # compiles again on its next run. A plan holds no device state, so
+  # `ProgramCache` keys it by the program signature alone; the compiled segments
+  # are keyed by device too.
+  #
+  # `scope/4` builds the steps in two passes, because a step can only drop a key
+  # once it knows whether anything later reads it:
+  #
+  #   1. Forward: cut the instruction list into chunks and make one raw step per
+  #      chunk. A raw step records what it reads and what it defines, and also
+  #      collects the constants that control steps and outputs read as buffers.
+  #   2. Backward: walk the raw steps from the last one with the set of keys
+  #      still live. A result is live if a later step or an output reads it. A
+  #      key a step reads that is not live afterwards goes in its `:free` list.
+  #      `finish/5` then turns the raw step into its final shape, with the wire
+  #      of a segment, once it knows which results to keep.
 
   alias NxCL.Compiler.Executor.Wire
   alias NxCL.Compiler.Instruction
@@ -180,7 +194,7 @@ defmodule NxCL.Compiler.Executor.Plan do
     local = MapSet.new(results)
 
     operands = Enum.flat_map(chunk, fn {instr, _} -> instr.operands end)
-    ext = operands |> Enum.reject(&external_free?(&1, local)) |> Enum.uniq()
+    ext = operands |> Enum.reject(&internal?(&1, local)) |> Enum.uniq()
     consts = operands |> Enum.filter(&match?({:const, _}, &1)) |> Enum.uniq()
 
     step = %{
@@ -196,9 +210,11 @@ defmodule NxCL.Compiler.Executor.Plan do
     {[step], needed}
   end
 
-  defp external_free?({:const, _}, _local), do: true
-  defp external_free?({:result, m}, local), do: MapSet.member?(local, m)
-  defp external_free?(_ref, _local), do: false
+  # True for a ref a segment needs no outside buffer for: a constant (the
+  # segment holds its own) or a result of the same segment.
+  defp internal?({:const, _}, _local), do: true
+  defp internal?({:result, m}, local), do: MapSet.member?(local, m)
+  defp internal?(_ref, _local), do: false
 
   defp control_step(instr, i, types, constants, needed) do
     shared = Map.filter(types, fn {key, _} -> elem(key, 0) in [:capture, :const] end)

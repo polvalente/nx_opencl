@@ -262,6 +262,35 @@ defmodule NxCL.BackendTest do
       assert_raise ArgumentError, ~r/buffer was deallocated/, fn -> Nx.to_binary(t) end
     end
 
+    test "inspect prints a freed tensor as one short line" do
+      t = Nx.tensor([1.0, 2.0]) |> Nx.backend_transfer(NxCL.Backend)
+      Nx.backend_deallocate(t)
+
+      text = inspect(t)
+      assert text =~ "NxCL.Backend<deallocated>"
+      refute text =~ "Inspect.Error"
+      assert length(String.split(text, "\n")) <= 4
+    end
+
+    test "inspect reads one element more than the limit" do
+      t = Nx.iota({1000}, type: :f32, backend: NxCL.Backend)
+
+      {text, sizes} = read_sizes(fn -> inspect(t, limit: 3) end)
+      assert text =~ "[0.0, 1.0, 2.0, ...]"
+      assert sizes == [4 * 4]
+
+      {_text, sizes} = read_sizes(fn -> inspect(t, limit: 10) end)
+      assert sizes == [11 * 4]
+    end
+
+    test "inspect with limit: :infinity reads the whole tensor" do
+      t = Nx.iota({10}, type: :s32, backend: NxCL.Backend)
+
+      {text, sizes} = read_sizes(fn -> inspect(t, limit: :infinity) end)
+      assert text =~ "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+      assert sizes == [40]
+    end
+
     test "a reshape shares memory; freeing the source keeps the result" do
       t = Nx.tensor([1.0, 2.0, 3.0, 4.0]) |> Nx.backend_transfer(NxCL.Backend)
       r = Nx.reshape(t, {2, 2})
@@ -326,6 +355,75 @@ defmodule NxCL.BackendTest do
         |> Nx.backend_transfer(Nx.BinaryBackend)
 
       assert_tensors_close(gpu_result, cpu_result, 1.0e-5)
+    end
+  end
+
+  describe "options" do
+    test "an unknown key raises, in init and in the callbacks that take options" do
+      assert_raise ArgumentError, ~r/:devcie/, fn -> NxCL.Backend.init(devcie: 1) end
+
+      assert_raise ArgumentError, ~r/:devcie/, fn ->
+        Nx.tensor([1.0], backend: {NxCL.Backend, devcie: 1})
+      end
+
+      assert_raise ArgumentError, ~r/:devcie/, fn ->
+        Nx.iota({2}, backend: {NxCL.Backend, devcie: 1})
+      end
+
+      assert NxCL.Backend.init(device: 0) == [device: 0]
+    end
+
+    test "a device that cannot open raises ArgumentError on the backend path" do
+      assert_raise ArgumentError, ~r/cannot open the OpenCL device.*out of range/, fn ->
+        Nx.tensor([1.0], backend: {NxCL.Backend, device: 99})
+      end
+    end
+  end
+
+  # The byte sizes of the `NxCL.Native.buffer_read/2` calls `fun` makes, in the
+  # calling process. A traced process needs a second one to receive the messages.
+  defp read_sizes(fun) do
+    parent = self()
+    mfa = {NxCL.Native, :buffer_read, 2}
+
+    tracer =
+      spawn_link(fn ->
+        loop = fn loop ->
+          receive do
+            {:trace, _pid, :call, {_m, _f, [_ref, size]}} ->
+              send(parent, {:read, size})
+              loop.(loop)
+
+            :flush ->
+              send(parent, :flushed)
+          end
+        end
+
+        loop.(loop)
+      end)
+
+    1 = :erlang.trace_pattern(mfa, true, [])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      result = fun.()
+      :erlang.trace(self(), false, [:call])
+      delivered = :erlang.trace_delivered(self())
+      assert_receive {:trace_delivered, _pid, ^delivered}
+      send(tracer, :flush)
+      assert_receive :flushed
+      {result, drain_reads([])}
+    after
+      :erlang.trace(self(), false, [:call])
+      :erlang.trace_pattern(mfa, false, [])
+    end
+  end
+
+  defp drain_reads(acc) do
+    receive do
+      {:read, size} -> drain_reads([size | acc])
+    after
+      0 -> Enum.reverse(acc)
     end
   end
 end

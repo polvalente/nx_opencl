@@ -35,16 +35,28 @@ defmodule NxCL.Backend do
   alias NxCL.Compiler.Ops
 
   defstruct [:ref, :ctx]
+
+  # A misspelled key would otherwise pick device 0 without a word. Nx calls
+  # `init/1` for `Nx.default_backend/1` only; the callbacks that take
+  # `backend_opts` check them too.
   @impl true
-  def init(opts) do
-    opts
-  end
+  def init(opts), do: check_opts!(opts)
+
+  defp check_opts!(opts), do: Keyword.validate!(opts, [:device])
 
   @impl true
   def from_binary(%Nx.Tensor{} = tensor, binary, backend_opts) do
-    ctx = NxCL.Devices.fetch!(Keyword.take(backend_opts, [:device])).ctx
+    ctx = device_ctx!(check_opts!(backend_opts))
     ref = ctx |> NxCL.Native.buffer_write(binary) |> NxCL.Native.ok!("could not upload a tensor")
     put_in(tensor.data, %__MODULE__{ref: ref, ctx: ctx})
+  end
+
+  # A bad device is an argument error here, not a compiler error.
+  defp device_ctx!(opts) do
+    case NxCL.Devices.fetch(opts) do
+      {:ok, %{ctx: ctx}} -> ctx
+      {:error, reason} -> raise ArgumentError, "cannot open the OpenCL device: #{reason}"
+    end
   end
 
   # `limit` counts elements, vectorized axes included.
@@ -55,10 +67,23 @@ defmodule NxCL.Backend do
     |> NxCL.Native.ok!("could not read a tensor")
   end
 
+  # Reads one element more than `opts.limit`, as `Nx.Backend.inspect/3`
+  # expects, so a large tensor does not come back whole to print a few values.
   @impl true
-  def inspect(%Nx.Tensor{} = tensor, opts) do
-    binary = to_binary(tensor, Nx.flat_size(tensor))
-    Nx.Backend.inspect(tensor, binary, opts)
+  def inspect(%Nx.Tensor{data: %__MODULE__{ref: ref}, type: {_, bits}} = tensor, opts) do
+    size = Nx.flat_size(tensor)
+    count = if opts.limit == :infinity, do: size, else: min(size, opts.limit + 1)
+
+    case NxCL.Native.buffer_read(ref, div(bits * count, 8)) do
+      {:error, "buffer was deallocated"} ->
+        "NxCL.Backend<deallocated>"
+
+      {:error, message} ->
+        raise ArgumentError, "could not read a tensor: #{message}"
+
+      binary ->
+        Nx.Backend.inspect(tensor, binary, opts)
+    end
   end
 
   @impl true
@@ -77,6 +102,8 @@ defmodule NxCL.Backend do
     )
   end
 
+  # Any other target, an `NxCL.Backend` tensor on another device included, takes
+  # the data through the host.
   def backend_copy(tensor, backend, opts) do
     binary = to_binary(tensor, Nx.flat_size(tensor))
     backend.from_binary(%{tensor | data: %{__struct__: backend}}, binary, opts)
@@ -101,6 +128,7 @@ defmodule NxCL.Backend do
     device_opts = Evaluator.device_opts([tensor])
 
     Stream.map(range, fn
+      # The short last batch wraps around: it takes the items from the start.
       ^full ->
         before = full * bytes
         available = byte_size(binary) - before
@@ -114,15 +142,15 @@ defmodule NxCL.Backend do
 
   @impl true
   def constant(%Nx.Tensor{} = out, number, backend_opts),
-    do: Evaluator.constant(out, number, Keyword.take(backend_opts, [:device]))
+    do: Evaluator.constant(out, number, check_opts!(backend_opts))
 
   @impl true
   def eye(%Nx.Tensor{} = out, backend_opts),
-    do: Evaluator.eye(out, Keyword.take(backend_opts, [:device]))
+    do: Evaluator.eye(out, check_opts!(backend_opts))
 
   @impl true
   def iota(%Nx.Tensor{} = out, axis, backend_opts),
-    do: Evaluator.iota(out, axis, Keyword.take(backend_opts, [:device]))
+    do: Evaluator.iota(out, axis, check_opts!(backend_opts))
 
   # `logical_not` and `phase` reach the backend as blocks, not callbacks.
   for op <- Ops.unary_ops() -- [:logical_not, :phase] do
@@ -146,6 +174,7 @@ defmodule NxCL.Backend do
 
   @impl true
   def clip(out, tensor, min, max), do: Evaluator.clip(out, tensor, min, max)
+
   @impl true
   def dot(out, left, left_contract, left_batch, right, right_contract, right_batch) do
     Evaluator.dot(out, left, left_contract, left_batch, right, right_contract, right_batch)
@@ -153,6 +182,7 @@ defmodule NxCL.Backend do
 
   @impl true
   def conv(out, tensor, kernel, opts), do: Evaluator.conv(out, tensor, kernel, opts)
+
   @impl true
   def reshape(out, tensor), do: Evaluator.alias_op(:reshape, out, tensor)
 
@@ -239,6 +269,7 @@ defmodule NxCL.Backend do
 
   @impl true
   def block(struct, out, args, fun), do: Evaluator.block(struct, out, args, fun)
+
   @impl true
   def from_pointer(_out, _pointer, _backend_opts, _offset, _byte_size) do
     raise ArgumentError,

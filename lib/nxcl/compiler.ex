@@ -24,7 +24,8 @@ defmodule NxCL.Compiler do
       Default 0.
     * `:command_queue` - a queue from `NxCL.Devices.new_queue/1`. Default: the
       device's own queue.
-    * `:max_concurrency` - how many queues `__partitions_options__/1` opens.
+    * `:max_concurrency` - how many queues `__partitions_options__/1` opens. A
+      positive integer; default 1.
     * `:hooks` - must be empty.
 
   An unknown option raises `ArgumentError` that names the key.
@@ -45,9 +46,10 @@ defmodule NxCL.Compiler do
   ## Caches
 
   `NxCL.Compiler.CompileCache` keeps the compiled closure per function, input
-  templates and device, so a repeat call does not trace or lower.
+  templates and run options, so a repeat call does not trace or lower.
   `NxCL.Compiler.ProgramCache` keeps programs by structure, so functions that
-  lower alike share one.
+  lower alike share one. A cached closure keeps the tensors its function
+  captured on the device; see `NxCL.Compiler.CompileCache` to bound that.
   """
 
   @behaviour Nx.Defn.Compiler
@@ -103,7 +105,12 @@ defmodule NxCL.Compiler do
     opts = Options.validate!(opts)
     {n, opts} = Keyword.pop(opts, :max_concurrency, 1)
 
-    for _ <- 1..n//1 do
+    if not (is_integer(n) and n > 0) do
+      raise ArgumentError,
+            ":max_concurrency must be a positive integer, got: #{inspect(n)}"
+    end
+
+    for _ <- 1..n do
       {:ok, queue} = new_queue(opts)
       Keyword.put(opts, :command_queue, queue)
     end

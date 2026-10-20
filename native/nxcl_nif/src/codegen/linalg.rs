@@ -319,6 +319,8 @@ fn cholesky(instr: &Instr, caps: &Caps, limits: &Limits) -> Result<Plan, String>
     k.operand(0)?;
     k.output()?;
     k.long("n".to_string(), n as i64);
+    // An empty batch still launches one group; it must not touch memory.
+    let body = format!("{}{body}", k.guard_groups(batch)?);
 
     let entry = format!("chol_{}", instr.out.name());
     let helpers = arith.helpers(&["sub", "mul", "div", "conj", "sqrt"]);
@@ -454,6 +456,9 @@ mod tests {
         assert_eq!(p.passes[0].local, vec![256]);
         assert_eq!(p.passes[0].global, vec![4 * 256]);
         assert!(!p.passes[0].source.contains("atomic"));
+        assert!(p.passes[0]
+            .source
+            .contains("if ((long)get_group_id(0) >= groups) return;"));
         let c = plan(&chol(C64, &[3, 3]));
         assert!(c.passes[0].source.contains("cf_conj"));
         assert!(generate(&chol(F32, &[3, 4]), &Caps::all(), &Limits::apple()).is_err());

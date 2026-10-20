@@ -10,7 +10,7 @@ defmodule NxOpencl.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       name: "NxOpenCL",
-      description: "Nx backend and defn compiler for OpenCL GPUs, with a Rust NIF",
+      description: "Nx backend and defn compiler for OpenCL devices, with a Rust NIF",
       docs: docs(),
       package: package(),
       aliases: aliases(),
@@ -28,14 +28,16 @@ defmodule NxOpencl.MixProject do
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_env), do: ["lib"]
 
-  def docs do
+  defp docs do
     [
       main: "readme",
+      source_url: "https://github.com/polvalente/nx_opencl",
+      source_ref: "v0.1.0",
       extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 
-  def package do
+  defp package do
     [
       name: :nx_opencl,
       licenses: ["Apache-2.0"],
@@ -59,7 +61,7 @@ defmodule NxOpencl.MixProject do
     ]
   end
 
-  def aliases do
+  defp aliases do
     [
       check: [
         "hex.audit",
@@ -74,7 +76,7 @@ defmodule NxOpencl.MixProject do
     ]
   end
 
-  def dialyzer do
+  defp dialyzer do
     [
       plt_add_apps: [:mix, :ex_unit],
       # One folder for both PLTs, so CI can cache it.
@@ -89,8 +91,6 @@ defmodule NxOpencl.MixProject do
       {:nx, "~> 1.0"},
       {:axon, "~> 0.9", only: [:test]},
       {:rustler, "~> 0.36"},
-      {:nstandard, "~> 0.1", only: [:dev, :test], runtime: false},
-      {:igniter, "~> 0.6", only: [:dev, :test]},
       {:ex_doc, "~> 0.31", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.0", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

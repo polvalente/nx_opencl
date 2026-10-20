@@ -99,7 +99,7 @@ defmodule NxCL.ExecutorTest do
 
       on_default = Executor.with_resident_captures(Lower.lower(expr, 1))
       assert [%Nx.Tensor{data: %NxCL.Backend{ctx: default_ctx}}] = on_default.captures
-      assert default_ctx == NxCL.Devices.ctx()
+      assert default_ctx == NxCL.Devices.fetch!().ctx
 
       on_other = Executor.with_resident_captures(on_default, device: {0, 0})
       assert [%Nx.Tensor{data: %NxCL.Backend{ctx: ^other}} = moved] = on_other.captures

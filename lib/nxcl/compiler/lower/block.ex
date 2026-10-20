@@ -34,10 +34,6 @@ defmodule NxCL.Compiler.Lower.Block do
     Nx.Block.IRFFT => :default
   }
 
-  @doc "The decision table, keyed by block struct module."
-  @spec decisions() :: %{module() => :native | :default}
-  def decisions(), do: @decisions
-
   @doc "The decision for a block struct. A struct with no entry lowers its default."
   @spec decision(struct()) :: :native | :default
   def decision(%{__struct__: mod}), do: Map.get(@decisions, mod, :default)
@@ -58,18 +54,10 @@ defmodule NxCL.Compiler.Lower.Block do
     end
   end
 
-  @doc """
-  Lowers a block through its default expression. Each parameter of the default
-  takes the ref of the matching argument; `expand` lowers the other nodes. A
-  tuple result gets `{:tuple, refs}`.
-  """
-  @spec inline(
-          Lower.state(),
-          Shared.tensor(),
-          {[Shared.tensor()], Nx.Container.t()},
-          (Shared.tensor(), Lower.state() -> Lower.state())
-        ) :: Lower.state()
-  def inline(state, %T{data: %Nx.Defn.Expr{id: id}}, {args, default}, expand) do
+  # Lowers a block through its default expression. Each parameter of the default
+  # takes the ref of the matching argument; `expand` lowers the other nodes. A
+  # tuple result gets `{:tuple, refs}`.
+  defp inline(state, %T{data: %Nx.Defn.Expr{id: id}}, {args, default}, expand) do
     state = %{state | avail: Map.merge(state.avail, Nx.Defn.Tree.scope_ids(default))}
 
     state =

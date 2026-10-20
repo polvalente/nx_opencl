@@ -149,43 +149,65 @@ defmodule NxCL.Compiler.CompileCacheTest do
   end
 
   describe "NxCL.Compiler.CompileCache" do
-    test "max_items evicts the oldest entry first" do
-      start_supervised!({CompileCache, name: :cache_fifo, max_items: 2})
-      CompileCache.put(:a, 1, :cache_fifo)
-      CompileCache.put(:b, 2, :cache_fifo)
-      CompileCache.put(:c, 3, :cache_fifo)
+    # The cache reads its bounds from the app env; a restart clears it and
+    # starts the sweep timer under the new value.
+    defp restart_cache(env) do
+      Application.put_env(:nx_opencl, CompileCache, env)
+      reset_cache()
 
-      assert CompileCache.fetch(:a, :cache_fifo) == {:error, :cache_miss}
-      assert CompileCache.fetch(:b, :cache_fifo) == {:ok, 2}
-      assert CompileCache.fetch(:c, :cache_fifo) == {:ok, 3}
-      assert CompileCache.size(:cache_fifo) == 2
+      on_exit(fn ->
+        Application.delete_env(:nx_opencl, CompileCache)
+        reset_cache()
+      end)
+    end
+
+    defp reset_cache do
+      :ok = Supervisor.terminate_child(NxCL.Supervisor, CompileCache)
+      {:ok, _pid} = Supervisor.restart_child(NxCL.Supervisor, CompileCache)
+    end
+
+    test "max_items evicts the oldest entry first" do
+      restart_cache(max_items: 2)
+      CompileCache.put(:a, 1)
+      CompileCache.put(:b, 2)
+      CompileCache.put(:c, 3)
+
+      assert CompileCache.fetch(:a) == {:error, :cache_miss}
+      assert CompileCache.fetch(:b) == {:ok, 2}
+      assert CompileCache.fetch(:c) == {:ok, 3}
+      assert CompileCache.size() == 2
     end
 
     test "an entry past its ttl misses on read, and the sweep removes it later" do
-      pid = start_supervised!({CompileCache, name: :cache_ttl, ttl: 200})
-      CompileCache.put(:a, 1, :cache_ttl)
-      assert CompileCache.fetch(:a, :cache_ttl) == {:ok, 1}
+      restart_cache(ttl: 200)
+      CompileCache.put(:a, 1)
+      assert CompileCache.fetch(:a) == {:ok, 1}
 
       # A suspended cache cannot sweep, so only the read can hide the entry.
+      pid = Process.whereis(CompileCache)
       :sys.suspend(pid)
 
-      TestSupport.wait_until(fn ->
-        CompileCache.fetch(:a, :cache_ttl) == {:error, :cache_miss}
-      end)
+      TestSupport.wait_until(fn -> CompileCache.fetch(:a) == {:error, :cache_miss} end)
 
-      assert CompileCache.size(:cache_ttl) == 1
+      assert CompileCache.size() == 1
 
       :sys.resume(pid)
-      TestSupport.wait_until(fn -> CompileCache.size(:cache_ttl) == 0 end)
+      TestSupport.wait_until(fn -> CompileCache.size() == 0 end)
     end
 
-    test "a bad bound raises" do
+    test "a bad bound raises when the cache starts" do
+      Application.put_env(:nx_opencl, CompileCache, max_items: 0)
+      on_exit(fn -> Application.delete_env(:nx_opencl, CompileCache) end)
       Process.flag(:trap_exit, true)
+      :ok = Supervisor.terminate_child(NxCL.Supervisor, CompileCache)
 
       assert {:error, {%ArgumentError{message: message}, _}} =
-               CompileCache.start_link(name: :cache_bad, max_items: 0)
+               Supervisor.restart_child(NxCL.Supervisor, CompileCache)
 
       assert message =~ "max_items"
+
+      Application.delete_env(:nx_opencl, CompileCache)
+      {:ok, _pid} = Supervisor.restart_child(NxCL.Supervisor, CompileCache)
     end
   end
 
@@ -226,7 +248,7 @@ defmodule NxCL.Compiler.CompileCacheTest do
   describe "device registry" do
     test "one context per device, shared by every caller" do
       assert {:ok, %{ctx: ctx, key: {nil, 0}}} = Devices.fetch(device: 0)
-      assert ctx == Devices.ctx()
+      assert ctx == Devices.fetch!().ctx
       assert %{key: {nil, 0}} = Devices.for_ctx(ctx)
     end
 
@@ -239,7 +261,7 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
     test "persistent_term holds no device context" do
       jit(fn x -> Nx.negate(x) end).(Nx.tensor([1.0]))
-      ctx = Devices.ctx()
+      ctx = Devices.fetch!().ctx
       entries = :persistent_term.get()
 
       refute Enum.any?(entries, fn {key, value} -> key == :nxcl_device_ctx or value == ctx end)
@@ -253,7 +275,34 @@ defmodule NxCL.Compiler.CompileCacheTest do
 
     test "the backend honors :device" do
       t = Nx.tensor([1.0, 2.0], backend: {NxCL.Backend, device: 0})
-      assert t.data.ctx == Devices.ctx()
+      assert t.data.ctx == Devices.fetch!().ctx
+    end
+  end
+
+  describe "a crash of the registry" do
+    test "restarts the caches with it and opens a fresh context" do
+      old_ctx = Devices.fetch!().ctx
+      jit(fn x -> Nx.negate(x) end).(Nx.tensor([1.0]))
+      assert ProgramCache.size() > 0
+      assert CompileCache.size() > 0
+
+      pids = for mod <- [Devices, ProgramCache, CompileCache], do: Process.whereis(mod)
+      ref = Process.monitor(hd(pids))
+      Process.exit(hd(pids), :kill)
+      assert_receive {:DOWN, ^ref, :process, _pid, :killed}
+
+      TestSupport.wait_until(fn ->
+        new = for mod <- [Devices, ProgramCache, CompileCache], do: Process.whereis(mod)
+        Enum.all?(new, &is_pid/1) and Enum.zip(pids, new) |> Enum.all?(fn {a, b} -> a != b end)
+      end)
+
+      assert ProgramCache.size() == 0
+      assert CompileCache.size() == 0
+      assert Devices.for_ctx(old_ctx) == nil
+
+      new_ctx = Devices.fetch!().ctx
+      assert %{key: {nil, 0}} = Devices.for_ctx(new_ctx)
+      assert Nx.to_flat_list(jit(fn x -> Nx.negate(x) end).(Nx.tensor([1.0]))) == [-1.0]
     end
   end
 
@@ -264,6 +313,14 @@ defmodule NxCL.Compiler.CompileCacheTest do
       assert is_reference(two[:command_queue])
       assert one[:command_queue] != two[:command_queue]
       refute Keyword.has_key?(one, :max_concurrency)
+    end
+
+    test "max_concurrency must be a positive integer" do
+      for bad <- [0, -1, 1.5, :two] do
+        assert_raise ArgumentError, ~r/:max_concurrency must be a positive integer/, fn ->
+          NxCL.Compiler.__partitions_options__(max_concurrency: bad)
+        end
+      end
     end
 
     test "without max_concurrency there is one partition" do
@@ -278,8 +335,8 @@ defmodule NxCL.Compiler.CompileCacheTest do
       wire =
         {[{{:f, 32}, {2}}], [], [], [{:negate, [{:input, 0}], {:f, 32}, {2}, []}], [{:result, 0}]}
 
-      {:ok, program} = Native.compile_program(Devices.ctx(), wire)
-      buf = Native.buffer_write(Devices.ctx(), <<0::64>>)
+      {:ok, program} = Native.compile_program(Devices.fetch!().ctx, wire)
+      buf = Native.buffer_write(Devices.fetch!().ctx, <<0::64>>)
       assert {:error, message} = Native.eval_program_on(program, [buf], other)
       assert message =~ "another device context"
     end

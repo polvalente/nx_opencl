@@ -351,6 +351,9 @@ defmodule NxCL.Compiler.Evaluator do
     steps = Steps.trace(fun, out.type, :reduce)
     axes = axes(tensor, opts[:axes])
 
+    # The accumulator is a device tensor, not a literal, so the identity-init
+    # shortcut of `NxCL.Compiler.Lower` does not apply: a monoid body always
+    # folds the accumulator in after the reduction.
     run(out, [tensor, acc], fn st, [{x, _}, {init, _} = acc_operand] ->
       if monoid?(steps) do
         # The result is `fun(total, init)`.
@@ -358,22 +361,11 @@ defmodule NxCL.Compiler.Evaluator do
           push(st, Ops.reduce_steps([x], out.type, out.shape, steps, axes))
 
         {st, init} = conform(st, acc_operand, out.shape)
-        fold(st, steps, [total, init], out)
+        Shared.fold_steps(st, steps, [total, init], out.type, out.shape)
       else
         push(st, Ops.reduce_steps([x, init], out.type, out.shape, steps, axes))
       end
     end)
-  end
-
-  defp fold(st, steps, refs, out) do
-    {st, refs} =
-      Enum.reduce(steps, {st, refs}, fn {op, a, b}, {st, refs} ->
-        instr = Ops.binary(op, Enum.at(refs, a), Enum.at(refs, b), out.type, out.shape)
-        {st, ref} = push(st, instr)
-        {st, refs ++ [ref]}
-      end)
-
-    {st, List.last(refs)}
   end
 
   @spec scan(atom(), Shared.tensor(), Shared.tensor(), non_neg_integer(), boolean()) ::

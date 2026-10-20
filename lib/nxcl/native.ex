@@ -2,7 +2,8 @@ defmodule NxCL.Native do
   @moduledoc false
 
   # Rust target triple from the Nerves variables TARGET_ARCH, TARGET_OS and
-  # TARGET_ABI. RUSTLER_TARGET overrides.
+  # TARGET_ABI. RUSTLER_TARGET overrides. TARGET_OS only has to be set: Nerves
+  # targets are all Linux, so every triple below says `linux`.
   rust_target =
     cond do
       target = System.get_env("RUSTLER_TARGET") ->

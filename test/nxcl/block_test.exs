@@ -69,19 +69,15 @@ defmodule NxCL.BlockTest do
     structs = block_structs()
     assert structs != []
 
-    missing = structs -- Map.keys(Block.decisions())
-    assert missing == [], "no decision for #{inspect(missing)}"
+    for mod <- structs do
+      decision = Block.decision(struct(mod))
 
-    extra = Map.keys(Block.decisions()) -- structs
-    assert extra == [], "decision for a struct Nx no longer defines: #{inspect(extra)}"
-
-    for {mod, decision} <- Block.decisions() do
       assert decision in [:native, :default],
              "bad decision for #{inspect(mod)}: #{inspect(decision)}"
     end
 
     for mod <- [Nx.Block.LinAlg.QR, Nx.Block.LinAlg.Eigh, Nx.Block.LinAlg.SVD, Nx.Block.LinAlg.LU] do
-      assert Block.decisions()[mod] == :default
+      assert Block.decision(struct(mod)) == :default
     end
   end
 
@@ -113,7 +109,9 @@ defmodule NxCL.BlockTest do
     }
 
     assert Enum.sort(Map.keys(native)) ==
-             Enum.sort(for {mod, :native} <- Block.decisions(), do: mod)
+             Enum.sort(
+               for mod <- block_structs(), Block.decision(struct(mod)) == :native, do: mod
+             )
 
     for {mod, op} <- native do
       {fun, args} = Map.fetch!(cases(), mod)

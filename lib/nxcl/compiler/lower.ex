@@ -10,6 +10,17 @@ defmodule NxCL.Compiler.Lower do
   A `cond` or `while` becomes one instruction with nested bodies. An `io_call`
   or `runtime_call` becomes one `:host_call` instruction. An op it cannot lower
   raises `ArgumentError` ("does not yet lower op ...").
+
+  ## Scopes
+
+  The program is the root scope. Each body of a `cond` or `while` is a scope of
+  its own, lowered by `Lower.Control`, an internal module. A scope has its own
+  instruction list and its own refs, and it starts with `{:carry, i}` refs for
+  the values the `cond` or `while` passes in. It reads its parent through those
+  refs only. A scope that reaches a parent node or parameter raises
+  `ArgumentError`, because the parent's refs do not exist in the body. Literal
+  tensors and constants may appear in both scopes. They are shared tables of the
+  program, not refs of a scope.
   """
 
   import NxCL.Compiler.Lower.Shared,
@@ -32,7 +43,6 @@ defmodule NxCL.Compiler.Lower do
   @window_ops [:window_sum, :window_product, :window_max, :window_min]
   @scatter_ops [:window_scatter_max, :window_scatter_min]
   @scan_blocks Shared.scan_blocks()
-  @step_ops Shared.step_ops()
 
   @unary_ops Ops.unary_ops()
   @binary_ops Ops.binary_ops()
@@ -102,67 +112,6 @@ defmodule NxCL.Compiler.Lower do
       output_template: Composite.traverse(output, &Nx.to_template/1),
       ref_counts: Shared.ref_counts(instructions, outputs)
     }
-  end
-
-  # Deeper nesting raises instead of exhausting the stack.
-  @max_depth 64
-
-  # Lowers `roots` as a body of `parent`. Returns the body and the parent with the
-  # captures, constants and host calls the body added. `seeds` maps node ids to the
-  # `{:carry, i}` refs the scope starts with. Both kinds read the parent through
-  # its seeds only.
-  @doc false
-  @spec lower_scope(state(), [Shared.tensor()], %{reference() => node_ref()}, :while | :cond) ::
-          {Instruction.body(), state()}
-  def lower_scope(parent, roots, seeds, kind) do
-    if parent.depth >= @max_depth do
-      raise ArgumentError, "cond and while nest more than #{@max_depth} levels deep"
-    end
-
-    tuple = List.to_tuple(roots)
-    owner = Nx.Defn.Tree.scope_ids(tuple)
-
-    inner = %{
-      parent
-      | instrs: [],
-        refs: seeds,
-        avail: Map.merge(owner, seeds),
-        outer: if(kind == :while, do: parent.avail, else: %{}),
-        depth: parent.depth + 1,
-        scope: :sub
-    }
-
-    ordered = Tree.post_order(tuple, &Control.scope_deps(&1, inner))
-
-    inner =
-      Enum.reduce(ordered, inner, fn %T{data: %Nx.Defn.Expr{id: id}} = node, state ->
-        cond do
-          is_map_key(state.refs, id) -> state
-          reads_outer?(state, node) -> raise_outer(node)
-          true -> expand(node, state)
-        end
-      end)
-
-    outputs = Enum.map(roots, &Map.fetch!(inner.refs, &1.data.id))
-    body = {Enum.reverse(inner.instrs), outputs}
-
-    {body,
-     %{
-       parent
-       | captures: inner.captures,
-         constants: inner.constants,
-         host_calls: inner.host_calls
-     }}
-  end
-
-  # A literal tensor or constant may sit in both scopes.
-  defp reads_outer?(%{outer: outer}, %T{data: %Nx.Defn.Expr{id: id, op: op}}),
-    do: op not in [:constant, :tensor] and is_map_key(outer, id)
-
-  defp raise_outer(%T{data: %Nx.Defn.Expr{op: op}}) do
-    raise ArgumentError,
-          "an inner scope reads #{inspect(op)} from its parent scope; " <>
-            "pass the value in as an argument of the while or cond"
   end
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :parameter}}, %{scope: :sub}) do
@@ -394,7 +343,11 @@ defmodule NxCL.Compiler.Lower do
           push(state, Ops.reduce_steps([ref(state, x)], node.type, node.shape, steps, axes))
 
         {state, init_ref} = broadcast_to(state, init, node.shape)
-        fold_steps(state, node, steps, total, init_ref)
+
+        {state, ref} =
+          Shared.fold_steps(state, steps, [total, init_ref], node.type, node.shape)
+
+        put_ref(state, node.data.id, ref)
     end
   end
 
@@ -531,10 +484,10 @@ defmodule NxCL.Compiler.Lower do
     do: Block.lower(state, node, &expand/2)
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :cond}} = node, state),
-    do: Control.cond_node(state, node)
+    do: Control.cond_node(state, node, &expand/2)
 
   defp expand(%T{data: %Nx.Defn.Expr{op: :while}} = node, state),
-    do: Control.while_node(state, node)
+    do: Control.while_node(state, node, &expand/2)
 
   defp expand(%T{data: %Nx.Defn.Expr{op: op}} = node, state) when op in [:io_call, :runtime_call],
     do: HostCall.node(state, node)
@@ -609,42 +562,9 @@ defmodule NxCL.Compiler.Lower do
 
   defp scalar_const?(_state, _operand), do: false
 
-  # Lowers a `reduce` or `window_reduce` body to steps over the two parameters
-  # and earlier results. Any other node raises.
-  defp reduce_steps(%T{data: %Nx.Defn.Expr{op: :fun, args: [params, body, _mfa]}}, type, what) do
-    if length(params) != 2 do
-      unsupported(what, "(the function must take two arguments)")
-    end
-
-    {vars, steps} =
-      body
-      |> Tree.post_order()
-      |> Enum.reduce({%{}, []}, fn
-        %T{data: %Nx.Defn.Expr{id: id, op: :parameter, args: [pos]}}, {vars, steps} ->
-          {Map.put(vars, id, pos), steps}
-
-        %T{data: %Nx.Defn.Expr{id: id, op: op, args: [l, r]}} = node, {vars, steps}
-        when op in @step_ops ->
-          if Enum.any?([node, l, r], &(&1.type != type)) do
-            unsupported(op, "(mixed types in a #{what} body)")
-          end
-
-          a = Map.get(vars, l.data.id) || unsupported(op, "(an operand of a #{what} body)")
-          b = Map.get(vars, r.data.id) || unsupported(op, "(an operand of a #{what} body)")
-          {Map.put(vars, id, 2 + length(steps)), [{op, a, b} | steps]}
-
-        %T{data: %Nx.Defn.Expr{op: op}}, _acc ->
-          unsupported(op, "(in a #{what} body)")
-      end)
-
-    steps = Enum.reverse(steps)
-
-    if steps == [] or Map.fetch!(vars, body.data.id) != 1 + length(steps) do
-      unsupported(what, "(the body must end in a binary op)")
-    end
-
-    steps
-  end
+  # The steps of the `fun` node of a `reduce` or `window_reduce`.
+  defp reduce_steps(%T{data: %Nx.Defn.Expr{op: :fun, args: [params, body, _mfa]}}, type, what),
+    do: Shared.reduce_steps(params, body, type, what)
 
   # One `add` or `multiply` with its identity as the initial value: nothing to fold in.
   defp identity_init?([{op, a, b}], %T{data: %Nx.Defn.Expr{op: :constant, args: [v]}})
@@ -653,27 +573,6 @@ defmodule NxCL.Compiler.Lower do
   end
 
   defp identity_init?(_steps, _init), do: false
-
-  # Emits `fun(total, init)`; the last instruction is the node's.
-  defp fold_steps(state, node, steps, total, init) do
-    last = length(steps) - 1
-
-    {state, _refs} =
-      steps
-      |> Enum.with_index()
-      |> Enum.reduce({state, [total, init]}, fn {{op, a, b}, k}, {state, refs} ->
-        instr = Ops.binary(op, Enum.at(refs, a), Enum.at(refs, b), node.type, node.shape)
-
-        if k == last do
-          {emit(state, node, instr), refs}
-        else
-          {state, ref} = push(state, instr)
-          {state, refs ++ [ref]}
-        end
-      end)
-
-    state
-  end
 
   defp unsupported(op, detail) do
     suffix = if detail, do: " " <> detail, else: ""

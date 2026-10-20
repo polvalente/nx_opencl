@@ -1,6 +1,7 @@
 defmodule NxCL.Compiler.CompileCache do
   @moduledoc """
-  Bounded cache of compiled closures, one per `{key, input templates, device}`.
+  Bounded cache of compiled closures, one per function, input templates and run
+  options (`:device`, `:command_queue`).
 
   `:max_items` defaults to 1024 and `:ttl` to `:infinity`. Either takes a
   positive integer or `:infinity`:
@@ -11,7 +12,15 @@ defmodule NxCL.Compiler.CompileCache do
 
   Overflow evicts the oldest insert first. An entry older than `:ttl` is a
   miss on read, and a sweep removes it every half `:ttl`. Reads use the ETS
-  table directly; writes and the sweep run in this process.
+  table directly; writes and the sweep run in this process. The sweep timer
+  starts with the cache, so set `:ttl` in config before the application starts.
+
+  ## Memory
+
+  A closure holds the tensors its function captured, and those stay on the
+  device while the entry lives. With the default 1024 entries and no `:ttl`, a
+  program that captures large tensors can hold a lot of device memory. Lower
+  `:max_items`, or set a `:ttl`, to release them sooner.
   """
 
   use GenServer
@@ -20,24 +29,20 @@ defmodule NxCL.Compiler.CompileCache do
 
   @doc false
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    opts = Keyword.validate!(opts, [:ttl, :max_items, name: __MODULE__])
-    {name, opts} = Keyword.pop!(opts, :name)
-    GenServer.start_link(__MODULE__, {name, opts}, name: name)
-  end
+  def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, nil, name: __MODULE__)
 
   @impl true
-  def init({name, opts}) do
-    :ets.new(name, [:named_table, :protected, :set, read_concurrency: true])
-    state = %{table: name, counter: 0, ttl: opts[:ttl], max_items: opts[:max_items]}
-    _ = max_items(state)
-    {:ok, schedule_sweep(state)}
+  def init(nil) do
+    :ets.new(__MODULE__, [:named_table, :protected, :set, read_concurrency: true])
+    # Validate both bounds at start.
+    _ = {max_items(), ttl()}
+    {:ok, schedule_sweep(%{counter: 0})}
   end
 
   @doc "The cached value for `key`, or `{:error, :cache_miss}`."
-  @spec fetch(term(), atom()) :: {:ok, term()} | {:error, :cache_miss}
-  def fetch(key, server \\ __MODULE__) do
-    case :ets.lookup(server, key) do
+  @spec fetch(term()) :: {:ok, term()} | {:error, :cache_miss}
+  def fetch(key) do
+    case :ets.lookup(__MODULE__, key) do
       [{^key, value, expires, _index}] ->
         if expires == :infinity or expires > now(),
           do: {:ok, value},
@@ -49,39 +54,39 @@ defmodule NxCL.Compiler.CompileCache do
   end
 
   @doc "Stores `value` under `key` and returns it."
-  @spec put(term(), term(), atom()) :: term()
-  def put(key, value, server \\ __MODULE__), do: GenServer.call(server, {:put, key, value})
+  @spec put(term(), term()) :: term()
+  def put(key, value), do: GenServer.call(__MODULE__, {:put, key, value})
 
   @doc "Number of entries, expired ones included until the next sweep."
-  @spec size(atom()) :: non_neg_integer()
-  def size(server \\ __MODULE__), do: :ets.info(server, :size)
+  @spec size() :: non_neg_integer()
+  def size(), do: :ets.info(__MODULE__, :size)
 
   @impl true
   def handle_call({:put, key, value}, _from, state) do
     index = state.counter + 1
-    :ets.insert(state.table, {key, value, expires(state), index})
-    evict_overflow(state.table, max_items(state), index)
+    :ets.insert(__MODULE__, {key, value, expires(), index})
+    evict_overflow(max_items(), index)
     {:reply, value, %{state | counter: index}}
   end
 
   @impl true
   def handle_info(:sweep, state) do
-    :ets.select_delete(state.table, [
+    :ets.select_delete(__MODULE__, [
       {{:_, :_, :"$1", :_}, [{:is_integer, :"$1"}, {:"=<", :"$1", now()}], [true]}
     ])
 
     {:noreply, schedule_sweep(state)}
   end
 
-  defp expires(state) do
-    case ttl(state) do
+  defp expires() do
+    case ttl() do
       :infinity -> :infinity
       ttl -> now() + ttl
     end
   end
 
   defp schedule_sweep(state) do
-    case ttl(state) do
+    case ttl() do
       :infinity -> :ok
       ttl -> Process.send_after(self(), :sweep, max(div(ttl, 2), 1))
     end
@@ -89,22 +94,19 @@ defmodule NxCL.Compiler.CompileCache do
     state
   end
 
-  defp evict_overflow(_table, :infinity, _index), do: :ok
+  defp evict_overflow(:infinity, _index), do: :ok
 
-  defp evict_overflow(table, max, index) when index > max do
+  defp evict_overflow(max, index) when index > max do
     cutoff = index - max
-    :ets.select_delete(table, [{{:_, :_, :_, :"$1"}, [{:"=<", :"$1", cutoff}], [true]}])
+    :ets.select_delete(__MODULE__, [{{:_, :_, :_, :"$1"}, [{:"=<", :"$1", cutoff}], [true]}])
   end
 
-  defp evict_overflow(_table, _max, _index), do: :ok
+  defp evict_overflow(_max, _index), do: :ok
 
   defp now(), do: System.monotonic_time(:millisecond)
 
-  defp ttl(%{ttl: ttl}) when ttl != nil, do: bound!(ttl, :ttl)
-  defp ttl(_state), do: bound!(config(:ttl, :infinity), :ttl)
-
-  defp max_items(%{max_items: n}) when n != nil, do: bound!(n, :max_items)
-  defp max_items(_state), do: bound!(config(:max_items, @default_max_items), :max_items)
+  defp ttl(), do: bound!(config(:ttl, :infinity), :ttl)
+  defp max_items(), do: bound!(config(:max_items, @default_max_items), :max_items)
 
   defp config(key, default) do
     :nx_opencl |> Application.get_env(__MODULE__, []) |> Keyword.get(key, default)

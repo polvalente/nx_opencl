@@ -6,6 +6,10 @@ defmodule NxCL.Devices do
   `device:` is an index (counting every device, GPUs first) or `{platform,
   index}` (counting one platform's devices). The default is 0.
 
+  The registry must not crash alone: its table holds the only map from a context
+  to its device, and the caches hold programs built for those contexts.
+  The application supervisor restarts the caches with it.
+
   A context has a default queue and any number of extra queues (`new_queue/1`).
   A program runs on the queue `command_queue:` names, or the default. Queues of
   one context share its kernel cache; each runs one program at a time.
@@ -27,7 +31,9 @@ defmodule NxCL.Devices do
   end
 
   @doc """
-  The device and queue `opts` name (`:device`, `:command_queue`), or `{:error, reason}`.
+  The device and queue `opts` name (`:device`, `:command_queue`), or `{:error, reason}`
+  when the device cannot open. Raises `ArgumentError` when `:device` is not an
+  index or a `{platform, index}` pair.
   """
   @spec fetch(keyword()) :: {:ok, t()} | {:error, String.t()}
   def fetch(opts \\ []) do
@@ -48,10 +54,6 @@ defmodule NxCL.Devices do
         raise NxCL.CompilerError, message: "cannot open the OpenCL device: #{reason}"
     end
   end
-
-  @doc "The context of the default device."
-  @spec ctx() :: reference()
-  def ctx(), do: fetch!().ctx
 
   @doc """
   Opens a command queue on the context `opts` name. Pass it as `command_queue:`.

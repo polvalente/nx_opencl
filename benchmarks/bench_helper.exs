@@ -7,7 +7,7 @@ defmodule BenchHelper do
   def exla?, do: Code.ensure_loaded?(EXLA)
 
   def device_name do
-    info = NxCL.Devices.ctx() |> NxCL.Native.device_info() |> Map.new()
+    info = NxCL.Devices.fetch!().ctx |> NxCL.Native.device_info() |> Map.new()
     "#{info["name"]} (#{info["device_type"]})"
   end
 

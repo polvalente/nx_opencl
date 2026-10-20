@@ -6,6 +6,11 @@ defmodule NxCL.Compiler.Evaluator.Steps do
   # over variables 0 and 1 (the arguments) and `2 + k` (the result of step `k`).
   # Any other op has no function here, so the call raises and the trace turns
   # that into "does not yet lower op".
+  #
+  # `NxCL.Compiler.Lower` reads the same bodies from the expression graph
+  # (`NxCL.Compiler.Lower.Shared.reduce_steps/4`). The backend cannot do that:
+  # Nx's evaluator wraps the function and rejects expression arguments, so a graph
+  # trace of it fails. Both give the same steps and share the op list.
 
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Lower.Shared

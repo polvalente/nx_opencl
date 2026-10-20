@@ -11,6 +11,7 @@ defmodule NxCL.ControlFlowTest do
   import NxCL.TestSupport, only: [run_jit: 1]
 
   alias NxCL.Compiler.Lower
+  alias NxCL.Compiler.Lower.Control
   alias NxCL.TestSupport.Trace
 
   @moduletag :opencl
@@ -188,7 +189,7 @@ defmodule NxCL.ControlFlowTest do
           scope: :root
         }
 
-        Lower.lower_scope(state, [], %{}, :while)
+        Control.scope(state, [], %{}, :while, fn _node, state -> state end)
       end
     end
   end

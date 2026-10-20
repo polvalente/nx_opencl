@@ -7,6 +7,7 @@ defmodule NxCL.Compiler.Lower.Shared do
   alias Nx.Tensor, as: T
   alias NxCL.Compiler.Instruction
   alias NxCL.Compiler.Ops
+  alias NxCL.Compiler.Tree
 
   @typedoc "An `Nx.Tensor` of any backend, as an expression node or an operand."
   @type tensor :: %T{}
@@ -21,19 +22,18 @@ defmodule NxCL.Compiler.Lower.Shared do
   @step_ops ~w(add subtract multiply divide quotient remainder pow atan2 max min bitwise_and
                bitwise_or bitwise_xor left_shift right_shift)a
 
+  # Ops Nx 1.0 rejects on complex tensors.
+  @complex_rejected ~w(atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
+                       count_leading_zeros erf erf_inv erfc floor greater greater_equal
+                       left_shift less less_equal max min population_count quotient remainder
+                       right_shift round)a
+
   @scan_blocks %{
     Nx.Block.CumulativeSum => :cumulative_sum,
     Nx.Block.CumulativeProduct => :cumulative_product,
     Nx.Block.CumulativeMin => :cumulative_min,
     Nx.Block.CumulativeMax => :cumulative_max
   }
-
-  # Ops Nx 1.0 rejects on complex tensors. Nx raises while tracing; this guards
-  # a graph built another way.
-  @complex_rejected ~w(atan2 bitwise_and bitwise_not bitwise_or bitwise_xor bitcast ceil clip
-                       count_leading_zeros erf erf_inv erfc floor greater greater_equal
-                       left_shift less less_equal max min population_count quotient remainder
-                       right_shift round)a
 
   @doc "The binary ops a `reduce` body may hold."
   @spec step_ops() :: [atom()]
@@ -57,7 +57,12 @@ defmodule NxCL.Compiler.Lower.Shared do
     {%{state | constants: [{value, type} | state.constants]}, ref}
   end
 
-  @doc "Raises `ArgumentError` for an op Nx rejects on complex when any tensor is complex."
+  @doc """
+  Raises `ArgumentError` for an op Nx rejects on complex when any tensor is complex.
+  Nx front-end functions raise first for all of these but `atan2`, which Nx lets
+  through to the backend. A graph built by hand with `Nx.Defn.Expr` skips the
+  front end too.
+  """
   @spec check_complex(atom(), tensor(), [tensor()]) :: :ok
   def check_complex(op, node, operands) do
     if op in @complex_rejected and Enum.any?([node | operands], &Nx.Type.complex?(&1.type)) do
@@ -85,6 +90,75 @@ defmodule NxCL.Compiler.Lower.Shared do
     do: {a, b} in [{0, 1}, {1, 0}]
 
   def monoid?(_steps), do: false
+
+  @doc """
+  Reads the body of a `reduce` or `window_reduce` as steps `{op, a, b}`. Variable
+  0 and 1 are the two parameters; step `k` makes variable `2 + k`. `what` names
+  the op in error messages. Any node but a binary op over earlier variables raises
+  `ArgumentError` ("does not yet lower op ...").
+  """
+  @spec reduce_steps([tensor()], tensor(), Nx.Type.t(), atom()) ::
+          [{atom(), non_neg_integer(), non_neg_integer()}]
+  def reduce_steps(params, body, type, what) do
+    if length(params) != 2 do
+      unsupported(what, "(the function must take two arguments)")
+    end
+
+    {vars, steps} =
+      body
+      |> Tree.post_order()
+      |> Enum.reduce({%{}, []}, fn
+        %T{data: %Nx.Defn.Expr{id: id, op: :parameter, args: [pos]}}, {vars, steps} ->
+          {Map.put(vars, id, pos), steps}
+
+        %T{data: %Nx.Defn.Expr{id: id, op: op, args: [l, r]}} = node, {vars, steps}
+        when op in @step_ops ->
+          if Enum.any?([node, l, r], &(&1.type != type)) do
+            unsupported(op, "(mixed types in a #{what} body)")
+          end
+
+          a = Map.get(vars, l.data.id) || unsupported(op, "(an operand of a #{what} body)")
+          b = Map.get(vars, r.data.id) || unsupported(op, "(an operand of a #{what} body)")
+          {Map.put(vars, id, 2 + length(steps)), [{op, a, b} | steps]}
+
+        %T{data: %Nx.Defn.Expr{op: op}}, _acc ->
+          unsupported(op, "(in a #{what} body)")
+      end)
+
+    steps = Enum.reverse(steps)
+
+    if steps == [] or Map.fetch!(vars, body.data.id) != 1 + length(steps) do
+      unsupported(what, "(the body must end in a binary op)")
+    end
+
+    steps
+  end
+
+  @doc """
+  Pushes the steps with `refs` as variables 0 and 1: `fun(total, init)` for a
+  `reduce` whose parts were folded apart. Returns the ref of the last step.
+  """
+  @spec fold_steps(
+          builder(),
+          [{atom(), non_neg_integer(), non_neg_integer()}],
+          [Instruction.ref()],
+          Nx.Type.t(),
+          tuple()
+        ) :: {builder(), Instruction.ref()}
+  def fold_steps(state, steps, refs, type, shape) do
+    {state, refs} =
+      Enum.reduce(steps, {state, refs}, fn {op, a, b}, {state, refs} ->
+        {state, ref} =
+          push(state, Ops.binary(op, Enum.at(refs, a), Enum.at(refs, b), type, shape))
+
+        {state, refs ++ [ref]}
+      end)
+
+    {state, List.last(refs)}
+  end
+
+  defp unsupported(op, detail),
+    do: raise(ArgumentError, "does not yet lower op #{inspect(op)} #{detail}")
 
   @doc "How often each ref is read, by instructions or as an output."
   @spec ref_counts([Instruction.t()], [Instruction.ref()]) :: %{

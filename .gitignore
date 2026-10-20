@@ -33,5 +33,5 @@ nx_opencl-*.tar
 /benchmarks/profile/*.dylib
 /benchmarks/profile/*.so
 
-# Working notes (also ignored in the author's global ignore file).
+# Local working notes.
 .work/

@@ -27,19 +27,90 @@ defmodule NxCL.Compiler.Lower.Control do
 
   def scope_deps(_node, _state), do: :default
 
+  @typedoc "Lowers one graph node, as `NxCL.Compiler.Lower` does."
+  @type expand :: (Shared.tensor(), Lower.state() -> Lower.state())
+
+  # Deeper nesting raises instead of exhausting the stack.
+  @max_depth 64
+
+  @doc """
+  Lowers `roots` as a body of `parent`. Returns the body and the parent with the
+  captures, constants and host calls the body added. `seeds` maps node ids to the
+  `{:carry, i}` refs the scope starts with. A `while` body may also see the
+  parent's nodes in `:outer`, only to report a read of them. `expand` lowers one
+  node.
+  """
+  @spec scope(
+          Lower.state(),
+          [Shared.tensor()],
+          %{reference() => Lower.node_ref()},
+          :while | :cond,
+          expand()
+        ) :: {Instruction.body(), Lower.state()}
+  def scope(parent, roots, seeds, kind, expand) do
+    if parent.depth >= @max_depth do
+      raise ArgumentError, "cond and while nest more than #{@max_depth} levels deep"
+    end
+
+    tuple = List.to_tuple(roots)
+    owner = Tree.scope_ids(tuple)
+
+    inner = %{
+      parent
+      | instrs: [],
+        refs: seeds,
+        avail: Map.merge(owner, seeds),
+        outer: if(kind == :while, do: parent.avail, else: %{}),
+        depth: parent.depth + 1,
+        scope: :sub
+    }
+
+    ordered = NxCL.Compiler.Tree.post_order(tuple, &scope_deps(&1, inner))
+
+    inner =
+      Enum.reduce(ordered, inner, fn %T{data: %Nx.Defn.Expr{id: id}} = node, state ->
+        cond do
+          is_map_key(state.refs, id) -> state
+          reads_outer?(state, node) -> raise_outer(node)
+          true -> expand.(node, state)
+        end
+      end)
+
+    outputs = Enum.map(roots, &Map.fetch!(inner.refs, &1.data.id))
+    body = {Enum.reverse(inner.instrs), outputs}
+
+    {body,
+     %{
+       parent
+       | captures: inner.captures,
+         constants: inner.constants,
+         host_calls: inner.host_calls
+     }}
+  end
+
+  # A literal tensor or constant may sit in both scopes.
+  defp reads_outer?(%{outer: outer}, %T{data: %Nx.Defn.Expr{id: id, op: op}}),
+    do: op not in [:constant, :tensor] and is_map_key(outer, id)
+
+  defp raise_outer(%T{data: %Nx.Defn.Expr{op: op}}) do
+    raise ArgumentError,
+          "an inner scope reads #{inspect(op)} from its parent scope; " <>
+            "pass the value in as an argument of the while or cond"
+  end
+
   @doc "Lowers a `cond` node."
-  @spec cond_node(Lower.state(), Shared.tensor()) :: Lower.state()
-  def cond_node(state, %T{data: %Nx.Defn.Expr{id: id, args: [clauses, last]}} = node) do
+  @spec cond_node(Lower.state(), Shared.tensor(), expand()) :: Lower.state()
+  def cond_node(state, %T{data: %Nx.Defn.Expr{id: id, args: [clauses, last]}} = node, expand) do
     {operands, seeds} = bind(state, free_nodes(node, state.avail))
 
     {lowered, state} =
       Enum.map_reduce(clauses, state, fn {pred, body}, state ->
-        {pred_body, state} = Lower.lower_scope(state, [pred], seeds, :cond)
-        {inner_body, state} = Lower.lower_scope(state, leaves(body), seeds, :cond)
+        {pred_body, state} = scope(state, [pred], seeds, :cond, expand)
+        {inner_body, state} = scope(state, leaves(body), seeds, :cond, expand)
         {{pred_body, inner_body}, state}
       end)
 
-    {else_body, state} = Lower.lower_scope(state, leaves(last), seeds, :cond)
+    {else_body, state} = scope(state, leaves(last), seeds, :cond, expand)
 
     instr = %Instruction{
       op: :cond,
@@ -53,10 +124,11 @@ defmodule NxCL.Compiler.Lower.Control do
   end
 
   @doc "Lowers a `while` node."
-  @spec while_node(Lower.state(), Shared.tensor()) :: Lower.state()
+  @spec while_node(Lower.state(), Shared.tensor(), expand()) :: Lower.state()
   def while_node(
         state,
-        %T{data: %Nx.Defn.Expr{id: id, args: [initial, arg, pred, block]}} = node
+        %T{data: %Nx.Defn.Expr{id: id, args: [initial, arg, pred, block]}} = node,
+        expand
       ) do
     initial = leaves(initial)
     arg = leaves(arg)
@@ -67,8 +139,8 @@ defmodule NxCL.Compiler.Lower.Control do
     seeds =
       arg |> Enum.with_index() |> Map.new(fn {p, i} -> {p.data.id, {:carry, i}} end)
 
-    {cond_body, state} = Lower.lower_scope(state, [pred], seeds, :while)
-    {inner_body, state} = Lower.lower_scope(state, body, seeds, :while)
+    {cond_body, state} = scope(state, [pred], seeds, :while, expand)
+    {inner_body, state} = scope(state, body, seeds, :while, expand)
 
     attrs =
       case static_count(initial, arg, pred, body) do

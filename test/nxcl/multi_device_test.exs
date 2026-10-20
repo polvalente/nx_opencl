@@ -13,7 +13,7 @@ defmodule NxCL.MultiDeviceTest do
 
   setup_all do
     other = NxCL.Devices.fetch!(device: {0, 0}).ctx
-    assert other != NxCL.Devices.ctx()
+    assert other != NxCL.Devices.fetch!().ctx
     %{other: other}
   end
 
@@ -39,7 +39,7 @@ defmodule NxCL.MultiDeviceTest do
     end
 
     test "the default stays on device 0" do
-      assert ctx_of(Nx.iota({2}, backend: NxCL.Backend)) == NxCL.Devices.ctx()
+      assert ctx_of(Nx.iota({2}, backend: NxCL.Backend)) == NxCL.Devices.fetch!().ctx
     end
   end
 
